@@ -2,7 +2,7 @@
 //!
 //! WARNING: This application executes autonomous actions on your behalf, including
 //! file system modifications, shell command execution, and internet access.
-//! Review tool calls carefully before granting execution as these operations 
+//! Review tool calls carefully before granting execution as these operations
 //! may impact your local environment or interact with external servers.
 //!
 //! Logic Flow:
@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 
 mod tools;
 
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
@@ -97,8 +97,9 @@ async fn main() -> Result<()> {
             ## 1. Command Execution (bash)\n\
             - Allowed command patterns: [{}]\n\
             - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.\n\n\
-            ## 2. File Editing (str_replace_editor)\n\
-            - Provide 'old_string' exactly as it appears in the file, including all whitespace and indentation.\n\n\
+            ## 2. File Editing (str_replace_editor, write_file)\n\
+            - str_replace_editor: Provide 'old_string' exactly as it appears in the file, including all whitespace and indentation.\n\
+            - write_file: Use this to create new files or overwrite existing files entirely.\n\n\
             ## 3. Information Retrieval (fetch_web)\n\
             - Supports only http/https. Access to private or local networks is strictly prohibited.\n\n\
             ## 4. Response Style\n\
@@ -137,10 +138,12 @@ async fn main() -> Result<()> {
             }
         };
 
-        if input.trim().is_empty() { // Check for empty input after trimming
+        if input.trim().is_empty() {
+            // Check for empty input after trimming
             continue;
         }
-        if input == "exit" || input == "quit" { // Keep the exit/quit command
+        if input == "exit" || input == "quit" {
+            // Keep the exit/quit command
             break;
         }
 
@@ -162,22 +165,15 @@ async fn main() -> Result<()> {
 
         // Inner loop to handle tool execution and sequential LLM reasoning
         loop {
-            let assistant_msg = match call_llm(
-                &llm_url,
-                &model,
-                &messages,
-                truncate_mode,
-                last_sent_count,
-            )
-            .await
-            {
-                Ok(msg) => msg,
-                Err(e) => {
-                    println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
-                    println!("Conversation history preserved. You can try again or rephrase.");
-                    break; // Exit the inner reasoning loop, return to User prompt
-                }
-            };
+            let assistant_msg =
+                match call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count).await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
+                        println!("Conversation history preserved. You can try again or rephrase.");
+                        break; // Exit the inner reasoning loop, return to User prompt
+                    }
+                };
             messages.push(assistant_msg.clone());
             last_sent_count = messages.len();
 
@@ -191,11 +187,8 @@ async fn main() -> Result<()> {
                     };
 
                     // Delegate tool confirmation and execution to the tools module
-                    let tool_result = tools::confirm_and_execute_tool(
-                        &call.function.name,
-                        &args_str,
-                    )
-                    .await;
+                    let tool_result =
+                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await;
 
                     // Extract the result string, handling potential errors
                     let tool_result_str = match tool_result {
@@ -393,16 +386,17 @@ async fn call_llm(
                 // 3. Process Tool Calls
                 if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
                     for call_json in calls {
-                        let index = call_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        
+                        let index =
+                            call_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
                         let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
                         while tool_calls.len() <= index {
                             tool_calls.push(ToolCall {
                                 id: String::new(),
                                 tool_type: "function".to_string(),
-                                function: FunctionCall { 
-                                    name: String::new(), 
-                                    arguments: serde_json::Value::String(String::new()) 
+                                function: FunctionCall {
+                                    name: String::new(),
+                                    arguments: serde_json::Value::String(String::new()),
                                 },
                             });
                         }
@@ -420,7 +414,9 @@ async fn call_llm(
                                     serde_json::Value::String(s) => {
                                         // Stream delta: append to existing string
                                         if let Some(existing) = target.function.arguments.as_str() {
-                                            target.function.arguments = serde_json::Value::String(format!("{}{}", existing, s));
+                                            target.function.arguments = serde_json::Value::String(
+                                                format!("{}{}", existing, s),
+                                            );
                                         }
                                     }
                                     _ => {

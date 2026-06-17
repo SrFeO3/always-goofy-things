@@ -1,11 +1,12 @@
 //! Implementation of executable tool capabilities for the LLM assistant.
 //! Provides bash execution, fuzzy string replacement, and URL fetching.
 //!
-//! WARNING: The following tools perform direct operations on the local system 
-//! and network, such as file modification and command execution. Use only in 
+//! WARNING: The following tools perform direct operations on the local system
+//! and network, such as file modification and command execution. Use only in
 //! a secure environment to prevent unintended data loss or security breaches.
 //!
 //! `read_file`: Read a file's content, optionally within a specific line range.
+//! `write_file`: Create a new file or overwrite an existing one with full content.
 //! `str_replace_editor`: Replace specific text blocks in a file for code modification.
 //! `grep_search`: Search for text patterns across files in the workspace.
 //! `list_directory`: List the contents of a directory to explore the project structure.
@@ -39,11 +40,12 @@ pub const WHITE_LIST: &[&str] = &[
     "^touch",
 ];
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+
 static COMPILED_WHITE_LIST: LazyLock<Vec<Regex>> =
     LazyLock::new(|| WHITE_LIST.iter().map(|&p| Regex::new(p).unwrap()).collect());
 
-static ABSOLUTE_PATH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(^|[\s=])/").unwrap());
+static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=])/").unwrap());
 
 static TRAVERSAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
@@ -54,11 +56,11 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file. Optionally specify a line range to read only part of the file.",
+                "description": "Read the contents of a file. Optionally specify a line range to read only part of the file. Use this tool before editing files or investigating code.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path relative to the workspace root." },
+                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
                         "start_line": { "type": "integer", "description": "Optional starting line number (1-based)." },
                         "end_line": { "type": "integer", "description": "Optional ending line number (inclusive)." }
                     },
@@ -69,13 +71,28 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "str_replace_editor",
-                "description": "Replaces a specific string block within a file. Use this for precise code patching.",
+                "name": "write_file",
+                "description": "Create a new file or completely replace an existing file. The content must represent the entire final file. Do not provide partial edits.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "The path to the target file." },
-                        "old_string": { "type": "string", "description": "The exact string block to be replaced, including whitespace." },
+                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
+                        "content": { "type": "string", "description": "The full content to write to the file." }
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "str_replace_editor",
+                "description": "Edit an existing file by replacing one exact string with another. Prefer this tool over rewriting entire files with write_file. The old_string must match the file contents exactly, including whitespace and newlines.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
+                        "old_string": { "type": "string", "description": "The exact string block to be replaced. Must match the target file content perfectly, including all whitespaces and newlines." },
                         "new_string": { "type": "string", "description": "The new string block to insert." }
                     },
                     "required": ["path", "old_string", "new_string"]
@@ -86,12 +103,12 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "grep_search",
-                "description": "Search for text patterns across files in the workspace. Use this to locate functions, classes, symbols, or error messages. This does NOT search for filenames.",
+                "description": "Search for text patterns across files in the workspace. Use this tool to locate functions, classes, symbols, or error messages before reading or editing files. This does NOT search for filenames.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Text pattern to search for." },
-                        "path": { "type": "string", "description": "Directory path relative to the workspace root." }
+                        "path": { "type": "string", "description": "Directory path relative to the workspace root. If omitted, searches the entire workspace." }
                     },
                     "required": ["query"]
                 }
@@ -101,11 +118,11 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "List files and directories in a given directory.",
+                "description": "List files and directories in a given directory. Use this tool to explore the project structure before reading or editing files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path relative to the workspace root." },
+                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
                         "recursive": { "type": "boolean", "description": "Whether to list subdirectories recursively." }
                     },
                     "required": ["path"]
@@ -130,7 +147,7 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "fetch_web",
-                "description": "Fetches content from a URL and returns it as plain text.",
+                "description": "Fetch the textual content of a web page and return it in an LLM-friendly format. Use this tool to read documentation, API references, articles, and other web resources.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -159,6 +176,25 @@ pub async fn execute_tool(name: &str, args_json: &str) -> Result<String> {
             let start = args["start_line"].as_u64().map(|v| v as usize);
             let end = args["end_line"].as_u64().map(|v| v as usize);
             execute_read_file(path, start, end)
+        }
+        "write_file" => {
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("path missing"))?;
+            let content = args["content"]
+                .as_str()
+                .ok_or_else(|| anyhow!("content missing"))?;
+
+            if let Err(e) = validate_path(path) {
+                return Ok(json!({
+                    "success": false,
+                    "path": path,
+                    "error_code": "OUTSIDE_WORKSPACE",
+                    "error": e.to_string()
+                })
+                .to_string());
+            }
+            Ok(execute_write_file(path, content))
         }
         "str_replace_editor" => {
             let path = args["path"]
@@ -282,7 +318,74 @@ fn execute_read_file(
     .to_string())
 }
 
+fn execute_write_file(path: &str, content: &str) -> String {
+    if content.len() as u64 > MAX_FILE_SIZE {
+        return json!({
+            "success": false,
+            "path": path,
+            "error_code": "FILE_TOO_LARGE",
+            "error": "File content exceeds 10MB limit"
+        })
+        .to_string();
+    }
+
+    match atomic_write_with_dir(path, content) {
+        Ok(bytes) => json!({
+            "success": true,
+            "path": path,
+            "bytes_written": bytes
+        })
+        .to_string(),
+        Err(e) => json!({
+            "success": false,
+            "path": path,
+            "error_code": "WRITE_FAILED",
+            "error": e.to_string()
+        })
+        .to_string(),
+    }
+}
+
+fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = format!(
+        "{}.tmp.{}",
+        path,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    if let Err(e) = fs::write(&tmp_path, content) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+
+    Ok(content.len())
+}
+
 fn execute_str_replace(path: &str, old_str: &str, new_str: &str) -> String {
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return json!({ "success": false, "path": path, "error": e.to_string(), "error_code": "READ_FAILED" }).to_string(),
+    };
+
+    if metadata.len() > MAX_FILE_SIZE {
+        return json!({ "success": false, "path": path, "error_code": "FILE_TOO_LARGE", "error": "File exceeds 10MB limit" }).to_string();
+    }
+
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -293,10 +396,10 @@ fn execute_str_replace(path: &str, old_str: &str, new_str: &str) -> String {
     // Try exact match first
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
-        if let Err(e) = fs::write(path, new_content) {
-            return json!({ "success": false, "path": path, "error": e.to_string() }).to_string();
+        match atomic_write_with_dir(path, &new_content) {
+            Ok(_) => return json!({ "success": true, "path": path, "occurrences_replaced": 1 }).to_string(),
+            Err(e) => return json!({ "success": false, "path": path, "error": e.to_string(), "error_code": "WRITE_FAILED" }).to_string(),
         }
-        return json!({ "success": true, "path": path, "occurrences_replaced": 1 }).to_string();
     }
 
     // Fallback to fuzzy match by normalizing whitespace
@@ -563,6 +666,24 @@ mod tests {
     }
 
     #[test]
+    fn test_write_file() {
+        let path = get_temp_path("write");
+        let path_str = path.to_str().unwrap();
+        let content = "test content for write_file";
+
+        let res = execute_write_file(path_str, content);
+        let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+        assert_eq!(val["path"], path_str);
+        assert_eq!(val["success"], true);
+        assert_eq!(val["bytes_written"], content.len() as u64);
+
+        let actual_content = fs::read_to_string(path_str).unwrap();
+        assert_eq!(actual_content, content);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn test_str_replace_exact_and_fuzzy() {
         let path = get_temp_path("replace");
         fs::write(&path, "fn main() {\n    println!( \"hello\" );\n}").unwrap();
@@ -592,7 +713,7 @@ mod tests {
     #[test]
     fn test_list_directory() {
         // Test directory listing for the project root
-        let res = execute_list_directory(".").unwrap();
+        let res = execute_list_directory(".", false).unwrap();
         assert!(res.contains("src"));
         assert!(res.contains("Cargo.toml") || res.contains("Cargo.lock"));
     }
@@ -605,15 +726,15 @@ mod tests {
         assert!(res.contains("\"line\":"));
     }
 
-    #[test]
-    fn test_execute_bash_security() {
+    #[tokio::test]
+    async fn test_execute_bash_security() {
         // Test an allowed command from the whitelist
-        let res = execute_bash("echo 'test execution'").unwrap();
+        let res = execute_bash("echo 'test execution'").await.unwrap();
         assert!(res.contains("test execution"));
         assert!(res.contains("\"exit_code\":0"));
 
         // Test a command blocked by the security whitelist
-        let res = execute_bash("rm -rf /tmp/some_non_existent_file");
+        let res = execute_bash("rm -rf /tmp/some_non_existent_file").await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Security rejection"));
     }
