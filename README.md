@@ -46,7 +46,7 @@ TRUNCATE_MODE=1 \
 cargo run
 ```
 
-## Example Prompts
+## Example User Queries
 
 - "Who are you and what tools can you use?"
 - "Create a 'Hello World' Python script named `test.py`."
