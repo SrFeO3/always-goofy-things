@@ -36,6 +36,7 @@ pub const WHITE_LIST: &[&str] = &[
     "^cargo check",
     "^cargo test",
     "^find",
+    "^touch",
 ];
 
 static COMPILED_WHITE_LIST: LazyLock<Vec<Regex>> =

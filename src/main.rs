@@ -91,8 +91,9 @@ async fn main() -> Result<()> {
         content: format!(
             "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
             ## 0. Workspace Context\n\
-            - Your current working directory is: {}\n\
-            - You MUST NOT attempt to access or modify files outside of this directory.\n\n\
+            - Current Working Directory: Your root is ./ (the current directory).\n\
+            - Relative Paths Only: You MUST use relative paths (e.g., file.txt, ./src/) for all operations.\n\
+            - Prohibitions: NEVER use absolute paths starting with /. NEVER use ../ to escape the directory.\n\n\
             ## 1. Command Execution (bash)\n\
             - Allowed command patterns: [{}]\n\
             - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.\n\n\
@@ -103,7 +104,6 @@ async fn main() -> Result<()> {
             ## 4. Response Style\n\
             - Briefly explain the purpose of a tool before calling it.\n\
             - Maintain system rules at the top of the context for inference efficiency.",
-            current_dir,
             tools::WHITE_LIST.join(", ")
         ),
         reasoning_content: None,
