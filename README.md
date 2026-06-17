@@ -52,3 +52,4 @@ cargo run
 - "Create a 'Hello World' Python script named `test.py`."
 - "Locate the Python script in the workspace and translate its messages to Japanese."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
+- "Understand https://docs.rs/hyper/latest/hyper/ and create a minimal HTTP server named server.rs."
