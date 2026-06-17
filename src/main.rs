@@ -14,7 +14,8 @@
 //! 3. [Final Answer] : Present the completed outcome to the user.
 
 use std::env;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write; // Keep Write for flushing stdout for other prints
 
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
@@ -22,6 +23,8 @@ use serde::{Deserialize, Serialize};
 
 mod tools;
 
+use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, Result as RLResult};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
@@ -82,6 +85,8 @@ async fn main() -> Result<()> {
     println!("TRUNCATE_MODE: {}", truncate_mode);
     let mut last_sent_count = 0;
 
+    let mut rl = DefaultEditor::new()?;
+
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
         content: Some(format!(
@@ -109,22 +114,34 @@ async fn main() -> Result<()> {
 
     // Main conversation loop
     loop {
-        print!("\nUser (Double Enter to send) > ");
-        io::stdout().flush()?;
+        let readline = rl.readline("\nUser > ");
 
-        let mut input_block = String::new();
-        loop {
-            let mut line = String::new();
-            if io::stdin().read_line(&mut line)? == 0 { break; } // EOF
-            if line.trim().is_empty() { break; } // Empty line finishes the block
-            input_block.push_str(&line);
-        }
+        let input = match readline {
+            Ok(line) => {
+                // Add to history
+                rl.add_history_entry(line.as_str())?;
+                line
+            }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C, exit
+                println!("Ctrl-C received. Exiting.");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl+D on an empty line, exit
+                println!("Ctrl-D received. Exiting.");
+                break;
+            }
+            Err(err) => {
+                println!("Error reading line: {:?}", err);
+                break;
+            }
+        };
 
-        let input = input_block.trim();
-        if input.is_empty() {
+        if input.trim().is_empty() { // Check for empty input after trimming
             continue;
         }
-        if input == "exit" || input == "quit" {
+        if input == "exit" || input == "quit" { // Keep the exit/quit command
             break;
         }
 
