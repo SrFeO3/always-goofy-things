@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            bin_name: always-goofy-things
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bin_name: always-goofy-things
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_name: always-goofy-things.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            zip "../../../${{ matrix.bin_name }}-${{ matrix.target }}.zip" "${{ matrix.bin_name }}"
+          else
+            tar czf "../../../${{ matrix.bin_name }}-${{ matrix.target }}.tar.gz" "${{ matrix.bin_name }}"
+          fi
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_version.outputs.VERSION }}
+          name: Release v${{ steps.get_version.outputs.VERSION }}
+          files: always-goofy-things-*
+          generate_release_notes: true

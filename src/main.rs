@@ -46,7 +46,7 @@ struct ToolCall {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FunctionCall {
     name: String,
-    arguments: String,
+    arguments: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -131,10 +131,17 @@ async fn main() -> Result<()> {
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
+                    // Handle arguments that might be a JSON object (Ollama) or a stringified JSON (OpenAI)
+                    let args_str = if let Some(s) = call.function.arguments.as_str() {
+                        s.to_string()
+                    } else {
+                        call.function.arguments.to_string()
+                    };
+
                     // Delegate tool confirmation and execution to the tools module
                     let tool_result = tools::confirm_and_execute_tool(
                         &call.function.name,
-                        &call.function.arguments,
+                        &args_str,
                     )
                     .await;
 
@@ -331,12 +338,45 @@ async fn call_llm(
 
                 // 3. Process Tool Calls
                 if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
-                    let tool_calls: Vec<ToolCall> =
-                        serde_json::from_value(serde_json::Value::Array(calls.clone()))?;
-                    if full_message.tool_calls.is_none() {
-                        full_message.tool_calls = Some(Vec::new());
+                    for call_json in calls {
+                        let index = call_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        
+                        let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
+                        while tool_calls.len() <= index {
+                            tool_calls.push(ToolCall {
+                                id: String::new(),
+                                tool_type: "function".to_string(),
+                                function: FunctionCall { 
+                                    name: String::new(), 
+                                    arguments: serde_json::Value::String(String::new()) 
+                                },
+                            });
+                        }
+
+                        let target = &mut tool_calls[index];
+                        if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
+                            target.id.push_str(id);
+                        }
+                        if let Some(func) = call_json.get("function") {
+                            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                target.function.name.push_str(name);
+                            }
+                            if let Some(args) = func.get("arguments") {
+                                match args {
+                                    serde_json::Value::String(s) => {
+                                        // Stream delta: append to existing string
+                                        if let Some(existing) = target.function.arguments.as_str() {
+                                            target.function.arguments = serde_json::Value::String(format!("{}{}", existing, s));
+                                        }
+                                    }
+                                    _ => {
+                                        // Full object: replace (common in some local providers)
+                                        target.function.arguments = args.clone();
+                                    }
+                                }
+                            }
+                        }
                     }
-                    full_message.tool_calls.as_mut().unwrap().extend(tool_calls);
                 }
             }
         }
