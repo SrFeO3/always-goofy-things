@@ -24,7 +24,7 @@ A lightweight, experimental agentic CLI application for AI-assisted software dev
 | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `LLM_API_KEY` | (Optional) API key for authentication. | (None) |
-| `TRUNCATE_MODE` | UI mode for API request truncation (0-3). | `0` |
+| `TRUNCATE_MODE` | UI mode for API request truncation (0-3). | `2` |
 
 ### Truncation Modes (`TRUNCATE_MODE`)
 - `0`: Full request display (Verbose).

@@ -63,9 +63,9 @@ async fn main() -> Result<()> {
         env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string());
     let model = env::var("LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".to_string());
     let truncate_mode = env::var("TRUNCATE_MODE")
-        .unwrap_or_else(|_| "0".to_string())
+        .unwrap_or_else(|_| "2".to_string())
         .parse::<u8>()
-        .unwrap_or(0);
+        .unwrap_or(2);
     let api_key_status = if env::var("LLM_API_KEY").is_ok() {
         "SET"
     } else {

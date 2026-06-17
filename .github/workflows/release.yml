@@ -22,7 +22,7 @@ jobs:
             bin_name: always-goofy-things
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            bin_name: always-goofy-things.exe
+            bin_name: always-goofy-things
 
     steps:
       - name: Checkout
@@ -48,7 +48,7 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "../../../${{ matrix.bin_name }}-${{ matrix.target }}.zip" "${{ matrix.bin_name }}"
+            7z a "../../../${{ matrix.bin_name }}-${{ matrix.target }}.zip" "${{ matrix.bin_name }}.exe"
           else
             tar czf "../../../${{ matrix.bin_name }}-${{ matrix.target }}.tar.gz" "${{ matrix.bin_name }}"
           fi
