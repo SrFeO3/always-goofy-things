@@ -25,6 +25,7 @@ mod tools;
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
@@ -65,26 +66,19 @@ async fn main() -> Result<()> {
     let llm_url =
         env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string());
     let model = env::var("LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".to_string());
-    let truncate_mode = env::var("TRUNCATE_MODE")
-        .unwrap_or_else(|_| "2".to_string())
-        .parse::<u8>()
-        .unwrap_or(2);
-    let current_dir = env::current_dir()?.to_string_lossy().to_string();
-    let api_key_status = if env::var("LLM_API_KEY").is_ok() {
-        "SET"
-    } else {
-        "NOT SET"
-    };
+    let truncate_mode = env::var("TRUNCATE_MODE").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let current_dir = env::current_dir()?;
+    let api_key_status = env::var("LLM_API_KEY").map_or("NOT SET", |_| "SET");
 
     println!("--- [AGT STARTED] ---");
-    println!("WORKING_DIR:   {}", current_dir);
+    println!("WORKING_DIR:   {}", current_dir.display());
     println!("LLM_URL:       {}", llm_url);
     println!("LLM_MODEL:     {}", model);
     println!("LLM_API_KEY:   {}", api_key_status);
     println!("TRUNCATE_MODE: {}", truncate_mode);
     let mut last_sent_count = 0;
 
-    let mut rl = DefaultEditor::new()?;
+    let mut query_reader = DefaultEditor::new()?;
 
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
@@ -105,7 +99,7 @@ async fn main() -> Result<()> {
             ## 4. Response Style\n\
             - Briefly explain the purpose of a tool before calling it.\n\
             - Maintain system rules at the top of the context for inference efficiency.",
-            tools::WHITE_LIST.join(", ")
+            tools::COMMAND_ALLOW_LIST.join(", ")
         ),
         reasoning_content: None,
         tool_calls: None,
@@ -114,12 +108,12 @@ async fn main() -> Result<()> {
 
     // Main conversation loop
     loop {
-        let readline = rl.readline("\nUser > ");
+        let readline = query_reader.readline("\nUser > ");
 
         let input = match readline {
             Ok(line) => {
                 // Add to history
-                rl.add_history_entry(line.as_str())?;
+                query_reader.add_history_entry(line.as_str())?;
                 line
             }
             Err(ReadlineError::Interrupted) => {

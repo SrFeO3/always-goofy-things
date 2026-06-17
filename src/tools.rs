@@ -5,6 +5,7 @@
 //! and network, such as file modification and command execution. Use only in
 //! a secure environment to prevent unintended data loss or security breaches.
 //!
+//! Available Tools:
 //! `read_file`: Read a file's content, optionally within a specific line range.
 //! `write_file`: Create a new file or overwrite an existing one with full content.
 //! `str_replace_editor`: Replace specific text blocks in a file for code modification.
@@ -23,7 +24,7 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
-pub const WHITE_LIST: &[&str] = &[
+pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^ls",
     "^cat",
     "^pwd",
@@ -42,12 +43,12 @@ pub const WHITE_LIST: &[&str] = &[
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
-static COMPILED_WHITE_LIST: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| WHITE_LIST.iter().map(|&p| Regex::new(p).unwrap()).collect());
+static COMMAND_ALLOW_LIST_RE: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| COMMAND_ALLOW_LIST.iter().map(|&p| Regex::new(p).unwrap()).collect());
 
 static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=])/").unwrap());
 
-static TRAVERSAL_RE: LazyLock<Regex> =
+static PATH_TRAVERSAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
 
 pub fn get_tool_definitions() -> Vec<serde_json::Value> {
@@ -482,14 +483,14 @@ async fn execute_bash(command: &str) -> Result<String> {
     let cmd_trim = command.trim();
 
     // Whitelist verification using pre-compiled regexes
-    let is_allowed = COMPILED_WHITE_LIST.iter().any(|re| re.is_match(cmd_trim));
+    let is_allowed = COMMAND_ALLOW_LIST_RE.iter().any(|re| re.is_match(cmd_trim));
 
     if !is_allowed {
         return Err(anyhow!("Command not in whitelist. Security rejection."));
     }
 
     // Robust check for absolute paths and directory traversal
-    if ABSOLUTE_PATH_RE.is_match(cmd_trim) || TRAVERSAL_RE.is_match(cmd_trim) {
+    if ABSOLUTE_PATH_RE.is_match(cmd_trim) || PATH_TRAVERSAL_RE.is_match(cmd_trim) {
         return Err(anyhow!(
             "Security violation: Absolute paths or directory traversal detected."
         ));
