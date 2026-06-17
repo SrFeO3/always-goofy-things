@@ -203,8 +203,8 @@ fn validate_path(path: &str) -> Result<()> {
 /// This function encapsulates the user interaction for tool execution approval.
 pub async fn confirm_and_execute_tool(name: &str, args_json: &str) -> Result<String> {
     println!("--- [TOOL EXECUTION REQUESTED] ---");
-    println!("Tool: {}", name);
-    println!("Args: {}", args_json);
+    println!("Tool: \x1b[93m{}\x1b[0m", name);
+    println!("Args: \x1b[93m{}\x1b[0m", args_json);
 
     // Ask for user confirmation before execution
     print!("Execute this tool? (y/N): ");

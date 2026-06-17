@@ -25,6 +25,7 @@ mod tools;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
@@ -259,7 +260,12 @@ async fn call_llm(
             .text()
             .await
             .unwrap_or_else(|_| "Could not read body".to_string());
-        return Err(anyhow!("API Error ({}): {}", status, body));
+        return Err(anyhow!(
+            "API Error ({})\nResponse: {}\nRequest Payload: {}",
+            status,
+            body,
+            req_json
+        ));
     }
 
     let mut full_message = Message {
