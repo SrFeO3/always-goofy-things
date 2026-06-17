@@ -108,11 +108,18 @@ async fn main() -> Result<()> {
 
     // Main conversation loop
     loop {
-        print!("\nUser > ");
+        print!("\nUser (Double Enter to send) > ");
         io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
+
+        let mut input_block = String::new();
+        loop {
+            let mut line = String::new();
+            if io::stdin().read_line(&mut line)? == 0 { break; } // EOF
+            if line.trim().is_empty() { break; } // Empty line finishes the block
+            input_block.push_str(&line);
+        }
+
+        let input = input_block.trim();
         if input.is_empty() {
             continue;
         }
@@ -132,8 +139,8 @@ async fn main() -> Result<()> {
         loop {
             let assistant_msg =
                 call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count).await?;
-            last_sent_count = messages.len() + 1; // current messages + this assistant response (simplified)
             messages.push(assistant_msg.clone());
+            last_sent_count = messages.len();
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
