@@ -24,12 +24,11 @@ use serde::{Deserialize, Serialize};
 mod tools;
 
 use rustyline::error::ReadlineError;
-use rustyline::{DefaultEditor, Result as RLResult};
+use rustyline::DefaultEditor;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,7 +88,7 @@ async fn main() -> Result<()> {
 
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
-        content: Some(format!(
+        content: format!(
             "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
             ## 0. Workspace Context\n\
             - Your current working directory is: {}\n\
@@ -106,7 +105,7 @@ async fn main() -> Result<()> {
             - Maintain system rules at the top of the context for inference efficiency.",
             current_dir,
             tools::WHITE_LIST.join(", ")
-        )),
+        ),
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
@@ -145,18 +144,40 @@ async fn main() -> Result<()> {
             break;
         }
 
-        messages.push(Message {
-            role: "user".to_string(),
-            content: Some(input.to_string()),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        // If the last message was from the user, it means the previous LLM call failed.
+        // We update the existing message instead of pushing a new one to avoid consecutive user roles.
+        if messages.last().map(|m| m.role.as_str()) == Some("user") {
+            if let Some(m) = messages.last_mut() {
+                m.content = input.to_string();
+            }
+        } else {
+            messages.push(Message {
+                role: "user".to_string(),
+                content: input.to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
         loop {
-            let assistant_msg =
-                call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count).await?;
+            let assistant_msg = match call_llm(
+                &llm_url,
+                &model,
+                &messages,
+                truncate_mode,
+                last_sent_count,
+            )
+            .await
+            {
+                Ok(msg) => msg,
+                Err(e) => {
+                    println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
+                    println!("Conversation history preserved. You can try again or rephrase.");
+                    break; // Exit the inner reasoning loop, return to User prompt
+                }
+            };
             messages.push(assistant_msg.clone());
             last_sent_count = messages.len();
 
@@ -186,7 +207,7 @@ async fn main() -> Result<()> {
 
                     messages.push(Message {
                         role: "tool".to_string(),
-                        content: Some(tool_result_str),
+                        content: tool_result_str,
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: Some(call.id),
@@ -287,7 +308,7 @@ async fn call_llm(
 
     let mut full_message = Message {
         role: "assistant".to_string(),
-        content: None,
+        content: String::new(),
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
@@ -366,10 +387,7 @@ async fn call_llm(
                     print!("{}", content);
                     io::stdout().flush()?;
 
-                    full_message
-                        .content
-                        .get_or_insert_with(String::new)
-                        .push_str(content);
+                    full_message.content.push_str(content);
                 }
 
                 // 3. Process Tool Calls
@@ -433,7 +451,7 @@ async fn call_llm(
     if !has_started_content {
         if full_message.tool_calls.is_some() {
             println!("Assistant > [Tool Call]");
-        } else if full_message.content.is_none() {
+        } else if full_message.content.is_empty() {
             println!();
         }
     } else {

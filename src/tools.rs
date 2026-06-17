@@ -14,6 +14,7 @@
 
 use std::fs;
 use std::io::{self, Write};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -36,6 +37,15 @@ pub const WHITE_LIST: &[&str] = &[
     "^cargo test",
     "^find",
 ];
+
+static COMPILED_WHITE_LIST: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| WHITE_LIST.iter().map(|&p| Regex::new(p).unwrap()).collect());
+
+static ABSOLUTE_PATH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|[\s=])/").unwrap());
+
+static TRAVERSAL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
 
 pub fn get_tool_definitions() -> Vec<serde_json::Value> {
     vec![
@@ -190,11 +200,25 @@ pub async fn execute_tool(name: &str, args_json: &str) -> Result<String> {
 }
 
 fn validate_path(path: &str) -> Result<()> {
-    let p = std::path::Path::new(path);
-    if p.is_absolute() || path.contains("..") {
-        return Err(anyhow!(
-            "Security violation: Path must be relative and stay within workspace."
-        ));
+    let mut depth: i32 = 0;
+    for component in std::path::Path::new(path).components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(anyhow!("Security violation: Absolute paths are forbidden."));
+            }
+            std::path::Component::ParentDir => {
+                depth -= 1;
+            }
+            std::path::Component::Normal(_) => {
+                depth += 1;
+            }
+            std::path::Component::CurDir => {}
+        }
+        if depth < 0 {
+            return Err(anyhow!(
+                "Security violation: Directory traversal outside workspace is forbidden."
+            ));
+        }
     }
     Ok(())
 }
@@ -353,20 +377,18 @@ fn execute_grep_search(query: &str, path: Option<&str>) -> Result<String> {
 async fn execute_bash(command: &str) -> Result<String> {
     let cmd_trim = command.trim();
 
-    // Whitelist verification
-    let is_allowed = WHITE_LIST.iter().any(|&pattern| {
-        Regex::new(pattern)
-            .map(|re| re.is_match(cmd_trim))
-            .unwrap_or(false)
-    });
+    // Whitelist verification using pre-compiled regexes
+    let is_allowed = COMPILED_WHITE_LIST.iter().any(|re| re.is_match(cmd_trim));
 
     if !is_allowed {
         return Err(anyhow!("Command not in whitelist. Security rejection."));
     }
 
-    // Prevent path traversal or absolute path access in commands
-    if cmd_trim.contains("..") || cmd_trim.contains(" /") || cmd_trim.starts_with('/') {
-        return Err(anyhow!("Security violation: Commands must not use absolute paths or directory traversal."));
+    // Robust check for absolute paths and directory traversal
+    if ABSOLUTE_PATH_RE.is_match(cmd_trim) || TRAVERSAL_RE.is_match(cmd_trim) {
+        return Err(anyhow!(
+            "Security violation: Absolute paths or directory traversal detected."
+        ));
     }
 
     // Basic check for interactive commands
