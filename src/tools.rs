@@ -32,6 +32,7 @@ pub const WHITE_LIST: &[&str] = &[
     "^pytest",
     "^npm test",
     "^cargo build",
+    "^cargo check",
     "^cargo test",
     "^find",
 ];
