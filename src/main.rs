@@ -1,0 +1,368 @@
+//! Main entry point for the CLI.
+//!
+//! WARNING: This application executes autonomous actions on your behalf, including
+//! file system modifications, shell command execution, and internet access.
+//! Review tool calls carefully before granting execution as these operations 
+//! may impact your local environment or interact with external servers.
+//!
+//! Logic Flow:
+//! 1. [User Input]   : Capture query from the terminal.
+//! 2. [Reason Loop]  : Recursive cycle for complex tasks.
+//!    - LLM Call     : Process context and decide next action.
+//!    - Tool Exec    : If requested, run local tool and get result.
+//!    - Feedback     : Add result back to history and repeat.
+//! 3. [Final Answer] : Present the completed outcome to the user.
+
+use std::env;
+use std::io::{self, Write};
+
+use anyhow::{Result, anyhow};
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+
+mod tools;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Message {
+    role: String,
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ToolCall {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub tool_type: String,
+    function: FunctionCall,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct FunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ChatRequest {
+    model: String,
+    tools: Vec<serde_json::Value>,
+    stream: bool,
+    messages: Vec<Message>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let llm_url =
+        env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string());
+    let model = env::var("LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".to_string());
+    let truncate_mode = env::var("TRUNCATE_MODE")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse::<u8>()
+        .unwrap_or(0);
+    let api_key_status = if env::var("LLM_API_KEY").is_ok() {
+        "SET"
+    } else {
+        "NOT SET"
+    };
+
+    println!("--- [AGT STARTED] ---");
+    println!("LLM_URL:       {}", llm_url);
+    println!("LLM_MODEL:     {}", model);
+    println!("LLM_API_KEY:   {}", api_key_status);
+    println!("TRUNCATE_MODE: {}", truncate_mode);
+    let mut last_sent_count = 0;
+
+    let mut messages = vec![Message {
+        role: "system".to_string(), // Set the initial system instructions
+        content: Some(format!(
+            "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
+            ## 1. Command Execution (bash)\n\
+            - Allowed command patterns: [{}]\n\
+            - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.\n\n\
+            ## 2. File Editing (str_replace_editor)\n\
+            - Provide 'old_string' exactly as it appears in the file, including all whitespace and indentation.\n\n\
+            ## 3. Information Retrieval (fetch_web)\n\
+            - Supports only http/https. Access to private or local networks is strictly prohibited.\n\n\
+            ## 4. Response Style\n\
+            - Briefly explain the purpose of a tool before calling it.\n\
+            - Maintain system rules at the top of the context for inference efficiency.",
+            tools::WHITE_LIST.join(", ")
+        )),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+
+    // Main conversation loop
+    loop {
+        print!("\nUser > ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input == "exit" || input == "quit" {
+            break;
+        }
+
+        messages.push(Message {
+            role: "user".to_string(),
+            content: Some(input.to_string()),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        // Inner loop to handle tool execution and sequential LLM reasoning
+        loop {
+            let assistant_msg =
+                call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count).await?;
+            last_sent_count = messages.len() + 1; // current messages + this assistant response (simplified)
+            messages.push(assistant_msg.clone());
+
+            if let Some(tool_calls) = assistant_msg.tool_calls {
+                for call in tool_calls {
+                    // Delegate tool confirmation and execution to the tools module
+                    let tool_result = tools::confirm_and_execute_tool(
+                        &call.function.name,
+                        &call.function.arguments,
+                    )
+                    .await;
+
+                    // Extract the result string, handling potential errors
+                    let tool_result_str = match tool_result {
+                        Ok(res) => res,
+                        Err(e) => format!("Error: {}", e),
+                    };
+
+                    println!("Result: {}", tool_result_str);
+
+                    messages.push(Message {
+                        role: "tool".to_string(),
+                        content: Some(tool_result_str),
+                        reasoning_content: None,
+                        tool_calls: None,
+                        tool_call_id: Some(call.id),
+                    });
+                }
+                // Re-query LLM with tool execution results
+                continue;
+            }
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn call_llm(
+    url: &str,
+    model: &str,
+    messages: &[Message],
+    truncate_mode: u8,
+    last_msg_count: usize,
+) -> Result<Message> {
+    let client = reqwest::Client::new();
+    let tools = tools::get_tool_definitions();
+    let messages_vec = messages.to_vec();
+
+    let req = ChatRequest {
+        model: model.to_string(),
+        messages: messages_vec,
+        stream: true,
+        tools,
+    };
+
+    let req_json = serde_json::to_string(&req)?;
+
+    // Debug output based on truncate_mode
+    match truncate_mode {
+        0 => println!(
+            "\x1b[90m--- [API REQUEST: {}] ---\n{}\x1b[0m",
+            url, req_json
+        ),
+        1 => {
+            if last_msg_count > 0 && last_msg_count < req.messages.len() {
+                let mut truncated_req = req.clone();
+                truncated_req.messages = truncated_req.messages[last_msg_count..].to_vec();
+                let trunc_json = serde_json::to_string(&truncated_req)?;
+                println!(
+                    "\x1b[90m--- [API REQUEST: {} (Mode 1: Incremental)] ---\x1b[0m",
+                    url
+                );
+                println!(
+                    "\x1b[92;2;3m... [{} messages omitted] ...\x1b[0m\n\x1b[90m{}\x1b[0m",
+                    last_msg_count, trunc_json
+                );
+            } else {
+                println!(
+                    "\x1b[90m--- [API REQUEST: {}] ---\n{}\x1b[0m",
+                    url, req_json
+                );
+            }
+        }
+        2 => {
+            println!(
+                "\x1b[90m--- [API REQUEST: {}] (Content-Length: {}) ---\x1b[0m",
+                url,
+                req_json.len()
+            );
+        }
+        _ => {} // Mode 3 or others: Silent
+    }
+
+    println!("... Waiting for response from {} ...", model);
+
+    let mut request_builder = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "agt-client/0.1.0")
+        .json(&req);
+
+    if let Ok(api_key) = env::var("LLM_API_KEY") {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let res = request_builder.send().await?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res
+            .text()
+            .await
+            .unwrap_or_else(|_| "Could not read body".to_string());
+        return Err(anyhow!("API Error ({}): {}", status, body));
+    }
+
+    let mut full_message = Message {
+        role: "assistant".to_string(),
+        content: None,
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+    };
+
+    let stream = res.bytes_stream();
+    tokio::pin!(stream);
+    let mut is_thinking = false;
+    let mut has_started_content = false;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        let text = std::str::from_utf8(&chunk)?;
+
+        // Ollama/OpenAI stream can send multiple JSON objects in one chunk separated by newlines
+        for line in text.lines() {
+            let mut line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Handle OpenAI-compatible SSE prefix
+            if line.starts_with("data: ") {
+                line = &line[6..];
+            }
+            if line == "[DONE]" {
+                break;
+            }
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
+                let msg_base = if let Some(message) = json.get("message") {
+                    message // Ollama native
+                } else if let Some(choices) = json.get("choices") {
+                    choices
+                        .get(0)
+                        .and_then(|c| c.get("delta"))
+                        .unwrap_or(&serde_json::Value::Null) // OpenAI delta
+                } else {
+                    &serde_json::Value::Null
+                };
+
+                // 1. Process Reasoning (Thinking) - Supports both 'reasoning_content' and 'reasoning'
+                let reasoning_val = msg_base
+                    .get("reasoning_content")
+                    .or_else(|| msg_base.get("reasoning"));
+
+                if let Some(reasoning) = reasoning_val.and_then(|v| v.as_str()) {
+                    if !is_thinking {
+                        print!("\n\x1b[92;2;3m[Thinking]\n");
+                        is_thinking = true;
+                    }
+                    print!("{}", reasoning);
+                    io::stdout().flush()?;
+                    full_message
+                        .reasoning_content
+                        .get_or_insert_with(String::new)
+                        .push_str(reasoning);
+                }
+
+                // 2. Process Content
+                if let Some(content) = msg_base
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    if is_thinking {
+                        println!("\x1b[0m\n"); // End italics/gray and add space
+                        is_thinking = false;
+                    }
+                    if !has_started_content {
+                        print!("Assistant > ");
+                        io::stdout().flush()?;
+                        has_started_content = true;
+                    }
+                    print!("{}", content);
+                    io::stdout().flush()?;
+
+                    full_message
+                        .content
+                        .get_or_insert_with(String::new)
+                        .push_str(content);
+                }
+
+                // 3. Process Tool Calls
+                if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
+                    let tool_calls: Vec<ToolCall> =
+                        serde_json::from_value(serde_json::Value::Array(calls.clone()))?;
+                    if full_message.tool_calls.is_none() {
+                        full_message.tool_calls = Some(Vec::new());
+                    }
+                    full_message.tool_calls.as_mut().unwrap().extend(tool_calls);
+                }
+            }
+        }
+    }
+
+    // If no reasoning was provided by the end of the stream, notify the user
+    if full_message.reasoning_content.is_none() {
+        println!(
+            "\x1b[90m(Reasoning content not supported or not provided by model: {})\x1b[0m",
+            model
+        );
+    }
+
+    if is_thinking {
+        println!("\x1b[0m");
+    }
+
+    if !has_started_content {
+        if full_message.tool_calls.is_some() {
+            println!("Assistant > [Tool Call]");
+        } else if full_message.content.is_none() {
+            println!();
+        }
+    } else {
+        println!();
+    }
+
+    Ok(full_message)
+}
