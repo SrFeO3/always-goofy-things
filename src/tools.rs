@@ -189,7 +189,8 @@ pub async fn execute_tool(name: &str, args_json: &str) -> Result<String> {
 }
 
 fn validate_path(path: &str) -> Result<()> {
-    if path.contains("..") || path.starts_with('/') {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() || path.contains("..") {
         return Err(anyhow!(
             "Security violation: Path must be relative and stay within workspace."
         ));
@@ -360,6 +361,11 @@ async fn execute_bash(command: &str) -> Result<String> {
 
     if !is_allowed {
         return Err(anyhow!("Command not in whitelist. Security rejection."));
+    }
+
+    // Prevent path traversal or absolute path access in commands
+    if cmd_trim.contains("..") || cmd_trim.contains(" /") || cmd_trim.starts_with('/') {
+        return Err(anyhow!("Security violation: Commands must not use absolute paths or directory traversal."));
     }
 
     // Basic check for interactive commands
