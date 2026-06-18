@@ -1,22 +1,22 @@
 # Always-Goofy-Things
 
-A lightweight, experimental agentic CLI application for AI-assisted software development. It interacts with LLMs to reason about tasks, execute system tools safely with user confirmation, and provide streaming responses with visible "thinking" processes.
+To demonstrate the core mechanics of iterative LLM function-calling, this lightweight, experimental CLI application showcases the workflow in the context of AI-assisted software development. It interacts with LLMs to reason about tasks, execute system tools safely with user confirmation, and provide streaming responses with visible "thinking" processes.
 
 > [!CAUTION]
-> **Experimental Implementation**: This is a demo-level prototype. 
-> **Security Risk**: Local shell execution (bash) can lead to catastrophic system damage or security breaches if the AI generates malicious commands. 
-> **Billing Alert**: Automated agent loops can rapidly consume tokens, leading to unexpected API costs. Use with extreme caution.
+> **Experimental Implementation**: Prototype for demonstration purposes. AI unpredictability and application bugs may cause unexpected behavior.
+> **Security Risk**: Local shell execution and network accessibility are enabled. Flawed AI commands or software failure can cause system damage, data loss, or unauthorized data exfiltration.
+> **Billing Alert**: AI reasoning loops, oversized contexts, or software control failures can rapidly spike API costs. Monitor usage closely.
 
 ## Features
-- **Tool-Augmented Iteration**: Automatically calls tools for file I/O, searching, bash execution, and web fetching.
-- **Safety First**: Experimental allow list verification and explicit user approval (`y/N`).
-- **Streaming Thinking**: Displays the model's reasoning process in a subtle reddish tint.
+- **Tool-Augmented Iteration**: Automatically calls tools for file I/O, search, bash execution, and web fetching.
+- **Safety Guards**: Includes experimental allowlist verification and explicit user approval (y/N).
+- **Streaming "Thinking"**: Displays the model's reasoning process in a subtle reddish tint.
 - **Open Standards**: Supports Ollama and OpenAI-compatible APIs.
 
 ## Requirements
 - **Rust**: Latest stable version (Cargo).
 - **Backend**: Ollama or any OpenAI-compatible API.
-- **Tools**: `bash`, `grep`, and `network access` for web fetching.
+- **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
 
 ## Environment Variables
 | Variable | Description | Default |
@@ -55,4 +55,4 @@ cargo run
 - "Find the Python script in the workspace and translate its output messages into Japanese."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
 - "Analyze the hyper documentation (https://docs.rs/hyper/latest/hyper/) and create a minimal HTTP server project in Rust."
-- "Fix this broken http server"
+- "Fix this broken http server."
