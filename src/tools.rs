@@ -43,8 +43,12 @@ pub const COMMAND_ALLOW_LIST: &[&str] = &[
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
-static COMMAND_ALLOW_LIST_RE: LazyLock<Vec<Regex>> =
-    LazyLock::new(|| COMMAND_ALLOW_LIST.iter().map(|&p| Regex::new(p).unwrap()).collect());
+static COMMAND_ALLOW_LIST_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    COMMAND_ALLOW_LIST
+        .iter()
+        .map(|&p| Regex::new(p).unwrap())
+        .collect()
+});
 
 static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=])/").unwrap());
 

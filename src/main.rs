@@ -66,8 +66,15 @@ async fn main() -> Result<()> {
     let llm_url =
         env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string());
     let model = env::var("LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".to_string());
-    let truncate_mode = env::var("TRUNCATE_MODE").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
-    let current_dir = env::current_dir()?;
+    let truncate_mode = env::var("TRUNCATE_MODE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    let work_dir_env = env::var("WORKING_DIR").unwrap_or_else(|_| ".".to_string());
+    let current_dir = std::fs::canonicalize(&work_dir_env)
+        .map_err(|e| anyhow!("Invalid working directory '{}': {}", work_dir_env, e))?;
+    env::set_current_dir(&current_dir)?;
+
     let api_key_status = env::var("LLM_API_KEY").map_or("NOT SET", |_| "SET");
 
     println!("--- [AGT STARTED] ---");

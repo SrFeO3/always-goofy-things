@@ -21,6 +21,7 @@ A lightweight, experimental agentic CLI application for AI-assisted software dev
 ## Environment Variables
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| `WORKING_DIR` | Directory where AI tools operate. | `.` (Current) |
 | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `LLM_API_KEY` | (Optional) API key for authentication. | (None) |
@@ -40,6 +41,7 @@ cargo run
 
 ### Full Options Example (Excluding API Key)
 ```bash
+WORKING_DIR="./work" \
 LLM_URL="http://localhost:11434/api/chat" \
 LLM_MODEL="gemma4:12b" \
 TRUNCATE_MODE=1 \

@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "always-goofy-things"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "futures-util",
