@@ -15,6 +15,7 @@
 //! `fetch_web`: Fetch and extract text content from a specified URL.
 
 use std::fs;
+use std::net::IpAddr;
 use std::io::{self, Write};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -588,13 +589,21 @@ fn validate_url(url: &str) -> Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(anyhow!("Invalid scheme. Only http/https allowed."));
     }
-    let host = url.split('/').nth(2).unwrap_or("");
-    if host == "localhost"
-        || host == "127.0.0.1"
-        || host.starts_with("192.168.")
-        || host.starts_with("10.")
-    {
-        return Err(anyhow!("Access to private network is forbidden."));
+    let host_port = url.split('/').nth(2).unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+
+    if host.to_lowercase() == "localhost" {
+        return Err(anyhow!("Access to localhost is forbidden."));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let is_private = match ip {
+            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00, // Unique Local Address (fc00::/7)
+        };
+        if is_private {
+            return Err(anyhow!("Access to private network is forbidden."));
+        }
     }
     Ok(())
 }
@@ -708,14 +717,14 @@ mod tests {
         fs::write(&path, "fn main() {\n    println!( \"hello\" );\n}").unwrap();
         let path_str = path.to_str().unwrap();
 
-        // 完全一致での置換
+        // Match
         let res1 = execute_str_replace(path_str, "println!( \"hello\" );", "println!(\"world\");");
         assert!(res1.contains("\"success\":true"));
 
         let content = fs::read_to_string(path_str).unwrap();
         assert!(content.contains("println!(\"world\");"));
 
-        // 空白を曖昧にした置換 (fuzzy match)
+        // Fuzzy match
         let res2 = execute_str_replace(path_str, "println! ( \"world\" ) ;", "fixed();");
         assert!(
             res2.contains("\"success\":true"),
