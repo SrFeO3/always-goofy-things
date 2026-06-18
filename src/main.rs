@@ -58,6 +58,29 @@ struct ChatRequest {
     tools: Vec<serde_json::Value>,
     stream: bool,
     messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[tokio::main]
@@ -87,6 +110,10 @@ async fn main() -> Result<()> {
     println!("  TRUNCATE_MODE: {}", truncate_mode);
 
     let mut last_sent_count = 0;
+    let mut total_in_normal = 0u64;
+    let mut total_in_cached = 0u64;
+    let mut total_out = 0u64;
+
     let mut query_reader = DefaultEditor::new()?;
 
     println!("\n\x1b[36mDescribe your task and press Enter to start (or exit/quit/^D to end).\x1b[0m");
@@ -173,7 +200,7 @@ async fn main() -> Result<()> {
             let llm_future = call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count);
             let ctrl_c_future = tokio::signal::ctrl_c();
 
-            let assistant_msg = tokio::select! {
+            let (assistant_msg, usage_opt) = tokio::select! {
                 msg_result = llm_future => {
                     match msg_result {
                         Ok(msg) => msg,
@@ -195,6 +222,21 @@ async fn main() -> Result<()> {
 
             messages.push(assistant_msg.clone());
             last_sent_count = messages.len();
+
+            // Accumulate and display statistics for each LLM call
+            if let Some(usage) = usage_opt {
+                let cached = usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens).unwrap_or(0);
+                let normal = usage.prompt_tokens.saturating_sub(cached);
+                total_in_normal += normal as u64;
+                total_in_cached += cached as u64;
+                total_out += usage.completion_tokens as u64;
+
+                println!(
+                    "\x1b[90m[Tokens] Turn: In {}, Cache {}, Out {} | Total: In {}, Cache {}, Out {}\x1b[0m",
+                    normal, cached, usage.completion_tokens,
+                    total_in_normal + total_in_cached, total_in_cached, total_out
+                );
+            }
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
@@ -241,16 +283,24 @@ async fn call_llm(
     messages: &[Message],
     truncate_mode: u8,
     last_msg_count: usize,
-) -> Result<Message> {
+) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
     let tools = tools::get_tool_definitions();
     let messages_vec = messages.to_vec();
+
+    // Request usage data if using OpenAI-compatible endpoint or API key is set
+    let stream_options = if env::var("LLM_API_KEY").is_ok() || url.contains("/v1/") {
+        Some(StreamOptions { include_usage: true })
+    } else {
+        None
+    };
 
     let req = ChatRequest {
         model: model.to_string(),
         messages: messages_vec,
         stream: true,
         tools,
+        stream_options,
     };
 
     let req_json = serde_json::to_string(&req)?;
@@ -330,6 +380,7 @@ async fn call_llm(
     let stream = res.bytes_stream();
     tokio::pin!(stream);
     let mut is_thinking = false;
+    let mut usage_captured: Option<Usage> = None;
     let mut has_started_content = false;
 
     while let Some(chunk_result) = stream.next().await {
@@ -352,6 +403,24 @@ async fn call_llm(
             }
 
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                // 0. Process Usage (Handle OpenAI format or Ollama native)
+                if let Some(usage_val) = json.get("usage") {
+                    if let Ok(u) = serde_json::from_value::<Usage>(usage_val.clone()) {
+                        usage_captured = Some(u);
+                    }
+                } else if json.get("done") == Some(&serde_json::Value::Bool(true)) {
+                    // Map Ollama native stats to Usage struct
+                    let p = json.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let c = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    if p > 0 || c > 0 {
+                        usage_captured = Some(Usage {
+                            prompt_tokens: p,
+                            completion_tokens: c,
+                            prompt_tokens_details: None,
+                        });
+                    }
+                }
+
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
                 let msg_base = if let Some(message) = json.get("message") {
                     message // Ollama native
@@ -474,5 +543,5 @@ async fn call_llm(
         println!();
     }
 
-    Ok(full_message)
+    Ok((full_message, usage_captured))
 }
