@@ -15,16 +15,15 @@
 
 use std::env;
 use std::io;
-use std::io::Write; // Keep Write for flushing stdout for other prints
+use std::io::Write;
 
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 
 mod tools;
-
-use rustyline::DefaultEditor;
-use rustyline::error::ReadlineError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -77,15 +76,20 @@ async fn main() -> Result<()> {
 
     let api_key_status = env::var("LLM_API_KEY").map_or("NOT SET", |_| "SET");
 
-    println!("--- [AGT STARTED] ---");
-    println!("WORKING_DIR:   {}", current_dir.display());
-    println!("LLM_URL:       {}", llm_url);
-    println!("LLM_MODEL:     {}", model);
-    println!("LLM_API_KEY:   {}", api_key_status);
-    println!("TRUNCATE_MODE: {}", truncate_mode);
-    let mut last_sent_count = 0;
+    println!("The Always-Goofy-Things v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("[Config]");
+    println!("  WORKING_DIR:   {}", current_dir.display());
+    println!("  LLM_URL:       {}", llm_url);
+    println!("  LLM_MODEL:     {}", model);
+    println!("  LLM_API_KEY:   {}", api_key_status);
+    println!("  TRUNCATE_MODE: {}", truncate_mode);
 
+    let mut last_sent_count = 0;
     let mut query_reader = DefaultEditor::new()?;
+
+    println!("\n\x1b[36mDescribe your task and press Enter to start (or exit/quit/^D to end).\x1b[0m");
 
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
@@ -119,7 +123,7 @@ async fn main() -> Result<()> {
 
         let input = match readline {
             Ok(line) => {
-                // Add to history
+                // Add to CLI input history (allows using arrow keys to recall previous inputs)
                 query_reader.add_history_entry(line.as_str())?;
                 line
             }
