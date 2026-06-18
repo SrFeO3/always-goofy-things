@@ -124,9 +124,9 @@ async fn main() -> Result<()> {
                 line
             }
             Err(ReadlineError::Interrupted) => {
-                // Ctrl+C, exit
-                println!("Ctrl-C received. Exiting.");
-                break;
+                // Ctrl+C: Don't exit, show guidance instead
+                println!("\x1b[93mUse 'exit' or 'quit' to end the session, or press Ctrl+D.\x1b[0m");
+                continue;
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl+D on an empty line, exit
@@ -165,27 +165,42 @@ async fn main() -> Result<()> {
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
-        loop {
-            let assistant_msg =
-                match call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count).await {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
-                        println!("Conversation history preserved. You can try again or rephrase.");
-                        break; // Exit the inner reasoning loop, return to User prompt
+        'reasoning_loop: loop {
+            let llm_future = call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count);
+            let ctrl_c_future = tokio::signal::ctrl_c();
+
+            let assistant_msg = tokio::select! {
+                msg_result = llm_future => {
+                    match msg_result {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
+                            println!("Conversation history preserved. You can try again or rephrase.");
+                            break 'reasoning_loop; // Exit the inner reasoning loop, return to User prompt
+                        }
                     }
-                };
+                },
+                _ = ctrl_c_future => {
+                    // Reset terminal formatting before printing the interruption message
+                    println!("\x1b[0m"); // Reset all attributes
+                    println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
+                    // Discard the partial message and break from the reasoning loop
+                    break 'reasoning_loop;
+                }
+            };
+
             messages.push(assistant_msg.clone());
             last_sent_count = messages.len();
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
                     // Handle arguments that might be a JSON object (Ollama) or a stringified JSON (OpenAI)
-                    let args_str = if let Some(s) = call.function.arguments.as_str() {
-                        s.to_string()
-                    } else {
-                        call.function.arguments.to_string()
-                    };
+                    let args_str =
+                        if let Some(s) = call.function.arguments.as_str() {
+                            s.to_string()
+                        } else {
+                            call.function.arguments.to_string()
+                        };
 
                     // Delegate tool confirmation and execution to the tools module
                     let tool_result =
@@ -208,9 +223,9 @@ async fn main() -> Result<()> {
                     });
                 }
                 // Re-query LLM with tool execution results
-                continue;
+                continue 'reasoning_loop;
             }
-            break;
+            break 'reasoning_loop;
         }
     }
     Ok(())
@@ -272,7 +287,7 @@ async fn call_llm(
         _ => {} // Mode 3 or others: Silent
     }
 
-    println!("... Waiting for response from {} ...", model);
+    println!("... Waiting for response from {} (Ctrl+C to interrupt) ...", model);
 
     let mut request_builder = client
         .post(url)
