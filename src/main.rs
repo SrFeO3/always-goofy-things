@@ -292,7 +292,7 @@ async fn call_llm(
     let mut request_builder = client
         .post(url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "agt-client/0.1.0")
+        .header("User-Agent", "always-goofy-things-client/0.1")
         .json(&req);
 
     if let Ok(api_key) = env::var("LLM_API_KEY") {
