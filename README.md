@@ -9,7 +9,7 @@ A lightweight, experimental agentic CLI application for AI-assisted software dev
 
 ## Features
 - **Tool-Augmented Iteration**: Automatically calls tools for file I/O, searching, bash execution, and web fetching.
-- **Safety First**: All tool executions require explicit user approval (`y/N`).
+- **Safety First**: Experimental allow list verification and explicit user approval (`y/N`).
 - **Streaming Thinking**: Displays the model's reasoning process in a subtle reddish tint.
 - **Open Standards**: Supports Ollama and OpenAI-compatible APIs.
 
