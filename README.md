@@ -1,4 +1,4 @@
-# Always Goofy Things
+# Always-Goofy-Things
 
 A lightweight, experimental agentic CLI application for AI-assisted software development. It interacts with LLMs to reason about tasks, execute system tools safely with user confirmation, and provide streaming responses with visible "thinking" processes.
 
@@ -42,7 +42,7 @@ cargo run
 ### Full Options Example (Excluding API Key)
 ```bash
 WORKING_DIR="./work" \
-LLM_URL="http://localhost:11434/api/chat" \
+LLM_URL="http://localhost:11434/v1/chat/completions" \
 LLM_MODEL="gemma4:12b" \
 TRUNCATE_MODE=1 \
 cargo run
@@ -54,4 +54,5 @@ cargo run
 - "Create a Python script named `test.py` that prints 'Hello, World!'."
 - "Find the Python script in the workspace and translate its output messages into Japanese."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
-- "Analyze the documentation at https://docs.rs/hyper/latest/hyper/ and create a minimal HTTP server in `server.rs`."
+- "Analyze the hyper documentation (https://docs.rs/hyper/latest/hyper/) and create a minimal HTTP server project in Rust."
+- "Fix this broken http server"
