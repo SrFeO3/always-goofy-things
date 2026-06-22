@@ -99,7 +99,8 @@ async fn main() -> Result<()> {
 
     let api_key_status = env::var("LLM_API_KEY").map_or("NOT SET", |_| "SET");
 
-    println!("The Always-Goofy-Things v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n",
+    println!(
+        "The Always-Goofy-Things v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n",
         env!("CARGO_PKG_VERSION")
     );
     println!("[Config]");
@@ -116,7 +117,9 @@ async fn main() -> Result<()> {
 
     let mut query_reader = DefaultEditor::new()?;
 
-    println!("\n\x1b[36mDescribe your task and press Enter to start (or exit/quit/^D to end).\x1b[0m");
+    println!(
+        "\n\x1b[36mDescribe your task and press Enter to start (or exit/quit/^D to end).\x1b[0m"
+    );
 
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
@@ -156,7 +159,9 @@ async fn main() -> Result<()> {
             }
             Err(ReadlineError::Interrupted) => {
                 // Ctrl+C: Don't exit, show guidance instead
-                println!("\x1b[93mUse 'exit' or 'quit' to end the session, or press Ctrl+D.\x1b[0m");
+                println!(
+                    "\x1b[93mUse 'exit' or 'quit' to end the session, or press Ctrl+D.\x1b[0m"
+                );
                 continue;
             }
             Err(ReadlineError::Eof) => {
@@ -225,7 +230,11 @@ async fn main() -> Result<()> {
 
             // Accumulate and display statistics for each LLM call
             if let Some(usage) = usage_opt {
-                let cached = usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens).unwrap_or(0);
+                let cached = usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0);
                 let normal = usage.prompt_tokens.saturating_sub(cached);
                 total_in_normal += normal as u64;
                 total_in_cached += cached as u64;
@@ -233,20 +242,23 @@ async fn main() -> Result<()> {
 
                 println!(
                     "\x1b[90m[Tokens] Turn: In {}, Cache {}, Out {} | Total: In {}, Cache {}, Out {}\x1b[0m",
-                    normal, cached, usage.completion_tokens,
-                    total_in_normal + total_in_cached, total_in_cached, total_out
+                    normal,
+                    cached,
+                    usage.completion_tokens,
+                    total_in_normal + total_in_cached,
+                    total_in_cached,
+                    total_out
                 );
             }
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
                     // Handle arguments that might be a JSON object (Ollama) or a stringified JSON (OpenAI)
-                    let args_str =
-                        if let Some(s) = call.function.arguments.as_str() {
-                            s.to_string()
-                        } else {
-                            call.function.arguments.to_string()
-                        };
+                    let args_str = if let Some(s) = call.function.arguments.as_str() {
+                        s.to_string()
+                    } else {
+                        call.function.arguments.to_string()
+                    };
 
                     // Delegate tool confirmation and execution to the tools module
                     let tool_result =
@@ -290,7 +302,9 @@ async fn call_llm(
 
     // Request usage data if using OpenAI-compatible endpoint or API key is set
     let stream_options = if env::var("LLM_API_KEY").is_ok() || url.contains("/v1/") {
-        Some(StreamOptions { include_usage: true })
+        Some(StreamOptions {
+            include_usage: true,
+        })
     } else {
         None
     };
@@ -341,7 +355,10 @@ async fn call_llm(
         _ => {} // Mode 3 or others: Silent
     }
 
-    println!("... Waiting for response from {} (Ctrl+C to interrupt) ...", model);
+    println!(
+        "... Waiting for response from {} (Ctrl+C to interrupt) ...",
+        model
+    );
 
     let mut request_builder = client
         .post(url)
@@ -410,7 +427,10 @@ async fn call_llm(
                     }
                 } else if json.get("done") == Some(&serde_json::Value::Bool(true)) {
                     // Map Ollama native stats to Usage struct
-                    let p = json.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let p = json
+                        .get("prompt_eval_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
                     let c = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     if p > 0 || c > 0 {
                         usage_captured = Some(Usage {

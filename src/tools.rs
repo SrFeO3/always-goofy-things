@@ -15,8 +15,8 @@
 //! `fetch_web`: Fetch and extract text content from a specified URL.
 
 use std::fs;
-use std::net::IpAddr;
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
