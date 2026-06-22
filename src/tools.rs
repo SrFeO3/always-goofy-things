@@ -28,7 +28,6 @@ use tokio::process::Command as TokioCommand;
 pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^ls",
     "^cat",
-    "^pwd",
     "^echo",
     "^grep",
     "^touch",
