@@ -23,6 +23,9 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 
+/// Max retries when the LLM returns an empty response
+const MAX_EMPTY_RETRY: usize = 3;
+
 mod tools;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -201,6 +204,7 @@ async fn main() -> Result<()> {
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
+        let mut empty_retry_count: usize = 0;
         'reasoning_loop: loop {
             let llm_future = call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count);
             let ctrl_c_future = tokio::signal::ctrl_c();
@@ -224,6 +228,31 @@ async fn main() -> Result<()> {
                     break 'reasoning_loop;
                 }
             };
+
+            // Guard: retry if the assistant returned an empty response (no content, no tools, no reasoning)
+            let has_content = !assistant_msg.content.trim().is_empty();
+            let has_tools = assistant_msg.tool_calls.is_some();
+            let has_reasoning = assistant_msg
+                .reasoning_content
+                .as_ref()
+                .map(|r| !r.trim().is_empty())
+                .unwrap_or(false);
+            if !has_content && !has_tools && !has_reasoning {
+                empty_retry_count += 1;
+                if empty_retry_count > MAX_EMPTY_RETRY {
+                    println!(
+                        "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
+                        model, empty_retry_count
+                    );
+                    break 'reasoning_loop;
+                }
+                println!(
+                    "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
+                    model, empty_retry_count
+                );
+                continue 'reasoning_loop;
+            }
+            empty_retry_count = 0;
 
             messages.push(assistant_msg.clone());
             last_sent_count = messages.len();
