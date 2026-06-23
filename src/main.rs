@@ -13,21 +13,19 @@
 //!    - Feedback     : Add result back to history and repeat.
 //! 3. [Final Answer] : Present the completed outcome to the user.
 
-use std::env;
 use std::io;
 use std::io::Write;
 
 use anyhow::{Result, anyhow};
+use clap::Parser;
 use futures_util::StreamExt;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 
 mod pretty;
+mod startup;
 mod tools;
-
-/// Max retries when the LLM returns an empty response
-const MAX_EMPTY_RETRY: usize = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -89,35 +87,8 @@ struct PromptTokensDetails {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let llm_url =
-        env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string());
-    let model = env::var("LLM_MODEL").unwrap_or_else(|_| "gemma4:12b".to_string());
-    let truncate_mode = env::var("TRUNCATE_MODE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
-    let pretty = env::var("PRETTY_MODE")
-        .unwrap_or_default()
-        .parse()
-        .unwrap_or(1);
-    let work_dir_env = env::var("WORKING_DIR").unwrap_or_else(|_| ".".to_string());
-    let current_dir = std::fs::canonicalize(&work_dir_env)
-        .map_err(|e| anyhow!("Invalid working directory '{}': {}", work_dir_env, e))?;
-    env::set_current_dir(&current_dir)?;
-
-    let api_key_status = env::var("LLM_API_KEY").map_or("NOT SET", |_| "SET");
-
-    println!(
-        "The Always-Goofy-Things v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("[Config]");
-    println!("  WORKING_DIR:   {}", current_dir.display());
-    println!("  LLM_URL:       {}", llm_url);
-    println!("  LLM_MODEL:     {}", model);
-    println!("  LLM_API_KEY:   {}", api_key_status);
-    println!("  TRUNCATE_MODE: {}", truncate_mode);
-    println!("  PRETTY_MODE: {}", pretty);
+    let config = startup::Config::parse();
+    let _current_dir = startup::print_startup_info(&config)?;
 
     let mut last_sent_count = 0;
     let mut total_in_normal = 0u64;
@@ -212,26 +183,32 @@ async fn main() -> Result<()> {
         // Inner loop to handle tool execution and sequential LLM reasoning
         let mut empty_retry_count: usize = 0;
         'reasoning_loop: loop {
-            let llm_future = call_llm(&llm_url, &model, &messages, truncate_mode, last_sent_count);
+            let llm_future = call_llm(
+                &config.llm_url,
+                &config.llm_model,
+                &messages,
+                config.verbose_level,
+                last_sent_count,
+            );
             let ctrl_c_future = tokio::signal::ctrl_c();
 
             let (assistant_msg, usage_opt) = tokio::select! {
-                msg_result = llm_future => {
-                    match msg_result {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
-                            println!("Conversation history preserved. You can try again or rephrase.");
-                            break 'reasoning_loop; // Exit the inner reasoning loop, return to User prompt
+               msg_result = llm_future => {
+                   match msg_result {
+                       Ok(msg) => msg,
+                       Err(e) => {
+                           println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
+                           println!("Conversation history preserved. You can try again or rephrase.");
+                           break 'reasoning_loop; // Exit the inner reasoning loop, return to User prompt
                         }
                     }
                 },
                 _ = ctrl_c_future => {
                     // Reset terminal formatting before printing the interruption message
-                    println!("\x1b[0m"); // Reset all attributes
-                    println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
+                   println!("\x1b[0m"); // Reset all attributes
+                   println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
                     // Discard the partial message and break from the reasoning loop
-                    break 'reasoning_loop;
+                   break 'reasoning_loop;
                 }
             };
 
@@ -245,16 +222,16 @@ async fn main() -> Result<()> {
                 .unwrap_or(false);
             if !has_content && !has_tools && !has_reasoning {
                 empty_retry_count += 1;
-                if empty_retry_count > MAX_EMPTY_RETRY {
+                if empty_retry_count > startup::MAX_EMPTY_RETRY {
                     println!(
                         "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
-                        model, empty_retry_count
+                        config.llm_model, empty_retry_count
                     );
                     break 'reasoning_loop;
                 }
                 println!(
                     "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
-                    model, empty_retry_count
+                    config.llm_model, empty_retry_count
                 );
                 continue 'reasoning_loop;
             }
@@ -296,7 +273,7 @@ async fn main() -> Result<()> {
                     };
 
                     // Delegate tool confirmation and execution to the tools or pretty module
-                    let tool_result = if pretty > 0 {
+                    let tool_result = if config.pretty_level as u8 > 0 {
                         pretty::pretty_confirm_and_execute_tool(&call.function.name, &args_str)
                             .await
                     } else {
@@ -309,7 +286,7 @@ async fn main() -> Result<()> {
                         Err(e) => format!("Error: {}", e),
                     };
 
-                    if pretty > 0 {
+                    if config.pretty_level as u8 > 0 {
                         println!("Result: {}", tool_result_str);
                     }
 
@@ -334,7 +311,7 @@ async fn call_llm(
     url: &str,
     model: &str,
     messages: &[Message],
-    truncate_mode: u8,
+    verbose_level: startup::Verbosity,
     last_msg_count: usize,
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
@@ -342,7 +319,7 @@ async fn call_llm(
     let messages_vec = messages.to_vec();
 
     // Request usage data if using OpenAI-compatible endpoint or API key is set
-    let stream_options = if env::var("LLM_API_KEY").is_ok() || url.contains("/v1/") {
+    let stream_options = if std::env::var("LLM_API_KEY").is_ok() || url.contains("/v1/") {
         Some(StreamOptions {
             include_usage: true,
         })
@@ -360,13 +337,13 @@ async fn call_llm(
 
     let req_json = serde_json::to_string(&req)?;
 
-    // Debug output based on truncate_mode
-    match truncate_mode {
-        0 => println!(
+    // Debug output based on verbose_level
+    match verbose_level {
+        startup::Verbosity::Full => println!(
             "\x1b[90m--- [API REQUEST: {}] ---\n{}\x1b[0m",
             url, req_json
         ),
-        1 => {
+        startup::Verbosity::Incremental => {
             if last_msg_count > 0 && last_msg_count < req.messages.len() {
                 let mut truncated_req = req.clone();
                 truncated_req.messages = truncated_req.messages[last_msg_count..].to_vec();
@@ -386,14 +363,14 @@ async fn call_llm(
                 );
             }
         }
-        2 => {
+        startup::Verbosity::Metadata => {
             println!(
                 "\x1b[90m--- [API REQUEST: {}] (Content-Length: {}) ---\x1b[0m",
                 url,
                 req_json.len()
             );
         }
-        _ => {} // Mode 3 or others: Silent
+        startup::Verbosity::Silent => {} // Mode 0: Silent
     }
 
     println!(
@@ -407,7 +384,7 @@ async fn call_llm(
         .header("User-Agent", "always-goofy-things-client/0.1")
         .json(&req);
 
-    if let Ok(api_key) = env::var("LLM_API_KEY") {
+    if let Ok(api_key) = std::env::var("LLM_API_KEY") {
         request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
     }
 

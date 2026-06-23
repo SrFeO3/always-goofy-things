@@ -18,21 +18,30 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Backend**: Ollama or any OpenAI-compatible API.
 - **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
 
-## Environment Variables
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `WORKING_DIR` | Directory where AI tools operate. | `.` (Current) |
-| `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
-| `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
-| `LLM_API_KEY` | (Optional) API key for authentication. | (None) |
-| `TRUNCATE_MODE` | UI mode for API request truncation (0-3). | `2` (Metadata only) |
-| `PRETTY_LEVEL` | UI decoration and friendliness leven (0-1). | `1` (Pretty) |
+## Configuration
 
-### Truncation Modes (`TRUNCATE_MODE`)
-- `0`: Full request display (Verbose).
-- `1`: Incremental display (New messages only).
-- `2`: Metadata only (Content-Length).
-- `3`: Silent (No request logs).
+Configuration can be set via environment variables or command-line flags (flags take precedence).
+| CLI Flag | Env Var | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `-w, --working-dir <DIR>` | `WORKING_DIR` | Directory where AI tools operate. | `.` |
+| `-u, --llm-url <URL>` | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
+| `-m, --llm-model <MODEL>` | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
+| `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
+| `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | Logging verbosity (`silent`, `metadata`, `incremental`, `full`). | `metadata` |
+| `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`plain`, `standard`). | `standard` |
+
+
+### Verbosity Levels (`VERBOSE_LEVEL`)
+- `0`: Silent (No request logs)
+- `1`: Metadata only (Content-Length)
+- `2`: Incremental display (New messages only)
+- `3`: Full request display (Verbose)
+
+### Pretty Levels (`PRETTY_LEVEL`)
+- `0`: Plain
+- `1`: Standard
+
+> **Note:** Command-line options always take precedence over environment variables.
 
 ## Usage
 ### Default Execution (Local Ollama + gemma4:12b)
@@ -40,13 +49,22 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 cargo run
 ```
 
-### Full Options Example (Excluding API Key)
+### Full Options Example (CLI flags)
 ```bash
-WORKING_DIR="./work" \
+cargo run \
+    --working-dir ./work \
+    --llm-url "http://localhost:11434/v1/chat/completions" \
+    --llm-model "gemma4:12b" \
+    --llm-api-key "sk-..." \
+    --verbose-level 2 \
+    --pretty-level 1
+```
+
+### Mixed Usage (Environment variables + short CLI flags)
+```bash
 LLM_URL="http://localhost:11434/v1/chat/completions" \
 LLM_MODEL="gemma4:12b" \
-TRUNCATE_MODE=1 \
-cargo run
+cargo run -v 1 -k "sk-..."
 ```
 
 ## Example User Queries
