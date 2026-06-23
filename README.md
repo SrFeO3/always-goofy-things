@@ -25,7 +25,8 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `LLM_API_KEY` | (Optional) API key for authentication. | (None) |
-| `TRUNCATE_MODE` | UI mode for API request truncation (0-3). | `2` |
+| `TRUNCATE_MODE` | UI mode for API request truncation (0-3). | `2` (Metadata only) |
+| `PRETTY_LEVEL` | UI decoration and friendliness leven (0-1). | `1` (Pretty) |
 
 ### Truncation Modes (`TRUNCATE_MODE`)
 - `0`: Full request display (Verbose).

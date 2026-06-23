@@ -23,10 +23,11 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 
+mod pretty;
+mod tools;
+
 /// Max retries when the LLM returns an empty response
 const MAX_EMPTY_RETRY: usize = 3;
-
-mod tools;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -95,6 +96,10 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+    let pretty = env::var("PRETTY_MODE")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(1);
     let work_dir_env = env::var("WORKING_DIR").unwrap_or_else(|_| ".".to_string());
     let current_dir = std::fs::canonicalize(&work_dir_env)
         .map_err(|e| anyhow!("Invalid working directory '{}': {}", work_dir_env, e))?;
@@ -112,6 +117,7 @@ async fn main() -> Result<()> {
     println!("  LLM_MODEL:     {}", model);
     println!("  LLM_API_KEY:   {}", api_key_status);
     println!("  TRUNCATE_MODE: {}", truncate_mode);
+    println!("  PRETTY_MODE: {}", pretty);
 
     let mut last_sent_count = 0;
     let mut total_in_normal = 0u64;
@@ -289,17 +295,23 @@ async fn main() -> Result<()> {
                         call.function.arguments.to_string()
                     };
 
-                    // Delegate tool confirmation and execution to the tools module
-                    let tool_result =
-                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await;
+                    // Delegate tool confirmation and execution to the tools or pretty module
+                    let tool_result = if pretty > 0 {
+                        pretty::pretty_confirm_and_execute_tool(&call.function.name, &args_str)
+                            .await
+                    } else {
+                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await
+                    };
 
                     // Extract the result string, handling potential errors
-                    let tool_result_str = match tool_result {
-                        Ok(res) => res,
+                    let tool_result_str = match &tool_result {
+                        Ok(res) => res.clone(),
                         Err(e) => format!("Error: {}", e),
                     };
 
-                    println!("Result: {}", tool_result_str);
+                    if pretty > 0 {
+                        println!("Result: {}", tool_result_str);
+                    }
 
                     messages.push(Message {
                         role: "tool".to_string(),
