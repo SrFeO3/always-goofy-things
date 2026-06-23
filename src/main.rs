@@ -261,6 +261,7 @@ async fn main() -> Result<()> {
                     total_in_cached,
                     total_out
                 );
+                println!();
             }
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
@@ -559,25 +560,34 @@ async fn call_llm(
         }
     }
 
-    // If no reasoning was provided by the end of the stream, notify the user
-    if full_message.reasoning_content.is_none() {
-        println!(
-            "\x1b[90m(Reasoning content not supported or not provided by model: {})\x1b[0m",
-            model
-        );
-    }
-
     if is_thinking {
-        println!("\x1b[0m");
+        println!("\x1b[0m\n");
     }
 
-    if !has_started_content {
-        if full_message.tool_calls.is_some() {
-            println!("Assistant > [Tool Call]");
-        } else if full_message.content.is_empty() {
-            println!();
-        }
+    if has_started_content {
+        println!();
     } else {
+        let has_tool = full_message
+            .tool_calls
+            .as_ref()
+            .map_or(false, |v| !v.is_empty());
+        let has_reasoning = full_message
+            .reasoning_content
+            .as_ref()
+            .map_or(false, |r| !r.trim().is_empty());
+
+        match (has_tool, has_reasoning) {
+            (true, true) => println!("Assistant > [Tool Call] (after reasoning)"),
+            (true, false) => println!("Assistant > [Tool Call]"),
+            (false, true) => println!("Assistant > (Thought only)"),
+            (false, false) => {
+                if full_message.reasoning_content.is_none() {
+                    println!("Assistant > (No response - reasoning not supported)");
+                } else {
+                    println!("Assistant > (No response)");
+                }
+            }
+        }
         println!();
     }
 
