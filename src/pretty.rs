@@ -5,6 +5,8 @@
 //!     - Success: File size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!     - Error: Error reason (1 line)
 //! - `write_file`: Create a new file or overwrite an existing one with full content.
+//!     - Arguments view (existing UI): Shorten `content` for a compact CLI display.
+//!     - Preview: Show a modern, single-pane red/green code diff for user confirmation (multi-line)
 //!     - Success: File size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!     - Error: Error reason (1 line)
 //! - `str_replace_editor`: Replace specific text blocks in a file for code modification.
@@ -77,17 +79,17 @@ pub fn truncate_long_json(result: &str) -> String {
 }
 
 // A single line of diff output.
-#[derive(Debug, Clone, Copy)]
-enum DiffLine<'a> {
+#[derive(Debug, Clone)]
+enum DiffLine {
     /// Unchanged context line
-    Context(&'a str),
+    Context(String),
     /// Removed line (from old_string)
-    Removed(&'a str),
+    Removed(String),
     /// Added line (from new_string)
-    Added(&'a str),
+    Added(String),
 }
 
-fn compute_diff<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Vec<DiffLine<'a>> {
+fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
     let m = old_lines.len();
     let n = new_lines.len();
 
@@ -108,14 +110,14 @@ fn compute_diff<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Vec<DiffLin
     let (mut i, mut j) = (m, n);
     while i > 0 || j > 0 {
         if i > 0 && j > 0 && old_lines[i - 1] == new_lines[j - 1] {
-            result.push(DiffLine::Context(old_lines[i - 1]));
+            result.push(DiffLine::Context(old_lines[i - 1].to_string()));
             i -= 1;
             j -= 1;
         } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            result.push(DiffLine::Added(new_lines[j - 1]));
+            result.push(DiffLine::Added(new_lines[j - 1].to_string()));
             j -= 1;
         } else {
-            result.push(DiffLine::Removed(old_lines[i - 1]));
+            result.push(DiffLine::Removed(old_lines[i - 1].to_string()));
             i -= 1;
         }
     }
@@ -124,97 +126,16 @@ fn compute_diff<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Vec<DiffLin
     result
 }
 
-fn show_diff_preview(args_json: &str) {
-    let args = match serde_json::from_str::<serde_json::Value>(args_json) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let obj = match args.as_object() {
-        Some(o) => o,
-        None => return,
-    };
-
-    let path = match obj.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return,
-    };
-    let old_s = match obj.get("old_string").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return,
-    };
-    let new_s = match obj.get("new_string").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return,
-    };
-
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if !content.contains(old_s) {
-        println!("{}{} {} {}", C_RED, "old_string not found", path, RESET);
-        println!("  old: {}{}{}", HDR_RED, old_s, RESET);
-        println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
-        return;
-    }
-    if old_s == new_s {
-        return;
-    }
-
-    let file_lines: Vec<&str> = content.lines().collect();
-    let old_lines: Vec<&str> = old_s.lines().collect();
-    let new_lines: Vec<&str> = new_s.lines().collect();
-
-    let mut found_line: Option<usize> = None;
-    for i in 0..file_lines.len() {
-        if i + old_lines.len() > file_lines.len() {
-            break;
-        }
-        let mut matched = true;
-        for (j, old_l) in old_lines.iter().enumerate() {
-            if file_lines[i + j] != *old_l {
-                matched = false;
-                break;
-            }
-        }
-        if matched {
-            found_line = Some(i);
-            break;
-        }
-    }
-
-    let start = match found_line {
-        Some(l) => l,
-        None => {
-            println!("{}{} {}", C_RED, "Could not match old_string in:", path);
-            println!("  old: {}{}{}", HDR_RED, old_s, RESET);
-            println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
-            return;
-        }
-    };
-    let end = start + old_lines.len();
-
-    let diff = compute_diff(&old_lines, &new_lines);
-    let grouped = group_diff(&diff);
-
-    let ctx_before = ((start as i32).saturating_sub(2)).max(0) as usize;
-    let ctx_after = (end + 3).min(file_lines.len());
-
+fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>) {
     println!();
-    println!("-- Diff Preview: {} --", path);
+    println!("-- Code Preview: {} --", path);
 
-    let cur = ctx_before + 1;
-    for l in file_lines.iter().take(start).skip(ctx_before) {
-        println!("\x1b[90m{:4}{:4} \x1b[0m{}", cur, cur, l);
-    }
-
-    let mut old_cur = start + 1;
-    let mut new_cur = start + 1;
+    let mut old_cur = start_line;
+    let mut new_cur = start_line;
     let mut added = 0;
     let mut removed = 0;
 
-    for d in &grouped {
+    for d in &diff {
         match d {
             DiffLine::Context(c) => {
                 println!(
@@ -236,39 +157,101 @@ fn show_diff_preview(args_json: &str) {
                 added += 1;
                 println!(
                     " {}{:<4}{}{:<4} {}{} {}{}{}",
-                    HDR_GREEN, EMPTY, EMPTY, new_cur, BG_GREEN, " -", ERASE_LINE, c, RESET
+                    HDR_GREEN, EMPTY, EMPTY, new_cur, BG_GREEN, " +", ERASE_LINE, c, RESET
                 );
                 new_cur += 1;
             }
         }
     }
 
-    for i in end..ctx_after {
-        println!("{}{:4}{:4} \x1b[0m{}", C_GRAY, i + 1, i + 1, file_lines[i]);
-    }
-
-    println!("\n  {}+{} {}-{}\x1b[0m", C_GREEN, added, C_RED, removed);
+    println!(
+        "\n      {}+{} {}-{}{}",
+        C_GREEN, added, C_RED, removed, RESET
+    );
 }
 
-fn group_diff<'a>(input: &[DiffLine<'a>]) -> Vec<DiffLine<'a>> {
+fn group_diff(input: &[DiffLine]) -> Vec<DiffLine> {
     let mut result = Vec::new();
-    let mut removed_buf: Vec<&DiffLine<'a>> = Vec::new();
+    let mut removed_buf: Vec<&DiffLine> = Vec::new();
 
     for item in input {
         match item {
             DiffLine::Removed(_) => removed_buf.push(item),
             _ => {
                 if !removed_buf.is_empty() {
-                    result.extend(removed_buf.drain(..).copied());
+                    result.extend(removed_buf.drain(..).map(|d| d.clone()));
                 }
-                result.push(*item);
+                result.push(item.clone());
             }
         }
     }
     if !removed_buf.is_empty() {
-        result.extend(removed_buf.into_iter().copied());
+        result.extend(removed_buf.into_iter().map(|d| d.clone()));
     }
     result
+}
+
+fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffLine>)> {
+    let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+    let obj = args.as_object()?;
+    let path = obj.get("path")?.as_str()?.to_string();
+    let old_s = obj.get("old_string")?.as_str()?;
+    let new_s = obj.get("new_string")?.as_str()?;
+
+    if old_s == new_s {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let file_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_s.lines().collect();
+
+    let mut start: Option<usize> = None;
+    for i in 0..file_lines.len() {
+        if i + old_lines.len() > file_lines.len() {
+            break;
+        }
+        let mut matched = true;
+        for (j, old_l) in old_lines.iter().enumerate() {
+            if file_lines[i + j] != *old_l {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            start = Some(i);
+            break;
+        }
+    }
+
+    let start = match start {
+        Some(l) => l,
+        None => {
+            println!("{}{} {}", C_RED, "Could not match old_string in:", path);
+            println!("  old: {}{}{}", HDR_RED, old_s, RESET);
+            println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
+            return None;
+        }
+    };
+    let end = start + old_lines.len();
+
+    let new_lines: Vec<&str> = new_s.lines().collect();
+    let diff = group_diff(&compute_diff(&old_lines, &new_lines));
+
+    let ctx_before = ((start as i32).saturating_sub(2)).max(0) as usize;
+    let ctx_after = (end + 3).min(file_lines.len());
+
+    let mut result: Vec<DiffLine> = Vec::new();
+    for l in file_lines.iter().take(start).skip(ctx_before) {
+        result.push(DiffLine::Context(l.to_string()));
+    }
+    result.extend(diff);
+    for i in end..ctx_after {
+        result.push(DiffLine::Context(file_lines[i].to_string()));
+    }
+
+    let line_num = ctx_before + start.saturating_sub(ctx_before) + 1;
+    Some((path, line_num, result))
 }
 
 fn compute_replace_lines(path: &str, args_json: &str) -> Option<(u64, u64)> {
@@ -496,7 +479,34 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
 // Pretty-print command preview before execution.
 pub fn pretty_print_command(name: &str, args_json: &str) {
     match name {
-        "str_replace_editor" => show_diff_preview(args_json),
+        "write_file" => {
+            let args = match serde_json::from_str::<serde_json::Value>(args_json) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let obj = match args.as_object() {
+                Some(o) => o,
+                None => return,
+            };
+            let path = match obj.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => return,
+            };
+            let content = match obj.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let diff: Vec<DiffLine> = content
+                .lines()
+                .map(|l| DiffLine::Added(l.to_string()))
+                .collect();
+            show_diff_preview(&path, 1, diff);
+        }
+        "str_replace_editor" => {
+            if let Some((path, start_line, diff)) = compute_str_replace_diff(args_json) {
+                show_diff_preview(&path, start_line, diff);
+            }
+        }
         _ => {}
     }
 }
@@ -538,13 +548,15 @@ for i in range(1, 3):
         create_test_file(&temp_path);
 
         let args_json = serde_json::json!({
-           "new_string": "print(\"bonjour le monde\");",
-           "old_string": "print(\"hello world\");",
-           "path": temp_path.to_string_lossy()
+            "new_string": "print(\"bonjour le monde\");",
+            "old_string": "print(\"hello world\");",
+            "path": temp_path.to_string_lossy()
         })
         .to_string();
 
-        show_diff_preview(&args_json);
+        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff);
+        }
         let _ = fs::remove_file(&temp_path);
     }
 
@@ -554,13 +566,15 @@ for i in range(1, 3):
         create_test_file(&temp_path);
 
         let args_json = serde_json::json!({
-           "new_string": "print(\"comment allez-vous ?\");",
-           "old_string": "print(\"how are you?\");",
-           "path": temp_path.to_string_lossy()
+            "new_string": "print(\"comment allez-vous ?\");",
+            "old_string": "print(\"how are you?\");",
+            "path": temp_path.to_string_lossy()
         })
         .to_string();
 
-        show_diff_preview(&args_json);
+        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff);
+        }
         let _ = fs::remove_file(&temp_path);
     }
 
@@ -588,7 +602,9 @@ for i in range(1, 3):
         })
         .to_string();
 
-        show_diff_preview(&args_json);
+        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff);
+        }
         let _ = fs::remove_file(&temp_path);
     }
 
@@ -614,7 +630,9 @@ vwxyz
         })
         .to_string();
 
-        show_diff_preview(&args_json);
+        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff);
+        }
         let _ = fs::remove_file(&temp_path);
     }
 
@@ -629,8 +647,65 @@ vwxyz
            "path": temp_path.to_string_lossy()
         })
         .to_string();
-
-        show_diff_preview(&args_json);
+        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff);
+        }
         let _ = fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_pretty_print_command_write_file() {
+        let args_json = serde_json::json!({
+            "path": "new_file.txt",
+            "content": "hello\nworld\nfoo"
+        })
+        .to_string();
+        // Should not panic; renders all lines as Added (green) with line numbers starting at 1
+        pretty_print_command("write_file", &args_json);
+    }
+
+    #[test]
+    fn test_pretty_print_command_write_file_empty() {
+        let args_json = serde_json::json!({
+            "path": "empty.txt",
+            "content": ""
+        })
+        .to_string();
+        // Should not panic even with empty content
+        pretty_print_command("write_file", &args_json);
+    }
+
+    #[test]
+    fn test_pretty_print_command_write_file_multiline() {
+        let args_json = serde_json::json!({
+            "path": "multi.py",
+            "content": "#!/usr/bin/env python3\n\nprint(\"hello\")\nprint(\"world\")"
+        })
+        .to_string();
+        // Should render 5 lines (including blank line) as Added with line numbers 1–5
+        pretty_print_command("write_file", &args_json);
+    }
+
+    #[test]
+    fn test_pretty_print_result_write_file_success() {
+        let result = serde_json::json!({
+            "success": true,
+            "path": "output.txt",
+            "bytes_written": 128
+        })
+        .to_string();
+        // Should print a success summary line without panicking
+        pretty_print_result("write_file", &result, None);
+    }
+
+    #[test]
+    fn test_pretty_print_result_write_file_error() {
+        let result = serde_json::json!({
+            "success": false,
+            "error": "Permission denied"
+        })
+        .to_string();
+        // Should print an error line without panicking
+        pretty_print_result("write_file", &result, None);
     }
 }
