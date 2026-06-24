@@ -25,6 +25,8 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
+use super::startup::{C_CYAN, RESET};
+
 pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^ls",
     "^cat",
@@ -282,12 +284,8 @@ fn validate_path(path: &str) -> Result<()> {
 /// Prompts the user for confirmation and then executes the specified tool.
 /// This function encapsulates the user interaction for tool execution approval.
 pub async fn confirm_and_execute_tool(name: &str, args_json: &str) -> Result<String> {
-    println!("--- [TOOL EXECUTION REQUESTED] ---");
-    println!("Tool: \x1b[93m{}\x1b[0m", name);
-    println!("Args: \x1b[93m{}\x1b[0m", args_json);
-
     // Ask for user confirmation before execution
-    print!("Execute this tool? (y/N): ");
+    print!("{}Execute this tool? (y/N): {}", C_CYAN, RESET);
     io::stdout().flush()?;
     let mut confirm = String::new();
     io::stdin().read_line(&mut confirm)?;

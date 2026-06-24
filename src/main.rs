@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
             let llm_future = call_llm(
                 &config.llm_url,
                 &config.llm_model,
+                config.llm_api_key.as_ref(),
                 &messages,
                 config.verbose_level,
                 last_sent_count,
@@ -273,21 +274,49 @@ async fn main() -> Result<()> {
                         call.function.arguments.to_string()
                     };
 
-                    // Delegate tool confirmation and execution to the tools or pretty module
-                    let tool_result = if config.pretty_level as u8 > 0 {
-                        pretty::pretty_confirm_and_execute_tool(&call.function.name, &args_str)
-                            .await
-                    } else {
-                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await
-                    };
+                    let pretty = config.pretty_level as u8 > 0;
 
-                    // Extract the result string, handling potential errors
+                    // 1. Show tool call request (LLM to Application)
+                    println!(
+                        "--- [TOOL EXECUTION REQUESTED{}] ---",
+                        if pretty { " (truncated)" } else { "" }
+                    );
+                    println!("Tool: \x1b[93m{}\x1b[0m", call.function.name);
+                    if pretty {
+                        println!(
+                            "Args: \x1b[93m{}\x1b[0m",
+                            pretty::truncate_long_json(&args_str)
+                        );
+                    } else {
+                        println!("Args: \x1b[93m{}\x1b[0m", args_str);
+                    }
+
+                    // 2. Pretty print command
+                    if pretty {
+                        pretty::pretty_print_command(&call.function.name, &args_str);
+                    }
+
+                    // 3. Confirm and execute (uses tools::confirm_and_execute_tool, including error display)
+                    let tool_result =
+                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await;
                     let tool_result_str = match &tool_result {
                         Ok(res) => res.clone(),
                         Err(e) => format!("Error: {}", e),
                     };
 
-                    if config.pretty_level as u8 > 0 {
+                    // 4. Pretty print result
+                    if pretty {
+                        pretty::pretty_print_result(
+                            &call.function.name,
+                            &tool_result_str,
+                            Some(&args_str),
+                        );
+                    }
+
+                    // 5. Show tool call response (Application to LLM)
+                    if pretty {
+                        println!("Result: {}", pretty::truncate_long_json(&tool_result_str));
+                    } else {
                         println!("Result: {}", tool_result_str);
                     }
 
@@ -311,6 +340,7 @@ async fn main() -> Result<()> {
 async fn call_llm(
     url: &str,
     model: &str,
+    api_key: Option<&String>,
     messages: &[Message],
     verbose_level: startup::Verbosity,
     last_msg_count: usize,
@@ -320,7 +350,7 @@ async fn call_llm(
     let messages_vec = messages.to_vec();
 
     // Request usage data if using OpenAI-compatible endpoint or API key is set
-    let stream_options = if std::env::var("LLM_API_KEY").is_ok() || url.contains("/v1/") {
+    let stream_options = if api_key.is_some() || url.contains("/v1/") {
         Some(StreamOptions {
             include_usage: true,
         })
@@ -386,7 +416,7 @@ async fn call_llm(
         .header("User-Agent", "always-goofy-things-client/0.1")
         .json(&req);
 
-    if let Ok(api_key) = std::env::var("LLM_API_KEY") {
+    if let Some(api_key) = api_key {
         request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
     }
 

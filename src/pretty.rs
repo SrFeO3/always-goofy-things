@@ -23,67 +23,57 @@
 //!     - Error: Error reason (multi-line)
 //! - `fetch_web`: Fetch and extract text content from a specified URL.
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
-//!     - Error: Error reason (multi-line)
+//!      - Error: Error reason (multi-line)
 
-use std::io::{self, Write};
+use super::startup::{
+    BG_GRAY, BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
+};
 
-use anyhow::Result;
-
-// ANSI escape sequences for text styling.
-const HDR_RED: &str = "\x1b[48;2;218;75;80m";
-const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
-
-const BG_GRAY: &str = "\x1b[48;2;128;128;128m";
-const BG_RED: &str = "\x1b[48;2;190;85;85m";
-const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
-
-const C_GRAY: &str = "\x1b[90m";
-const C_RED: &str = "\x1b[38;2;195;60;60m";
-const C_GREEN: &str = "\x1b[38;2;40;145;75m";
-
-const RESET: &str = "\x1b[0m";
-const ERASE_LINE: &str = "\x1b[K";
-const EMPTY: &str = "";
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    let count = s.chars().count();
-    if count <= max_chars {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max_chars).collect();
-        format!("{}...", cut)
+fn truncate_str(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit * 2 + 3 {
+        return s.to_string();
     }
+    let first: String = s.chars().take(limit).collect();
+    let last: String = s.chars().rev().take(limit).collect();
+    format!("{}...{}", first, last)
 }
 
-fn display_args(name: &str, args_json: &str) {
-    let display = match name {
-        "write_file" => shorten_json_field(args_json, &["content"]),
-        "str_replace_editor" => {
-            let j = shorten_json_field(args_json, &["old_string"]);
-            shorten_json_field(&j, &["new_string"])
-        }
-        _ => args_json.to_string(),
-    };
-    println!("\x1b[90mArgs:\x1b[0m {}", display);
-}
-
-fn shorten_json_field(json_str: &str, keys: &[&str]) -> String {
-    let mut parsed = match serde_json::from_str::<serde_json::Value>(json_str) {
+/// Truncate any long string values in result JSON for display.
+/// Walks the entire JSON tree and truncates every string that exceeds the limit.
+/// All strings use head 10 chars + ... + tail 10 chars.
+pub fn truncate_long_json(result: &str) -> String {
+    let val: serde_json::Value = match serde_json::from_str(result) {
         Ok(v) => v,
-        Err(_) => return json_str.to_string(),
+        Err(_) => return result.to_string(),
     };
 
-    if let Some(obj) = parsed.as_object_mut() {
-        for key in keys {
-            if let Some(val) = obj.get(*key) {
-                let original = val.clone();
-                let short = truncate_str(val.as_str().unwrap_or(&original.to_string()), 40);
-                obj.insert(key.to_string(), serde_json::Value::String(short));
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(s) => {
+                let truncated = truncate_str(s, 10);
+                if truncated != *s {
+                    *s = truncated;
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    walk(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (_, v) in map.iter_mut() {
+                    walk(v);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
             }
         }
     }
 
-    parsed.to_string()
+    let mut val = val;
+    walk(&mut val);
+
+    serde_json::to_string(&val).unwrap_or_else(|_| result.to_string())
 }
 
 // A single line of diff output.
@@ -437,7 +427,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                         "symlink" => "@",
                         _ => "",
                     };
-                    println!(" {}{}{}{}{}", BG_GRAY, name, suffix, ERASE_LINE, RESET);
+                    println!(" - {}{}", name, suffix);
                 }
             }
             let count = entries.map(|e| e.len()).unwrap_or(0);
@@ -453,14 +443,14 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
             if !stdout.is_empty() {
                 for line in stdout.lines() {
-                    println!(" {}{}{}{}", BG_GRAY, line, ERASE_LINE, RESET);
+                    println!(" stderr: {}", line);
                 }
                 if !stdout.ends_with('\n') {
                     println!();
                 }
             }
             if !stderr.is_empty() {
-                eprint!("{}", stderr);
+                println!(" stderr: {}", stderr);
                 if !stderr.ends_with('\n') {
                     eprintln!();
                 }
@@ -503,32 +493,12 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
     }
 }
 
-pub async fn pretty_confirm_and_execute_tool(name: &str, args_json: &str) -> Result<String> {
-    println!("\x1b[90m── \x1b[33m{}\x1b[90m ──\x1b[0m", name);
-    display_args(name, args_json);
-
-    if name == "str_replace_editor" {
-        show_diff_preview(args_json);
+// Pretty-print command preview before execution.
+pub fn pretty_print_command(name: &str, args_json: &str) {
+    match name {
+        "str_replace_editor" => show_diff_preview(args_json),
+        _ => {}
     }
-
-    print!("\x1b[90mExecute?\x1b[0m (y/N): ");
-    io::stdout().flush()?;
-    let mut confirm = String::new();
-    io::stdin().read_line(&mut confirm)?;
-
-    let result = if confirm.trim().to_lowercase() == "y" {
-        super::tools::execute_tool(name, args_json).await
-    } else {
-        Ok("Execution denied by user.".to_string())
-    };
-
-    let result_str = match &result {
-        Ok(s) => s.clone(),
-        Err(e) => format!("Error: {}", e),
-    };
-    pretty_print_result(name, &result_str, Some(args_json));
-
-    result
 }
 
 #[cfg(test)]

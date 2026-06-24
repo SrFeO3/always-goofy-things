@@ -8,11 +8,26 @@ use clap::Parser;
 /// Max retries when the LLM returns an empty response
 pub const MAX_EMPTY_RETRY: usize = 1;
 
-/// The official name of this application
+/// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
-
-/// App description used in both help banner and startup output
 pub const APP_DESCRIPTION: &str = "A mere LLM loop for software development tasks.";
+
+// ANSI escape sequences for text styling.
+pub const HDR_RED: &str = "\x1b[48;2;218;75;80m";
+pub const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
+
+pub const BG_GRAY: &str = "\x1b[48;2;128;128;128m";
+pub const BG_RED: &str = "\x1b[48;2;190;85;85m";
+pub const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
+
+pub const C_GRAY: &str = "\x1b[90m";
+pub const C_RED: &str = "\x1b[38;2;195;60;60m";
+pub const C_GREEN: &str = "\x1b[38;2;40;145;75m";
+pub const C_CYAN: &str = "\x1b[36m";
+
+pub const RESET: &str = "\x1b[0m";
+pub const ERASE_LINE: &str = "\x1b[K";
+pub const EMPTY: &str = "";
 
 /// UI decoration and friendliness level
 pub type PrettyLevel = u8;
@@ -102,8 +117,8 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
         "  llm-api-key    : {}",
         config.llm_api_key.as_ref().map_or("(none)", |_| "(set)")
     );
-    println!("  verbose-level: {}", config.verbose_level);
-    println!("  pretty-level : {}", config.pretty_level);
+    println!("  verbose-level  : {}", config.verbose_level);
+    println!("  pretty-level   : {}", config.pretty_level);
 
     Ok(current_dir)
 }
