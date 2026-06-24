@@ -12,7 +12,7 @@
 //! - `str_replace_editor`: Replace specific text blocks in a file for code modification.
 //!     - Arguments view (existing UI): Shorten `old_string` and `new_string` for a compact CLI display.
 //!     - Preview: Show a modern, single-pane red/green code diff for user confirmation (multi-line), on preview error, show full `old_string` and `new_string` with error message.
-//!     - Success: Modification summary with changed line numbers (1 line)
+//!     - Success: Modification summary with changed line numbers and match type (1 line)
 //!     - Error: Error reason (1 line)
 //! - `grep_search`: Search for text patterns across files in the workspace.
 //!     - Success: Minimal, `grep`-like terminal output (multi-line)
@@ -126,9 +126,18 @@ fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
     result
 }
 
-fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>) {
+fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_type: Option<&str>) {
     println!();
-    println!("-- Code Preview: {} --", path);
+    let match_label = match match_type {
+        Some("exact") => format!("{}[exact]{}", C_GREEN, RESET),
+        Some("fuzzy") => format!("{}[fuzzy]{}", HDR_GREEN, RESET),
+        _ => String::new(),
+    };
+    if match_label.is_empty() {
+        println!("-- Code Preview: {} --", path);
+    } else {
+        println!("-- Code Preview: {} {} --", path, match_label);
+    }
 
     let mut old_cur = start_line;
     let mut new_cur = start_line;
@@ -191,7 +200,7 @@ fn group_diff(input: &[DiffLine]) -> Vec<DiffLine> {
     result
 }
 
-fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffLine>)> {
+fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffLine>, &str)> {
     let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
     let obj = args.as_object()?;
     let path = obj.get("path")?.as_str()?.to_string();
@@ -206,6 +215,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
     let file_lines: Vec<&str> = content.lines().collect();
     let old_lines: Vec<&str> = old_s.lines().collect();
 
+    // Try exact line-by-line match first
     let mut start: Option<usize> = None;
     for i in 0..file_lines.len() {
         if i + old_lines.len() > file_lines.len() {
@@ -224,34 +234,71 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
         }
     }
 
-    let start = match start {
-        Some(l) => l,
-        None => {
+    if let Some(start_pos) = start {
+        let end = start_pos + old_lines.len();
+        let new_lines: Vec<&str> = new_s.lines().collect();
+        let diff = group_diff(&compute_diff(&old_lines, &new_lines));
+
+        let ctx_before = ((start_pos as i32).saturating_sub(2)).max(0) as usize;
+        let ctx_after = (end + 3).min(file_lines.len());
+
+        let mut result: Vec<DiffLine> = Vec::new();
+        for l in file_lines.iter().take(start_pos).skip(ctx_before) {
+            result.push(DiffLine::Context(l.to_string()));
+        }
+        result.extend(diff);
+        for i in end..ctx_after {
+            result.push(DiffLine::Context(file_lines[i].to_string()));
+        }
+
+        let line_num = ctx_before + start_pos.saturating_sub(ctx_before) + 1;
+        return Some((path, line_num, result, "exact"));
+    }
+
+    // Fallback: fuzzy match by treating spaces as \s*
+    let escaped = regex::escape(old_s).replace(r" ", r"\s*");
+    let re = match regex::Regex::new(&escaped) {
+        Ok(r) => r,
+        Err(_) => {
             println!("{}{} {}", C_RED, "Could not match old_string in:", path);
             println!("  old: {}{}{}", HDR_RED, old_s, RESET);
             println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
             return None;
         }
     };
-    let end = start + old_lines.len();
+
+    let matches: Vec<_> = re.find_iter(&content).collect();
+    if matches.is_empty() {
+        println!("{}{} {}", C_RED, "Could not match old_string in:", path);
+        println!("  old: {}{}{}", HDR_RED, old_s, RESET);
+        println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
+        return None;
+    }
+
+    // Use the first match to find the line range
+    let m = &matches[0];
+    let matched_text = &content[m.start()..m.end()];
+    let matched_lines: Vec<&str> = matched_text.lines().collect();
+    let start_line_num = content[..m.start()].chars().filter(|c| *c == '\n').count();
+    let end_line_num = start_line_num + matched_lines.len();
 
     let new_lines: Vec<&str> = new_s.lines().collect();
-    let diff = group_diff(&compute_diff(&old_lines, &new_lines));
+    let diff = group_diff(&compute_diff(&matched_lines.as_slice(), &new_lines));
 
-    let ctx_before = ((start as i32).saturating_sub(2)).max(0) as usize;
-    let ctx_after = (end + 3).min(file_lines.len());
+    let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
+    let ctx_after = (end_line_num + 3).min(file_lines.len());
 
     let mut result: Vec<DiffLine> = Vec::new();
-    for l in file_lines.iter().take(start).skip(ctx_before) {
+    for l in file_lines.iter().take(start_line_num).skip(ctx_before) {
         result.push(DiffLine::Context(l.to_string()));
     }
     result.extend(diff);
-    for i in end..ctx_after {
+    for i in end_line_num..ctx_after {
         result.push(DiffLine::Context(file_lines[i].to_string()));
     }
 
-    let line_num = ctx_before + start.saturating_sub(ctx_before) + 1;
-    Some((path, line_num, result))
+    let line_num = ctx_before + start_line_num.saturating_sub(ctx_before) + 1;
+    Some((path, line_num, result, "fuzzy"))
 }
 
 fn compute_replace_lines(path: &str, args_json: &str) -> Option<(u64, u64)> {
@@ -348,6 +395,9 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             }
             let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("?");
 
+            // Extract match_type from the result JSON
+            let match_type = obj.get("match_type").and_then(|v| v.as_str());
+
             // Try to compute changed line numbers from the file and args
             let line_range = if let Some(aj) = args_json {
                 compute_replace_lines(path, aj)
@@ -355,23 +405,29 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                 None
             };
 
+            let match_label = match match_type {
+                Some("exact") => format!("{}{} ", C_GREEN, "[exact]"),
+                Some("fuzzy") => format!("{}{} ", HDR_GREEN, "[fuzzy]"),
+                _ => String::new(),
+            };
+
             match line_range {
                 Some((start_l, end_l)) if start_l != end_l => {
                     println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {} L{}–L{} replaced",
-                        path, start_l, end_l
+                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} L{}–L{} replaced",
+                        path, match_label, start_l, end_l
                     );
                 }
                 Some((l, _)) => {
                     println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {} L{} replaced",
-                        path, l
+                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} L{} replaced",
+                        path, match_label, l
                     );
                 }
                 None => {
                     println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {} replaced",
-                        path
+                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} replaced",
+                        path, match_label
                     );
                 }
             }
@@ -394,7 +450,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                 }
             }
             println!(
-                "\x1b[90m   ← {} match{}\x1b[0m",
+                "\x1b[90m    ← {} match{}\x1b[0m",
                 total,
                 if total != 1 { "es" } else { "" }
             );
@@ -415,7 +471,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             }
             let count = entries.map(|e| e.len()).unwrap_or(0);
             println!(
-                "\x1b[90m   ← {} item{}\x1b[0m",
+                "\x1b[90m    ← {} item{}\x1b[0m",
                 count,
                 if count != 1 { "s" } else { "" }
             );
@@ -500,11 +556,12 @@ pub fn pretty_print_command(name: &str, args_json: &str) {
                 .lines()
                 .map(|l| DiffLine::Added(l.to_string()))
                 .collect();
-            show_diff_preview(&path, 1, diff);
+            show_diff_preview(&path, 1, diff, None);
         }
         "str_replace_editor" => {
-            if let Some((path, start_line, diff)) = compute_str_replace_diff(args_json) {
-                show_diff_preview(&path, start_line, diff);
+            if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args_json)
+            {
+                show_diff_preview(&path, start_line, diff, Some(&match_type));
             }
         }
         _ => {}
@@ -554,8 +611,8 @@ for i in range(1, 3):
         })
         .to_string();
 
-        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
-            show_diff_preview(&path, start_line, diff);
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
     }
@@ -572,8 +629,8 @@ for i in range(1, 3):
         })
         .to_string();
 
-        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
-            show_diff_preview(&path, start_line, diff);
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
     }
@@ -602,8 +659,8 @@ for i in range(1, 3):
         })
         .to_string();
 
-        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
-            show_diff_preview(&path, start_line, diff);
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
     }
@@ -630,8 +687,8 @@ vwxyz
         })
         .to_string();
 
-        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
-            show_diff_preview(&path, start_line, diff);
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
     }
@@ -647,8 +704,8 @@ vwxyz
            "path": temp_path.to_string_lossy()
         })
         .to_string();
-        if let Some((path, start_line, diff)) = compute_str_replace_diff(&args_json) {
-            show_diff_preview(&path, start_line, diff);
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+            show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
     }

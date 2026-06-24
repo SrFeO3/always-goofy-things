@@ -414,7 +414,7 @@ fn execute_str_replace(path: &str, old_str: &str, new_str: &str) -> String {
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
         match atomic_write_with_dir(path, &new_content) {
-            Ok(_) => return json!({ "success": true, "path": path, "occurrences_replaced": 1 }).to_string(),
+            Ok(_) => return json!({ "success": true, "path": path, "occurrences_replaced": 1, "match_type": "exact" }).to_string(),
             Err(e) => return json!({ "success": false, "path": path, "error": e.to_string(), "error_code": "WRITE_FAILED" }).to_string(),
         }
     }
@@ -445,7 +445,8 @@ fn execute_str_replace(path: &str, old_str: &str, new_str: &str) -> String {
     if let Err(e) = fs::write(path, new_content) {
         return json!({ "success": false, "path": path, "error": e.to_string() }).to_string();
     }
-    json!({ "success": true, "path": path, "occurrences_replaced": 1 }).to_string()
+    json!({ "success": true, "path": path, "occurrences_replaced": 1, "match_type": "fuzzy" })
+        .to_string()
 }
 
 fn execute_list_directory(path: &str, recursive: bool) -> Result<String> {
