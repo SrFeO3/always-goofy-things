@@ -1,70 +1,35 @@
 //! Startup: CLI configuration parsing, verbosity/prettiness levels, and startup banner.
 
 use std::env;
-use std::fmt;
 
 use anyhow::{Result, anyhow};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 
 /// Max retries when the LLM returns an empty response
-pub const MAX_EMPTY_RETRY: usize = 3;
+pub const MAX_EMPTY_RETRY: usize = 1;
+
+/// The official name of this application
+pub const APP_NAME: &str = "Always-Goofy-Things";
 
 /// App description used in both help banner and startup output
 pub const APP_DESCRIPTION: &str = "A mere LLM loop for software development tasks.";
 
 /// UI decoration and friendliness level
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
-#[value(rename_all = "lower")]
-pub enum PrettyLevel {
-    #[default]
-    Plain,
-    Standard,
-}
+pub type PrettyLevel = u8;
 
-impl fmt::Display for PrettyLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PrettyLevel::Plain => write!(f, "Plain"),
-            PrettyLevel::Standard => write!(f, "Standard"),
-        }
-    }
-}
-
-/// Logging verbosity level
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
-#[value(rename_all = "lower")]
-pub enum Verbosity {
-    /// Silent (No request logs)
-    Silent,
-    /// Metadata only (Content-Length)
-    Metadata,
-    /// Incremental display (New messages only)
-    Incremental,
-    /// Full request display (Verbose)
-    Full,
-}
-
-impl fmt::Display for Verbosity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Verbosity::Silent => write!(f, "Silent"),
-            Verbosity::Metadata => write!(f, "Metadata only"),
-            Verbosity::Incremental => write!(f, "Incremental display"),
-            Verbosity::Full => write!(f, "Full request display"),
-        }
-    }
-}
+/// UI verbosity for LLM conversation display
+pub type Verbosity = u8;
 
 /// The Always-Goofy-Things CLI configuration
 #[derive(Parser, Debug)]
 #[command(
-    name = "The Always-Goofy-Things",
+    name = APP_NAME,
     bin_name = "always-goofy-things",
     version,
     about = APP_DESCRIPTION,
     disable_version_flag = true,
     help_template = "\
-{before-help}{name} v{version}
+{before-help}The {name} v{version}
 {about-with-newline}
 {usage-heading} {usage}
 
@@ -96,24 +61,24 @@ pub struct Config {
     #[arg(short = 'k', long, env = "LLM_API_KEY")]
     pub llm_api_key: Option<String>,
 
-    /// Set logging verbosity level
+    /// UI verbosity for LLM conversation display
     #[arg(
-        short = 'v',
-        long,
-        env = "VERBOSE_LEVEL",
-        value_enum,
-        default_value_t = Verbosity::Metadata
-     )]
+      short = 'v',
+      long,
+      env = "VERBOSE_LEVEL",
+      value_parser = clap::value_parser!(u8).range(0..=3),
+      default_value_t = 1
+    )]
     pub verbose_level: Verbosity,
 
     /// Set UI decoration and friendliness level
     #[arg(
-        short = 'p',
-        long,
-        env = "PRETTY_LEVEL",
-        value_enum,
-        default_value_t = PrettyLevel::Standard
-     )]
+      short = 'p',
+      long,
+      env = "PRETTY_LEVEL",
+      value_parser = clap::value_parser!(u8).range(0..=1),
+      default_value_t = 1
+    )]
     pub pretty_level: PrettyLevel,
 }
 
@@ -125,7 +90,7 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
     env::set_current_dir(&current_dir)?;
 
     println!(
-        "The Always-Goofy-Things v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n{}\n",
+        "The {APP_NAME} v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n{}\n",
         env!("CARGO_PKG_VERSION"),
         APP_DESCRIPTION
     );
@@ -137,14 +102,8 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
         "  llm-api-key    : {}",
         config.llm_api_key.as_ref().map_or("(none)", |_| "(set)")
     );
-    println!(
-        "  verbose-level: {} ({})",
-        config.verbose_level as u8, config.verbose_level
-    );
-    println!(
-        "  pretty-level : {} ({})",
-        config.pretty_level as u8, config.pretty_level
-    );
+    println!("  verbose-level: {}", config.verbose_level);
+    println!("  pretty-level : {}", config.pretty_level);
 
     Ok(current_dir)
 }

@@ -340,17 +340,17 @@ async fn call_llm(
 
     // Debug output based on verbose_level
     match verbose_level {
-        startup::Verbosity::Full => println!(
+        3 => println!(
             "\x1b[90m--- [API REQUEST: {}] ---\n{}\x1b[0m",
             url, req_json
         ),
-        startup::Verbosity::Incremental => {
+        2 => {
             if last_msg_count > 0 && last_msg_count < req.messages.len() {
                 let mut truncated_req = req.clone();
                 truncated_req.messages = truncated_req.messages[last_msg_count..].to_vec();
                 let trunc_json = serde_json::to_string(&truncated_req)?;
                 println!(
-                    "\x1b[90m--- [API REQUEST: {} (Mode 1: Incremental)] ---\x1b[0m",
+                    "\x1b[90m--- [API REQUEST: {} (Verbose 2: Incremental)] ---\x1b[0m",
                     url
                 );
                 println!(
@@ -364,14 +364,15 @@ async fn call_llm(
                 );
             }
         }
-        startup::Verbosity::Metadata => {
+        0 => {} // Verbose 0: Silent
+        _ => {
+            // Verbose 1+: Metadata
             println!(
                 "\x1b[90m--- [API REQUEST: {}] (Content-Length: {}) ---\x1b[0m",
                 url,
                 req_json.len()
             );
         }
-        startup::Verbosity::Silent => {} // Mode 0: Silent
     }
 
     println!(

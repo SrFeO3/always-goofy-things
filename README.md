@@ -27,19 +27,21 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-u, --llm-url <URL>` | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
-| `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | Logging verbosity (`silent`, `metadata`, `incremental`, `full`). | `metadata` |
-| `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`plain`, `standard`). | `standard` |
+| `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`3`). | `1` |
+| `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
-- `0`: Silent (No request logs)
-- `1`: Metadata only (Content-Length)
-- `2`: Incremental display (New messages only)
-- `3`: Full request display (Verbose)
+Controls how much of the LLM conversation is displayed on the terminal.
+- `0`: Silent - no conversation content is shown
+- `1`: Metadata - only summary information (content length) is displayed
+- `2`: Incremental - only newly appended messages are shown
+- `3`: Full - the entire conversation is printed in detail
 
 ### Pretty Levels (`PRETTY_LEVEL`)
-- `0`: Plain
-- `1`: Standard
+Controls the visual styling and decorations applied to the terminal output.
+- `0`: Plain - no colors or visual decorations
+- `1`: Standard - colored text with structured sections and separators
 
 > **Note:** Command-line options always take precedence over environment variables.
 
@@ -49,22 +51,21 @@ Configuration can be set via environment variables or command-line flags (flags 
 cargo run
 ```
 
-### Full Options Example (CLI flags)
+### Full Options Example (CLI flags, excluding llm-api-key)
 ```bash
 cargo run \
     --working-dir ./work \
     --llm-url "http://localhost:11434/v1/chat/completions" \
     --llm-model "gemma4:12b" \
-    --llm-api-key "sk-..." \
     --verbose-level 2 \
     --pretty-level 1
 ```
 
-### Mixed Usage (Environment variables + short CLI flags)
+### Mixed Usage (Environment variables + short CLI flags, caution with cloud AI billing)
 ```bash
-LLM_URL="http://localhost:11434/v1/chat/completions" \
-LLM_MODEL="gemma4:12b" \
-cargo run -v 1 -k "sk-..."
+export LLM_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+ export LLM_API_KEY="......."
+cargo run -v 0 --llm-model gemma-4-31b-it
 ```
 
 ## Example User Queries
