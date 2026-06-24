@@ -53,7 +53,7 @@ cargo run
 
 ### Full Options Example (CLI flags, excluding llm-api-key)
 ```bash
-cargo run \
+cargo run -- \
     --working-dir ./work \
     --llm-url "http://localhost:11434/v1/chat/completions" \
     --llm-model "gemma4:12b" \
@@ -65,7 +65,7 @@ cargo run \
 ```bash
 export LLM_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
  export LLM_API_KEY="......."
-cargo run -v 0 --llm-model gemma-4-31b-it
+cargo run -- -v 0 --llm-model gemma-4-31b-it
 ```
 
 ## Example User Queries
