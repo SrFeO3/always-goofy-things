@@ -279,7 +279,7 @@ async fn main() -> Result<()> {
                     // 1. Show tool call request (LLM to Application)
                     println!(
                         "--- [TOOL EXECUTION REQUESTED{}] ---",
-                        if pretty { " (truncated)" } else { "" }
+                        if pretty { " (BRIEF)" } else { "(FULL)" }
                     );
                     println!("Tool: \x1b[93m{}\x1b[0m", call.function.name);
                     if pretty {
@@ -315,7 +315,12 @@ async fn main() -> Result<()> {
 
                     // 5. Show tool call response (Application to LLM)
                     if pretty {
-                        println!("Result: {}", pretty::truncate_long_json(&tool_result_str));
+                        println!(
+                            "{}Result: {}{}",
+                            startup::C_GRAY,
+                            pretty::truncate_long_json(&tool_result_str),
+                            startup::RESET
+                        );
                     } else {
                         println!("Result: {}", tool_result_str);
                     }
@@ -413,7 +418,10 @@ async fn call_llm(
     let mut request_builder = client
         .post(url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "always-goofy-things-client/0.1")
+        .header(
+            "User-Agent",
+            format!("{}/{}", startup::APP_BIN_NAME, env!("CARGO_PKG_VERSION")),
+        )
         .json(&req);
 
     if let Some(api_key) = api_key {

@@ -10,13 +10,13 @@ pub const MAX_EMPTY_RETRY: usize = 1;
 
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
+pub const APP_BIN_NAME: &str = "always-goofy-things";
 pub const APP_DESCRIPTION: &str = "A mere LLM loop for software development tasks.";
 
 // ANSI escape sequences for text styling.
 pub const HDR_RED: &str = "\x1b[48;2;218;75;80m";
 pub const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
 
-pub const BG_GRAY: &str = "\x1b[48;2;128;128;128m";
 pub const BG_RED: &str = "\x1b[48;2;190;85;85m";
 pub const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
 
@@ -39,7 +39,7 @@ pub type Verbosity = u8;
 #[derive(Parser, Debug)]
 #[command(
     name = APP_NAME,
-    bin_name = "always-goofy-things",
+    bin_name = APP_BIN_NAME,
     version,
     about = APP_DESCRIPTION,
     disable_version_flag = true,

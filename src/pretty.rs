@@ -28,7 +28,7 @@
 //!      - Error: Error reason (multi-line)
 
 use super::startup::{
-    BG_GRAY, BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
+    BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
 };
 
 fn truncate_str(s: &str, limit: usize) -> String {
@@ -129,8 +129,8 @@ fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
 fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_type: Option<&str>) {
     println!();
     let match_label = match match_type {
-        Some("exact") => format!("{}[exact]{}", C_GREEN, RESET),
-        Some("fuzzy") => format!("{}[fuzzy]{}", HDR_GREEN, RESET),
+        Some("exact") => format!("[{}exact{}]", C_GREEN, RESET),
+        Some("fuzzy") => format!("[{}fuzzy{}]", C_RED, RESET),
         _ => String::new(),
     };
     if match_label.is_empty() {
@@ -177,8 +177,8 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
     }
 
     println!(
-        "\n      {}+{} {}-{}{}",
-        C_GREEN, added, C_RED, removed, RESET
+        "\n[{}+{}{}, {}-{}{}]",
+        C_GREEN, added, RESET, C_RED, removed, RESET
     );
 }
 
@@ -344,14 +344,14 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let bytes = content.len() as u64;
             let trimmed = content.trim();
-            let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 10);
+            let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 20);
             let last = {
                 let lines: Vec<&str> = trimmed.lines().collect();
-                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 10)
+                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 20)
             };
             println!(
-                "\x1b[32m✓\x1b[0m \x1b[90mread_file:\x1b[0m {} bytes, L{}–L{} ({}) \"{}…{}\"",
-                bytes, start, end, total, first, last
+                "[{} bytes, {} lines (L{}-L{})] {} ... {}",
+                bytes, total, start, end, first, last
             );
         }
         "write_file" => {
@@ -372,10 +372,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                 .get("bytes_written")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            println!(
-                "\x1b[32m✓\x1b[0m \x1b[90mwrite_file:\x1b[0m {} ({} bytes)",
-                path, bytes
-            );
+            println!("[{} bytes ({})]", bytes, path);
         }
         "str_replace_editor" => {
             let success = obj
@@ -403,29 +400,17 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             };
 
             let match_label = match match_type {
-                Some("exact") => format!("{}{} ", C_GREEN, "[exact]"),
-                Some("fuzzy") => format!("{}{} ", HDR_GREEN, "[fuzzy]"),
+                Some("exact") => format!("[{}exact{}]", C_GREEN, RESET),
+                Some("fuzzy") => format!("[{}fuzzy{}]", C_RED, RESET),
                 _ => String::new(),
             };
 
             match line_range {
-                Some((start_l, end_l)) if start_l != end_l => {
-                    println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} L{}–L{} replaced",
-                        path, match_label, start_l, end_l
-                    );
-                }
-                Some((l, _)) => {
-                    println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} L{} replaced",
-                        path, match_label, l
-                    );
+                Some((start_l, end_l)) => {
+                    println!("[L{}-L{}: {} ({})]", start_l, end_l, match_label, path);
                 }
                 None => {
-                    println!(
-                        "\x1b[32m✓\x1b[0m \x1b[90mstr_replace:\x1b[0m {}{} replaced",
-                        path, match_label
-                    );
+                    println!("[: {} ({})]", match_label, path);
                 }
             }
         }
@@ -440,17 +425,10 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                     let path = m.get("path").and_then(|v| v.as_str()).unwrap_or("?");
                     let line = m.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    println!(
-                        " {}{}:{}:{}{}{}",
-                        BG_GRAY, path, line, text, ERASE_LINE, RESET
-                    );
+                    println!(" - {}:{}:{}", path, line, text);
                 }
             }
-            println!(
-                "\x1b[90m    ← {} match{}\x1b[0m",
-                total,
-                if total != 1 { "es" } else { "" }
-            );
+            println!("[{} match{}]", total, if total != 1 { "es" } else { "" });
         }
         "list_directory" => {
             let entries = obj.get("entries").and_then(|v| v.as_array());
@@ -467,11 +445,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                 }
             }
             let count = entries.map(|e| e.len()).unwrap_or(0);
-            println!(
-                "\x1b[90m    ← {} item{}\x1b[0m",
-                count,
-                if count != 1 { "s" } else { "" }
-            );
+            println!("[{} item{}]", count, if count != 1 { "s" } else { "" });
         }
         "execute_bash" => {
             let exit = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -491,10 +465,10 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                     eprintln!();
                 }
             }
-            if exit != 0 {
-                println!("\x1b[91m✗ exit code {}\x1b[0m", exit);
+            if exit == 0 {
+                println!("[{}{}{}]", C_GREEN, exit, RESET);
             } else {
-                println!("\x1b[32m✓\x1b[0m \x1b[90mexit 0\x1b[0m");
+                println!("[{}{}{}]", C_RED, exit, RESET);
             }
         }
         "fetch_web" => {
@@ -507,15 +481,13 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let bytes = content.len() as u64;
             let trimmed = content.trim();
-            let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 10);
+            let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 20);
             let last = {
                 let lines: Vec<&str> = trimmed.lines().collect();
-                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 10)
+                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 20)
             };
-            println!(
-                "\x1b[32m✓\x1b[0m \x1b[90mfetch_web:\x1b[0m {} {} bytes \"{}…{}\"",
-                url, bytes, first, last
-            );
+
+            println!("[{} bytes ({})] {} ... {}", bytes, url, first, last);
         }
         _ => {
             println!("\x1b[90mResult:\x1b[0m {}", result_str);
