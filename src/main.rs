@@ -274,7 +274,7 @@ async fn main() -> Result<()> {
                         call.function.arguments.to_string()
                     };
 
-                    let pretty = config.pretty_level as u8 > 0;
+                    let pretty = config.pretty_level > 0;
 
                     // 1. Show tool call request (LLM to Application)
                     println!(
@@ -601,11 +601,11 @@ async fn call_llm(
         let has_tool = full_message
             .tool_calls
             .as_ref()
-            .map_or(false, |v| !v.is_empty());
+            .is_some_and(|v| !v.is_empty());
         let has_reasoning = full_message
             .reasoning_content
             .as_ref()
-            .map_or(false, |r| !r.trim().is_empty());
+            .is_some_and(|r| !r.trim().is_empty());
 
         match (has_tool, has_reasoning) {
             (true, true) => println!("Assistant > [Tool Call] (after reasoning)"),

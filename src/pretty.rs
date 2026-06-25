@@ -145,11 +145,14 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
     let mut removed = 0;
 
     for d in &diff {
+        const ADD: &str = " +";
+        const DEL: &str = " -";
+        const NOP: &str = "  ";
         match d {
             DiffLine::Context(c) => {
                 println!(
                     " {}{:<4}{}{:<4} {}{} {}{}{}",
-                    C_GRAY, old_cur, C_GRAY, new_cur, RESET, "  ", EMPTY, c, RESET
+                    C_GRAY, old_cur, C_GRAY, new_cur, RESET, NOP, EMPTY, c, RESET
                 );
                 old_cur += 1;
                 new_cur += 1;
@@ -158,7 +161,7 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
                 removed += 1;
                 println!(
                     " {}{:<4}{}{:<4} {}{} {}{}{}",
-                    HDR_RED, old_cur, EMPTY, EMPTY, BG_RED, " -", ERASE_LINE, c, RESET
+                    HDR_RED, old_cur, EMPTY, EMPTY, BG_RED, DEL, ERASE_LINE, c, RESET
                 );
                 old_cur += 1;
             }
@@ -166,7 +169,7 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
                 added += 1;
                 println!(
                     " {}{:<4}{}{:<4} {}{} {}{}{}",
-                    HDR_GREEN, EMPTY, EMPTY, new_cur, BG_GREEN, " +", ERASE_LINE, c, RESET
+                    HDR_GREEN, EMPTY, EMPTY, new_cur, BG_GREEN, ADD, ERASE_LINE, c, RESET
                 );
                 new_cur += 1;
             }
@@ -188,14 +191,14 @@ fn group_diff(input: &[DiffLine]) -> Vec<DiffLine> {
             DiffLine::Removed(_) => removed_buf.push(item),
             _ => {
                 if !removed_buf.is_empty() {
-                    result.extend(removed_buf.drain(..).map(|d| d.clone()));
+                    result.extend(removed_buf.drain(..).cloned());
                 }
                 result.push(item.clone());
             }
         }
     }
     if !removed_buf.is_empty() {
-        result.extend(removed_buf.into_iter().map(|d| d.clone()));
+        result.extend(removed_buf.into_iter().cloned());
     }
     result
 }
@@ -247,8 +250,8 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
             result.push(DiffLine::Context(l.to_string()));
         }
         result.extend(diff);
-        for i in end..ctx_after {
-            result.push(DiffLine::Context(file_lines[i].to_string()));
+        for line in file_lines.iter().take(ctx_after).skip(end) {
+            result.push(DiffLine::Context(line.to_string()));
         }
 
         let line_num = ctx_before + start_pos.saturating_sub(ctx_before) + 1;
@@ -260,7 +263,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
     let re = match regex::Regex::new(&escaped) {
         Ok(r) => r,
         Err(_) => {
-            println!("{}{} {}", C_RED, "Could not match old_string in:", path);
+            println!("{}Could not match old_string in: {}", C_RED, path);
             println!("  old: {}{}{}", HDR_RED, old_s, RESET);
             println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
             return None;
@@ -269,7 +272,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
 
     let matches: Vec<_> = re.find_iter(&content).collect();
     if matches.is_empty() {
-        println!("{}{} {}", C_RED, "Could not match old_string in:", path);
+        println!("{}Could not match old_string in: {}", C_RED, path);
         println!("  old: {}{}{}", HDR_RED, old_s, RESET);
         println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
         return None;
@@ -283,7 +286,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
     let end_line_num = start_line_num + matched_lines.len();
 
     let new_lines: Vec<&str> = new_s.lines().collect();
-    let diff = group_diff(&compute_diff(&matched_lines.as_slice(), &new_lines));
+    let diff = group_diff(&compute_diff(matched_lines.as_slice(), &new_lines));
 
     let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
     let ctx_after = (end_line_num + 3).min(file_lines.len());
@@ -293,8 +296,8 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
         result.push(DiffLine::Context(l.to_string()));
     }
     result.extend(diff);
-    for i in end_line_num..ctx_after {
-        result.push(DiffLine::Context(file_lines[i].to_string()));
+    for line in file_lines.iter().take(ctx_after).skip(end_line_num) {
+        result.push(DiffLine::Context(line.to_string()));
     }
 
     let line_num = ctx_before + start_line_num.saturating_sub(ctx_before) + 1;
@@ -344,13 +347,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 10);
             let last = {
                 let lines: Vec<&str> = trimmed.lines().collect();
-                truncate_str(
-                    lines
-                        .last()
-                        .unwrap_or(&"")
-                        .trim_end_matches(|c: char| c == '\n'),
-                    10,
-                )
+                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 10)
             };
             println!(
                 "\x1b[32m✓\x1b[0m \x1b[90mread_file:\x1b[0m {} bytes, L{}–L{} ({}) \"{}…{}\"",
@@ -513,13 +510,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let first = truncate_str(trimmed.split('\n').next().unwrap_or(""), 10);
             let last = {
                 let lines: Vec<&str> = trimmed.lines().collect();
-                truncate_str(
-                    lines
-                        .last()
-                        .unwrap_or(&"")
-                        .trim_end_matches(|c: char| c == '\n'),
-                    10,
-                )
+                truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 10)
             };
             println!(
                 "\x1b[32m✓\x1b[0m \x1b[90mfetch_web:\x1b[0m {} {} bytes \"{}…{}\"",
@@ -561,7 +552,7 @@ pub fn pretty_print_command(name: &str, args_json: &str) {
         "str_replace_editor" => {
             if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args_json)
             {
-                show_diff_preview(&path, start_line, diff, Some(&match_type));
+                show_diff_preview(&path, start_line, diff, Some(match_type));
             }
         }
         _ => {}
