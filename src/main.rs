@@ -296,12 +296,12 @@ async fn main() -> Result<()> {
                         pretty::pretty_print_command(&call.function.name, &args_str);
                     }
 
-                    // 3. Confirm and execute (uses tools::confirm_and_execute_tool, including error display)
+                    // 3. Confirm and execute
                     let tool_result =
                         tools::confirm_and_execute_tool(&call.function.name, &args_str).await;
                     let tool_result_str = match &tool_result {
                         Ok(res) => res.clone(),
-                        Err(e) => format!("Error: {}", e),
+                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
                     };
 
                     // 4. Pretty print result

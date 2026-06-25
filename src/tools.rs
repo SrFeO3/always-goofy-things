@@ -25,7 +25,7 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
-use super::startup::{C_CYAN, RESET};
+use super::startup::{C_CYAN, C_GREEN, C_RED, RESET};
 
 pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^ls",
@@ -182,79 +182,24 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
 }
 
 pub async fn execute_tool(name: &str, args_json: &str) -> Result<String> {
-    let args: serde_json::Value = serde_json::from_str(args_json)?;
+    let args: serde_json::Value = serde_json::from_str(args_json)
+        .map_err(|e| anyhow!("[JSON_PARSE_FAILED] {}", e))?;
 
-    // Path security check for tools that take 'path'
+     // Path security check for tools that take 'path'
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
-    }
+     }
 
     match name {
-        "read_file" => {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("path missing"))?;
-            let start = args["start_line"].as_u64().map(|v| v as usize);
-            let end = args["end_line"].as_u64().map(|v| v as usize);
-            execute_read_file(path, start, end)
-        }
-        "write_file" => {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("path missing"))?;
-            let content = args["content"]
-                .as_str()
-                .ok_or_else(|| anyhow!("content missing"))?;
-
-            if let Err(e) = validate_path(path) {
-                return Ok(json!({
-                    "success": false,
-                    "path": path,
-                    "error_code": "OUTSIDE_WORKSPACE",
-                    "error": e.to_string()
-                })
-                .to_string());
-            }
-            Ok(execute_write_file(path, content))
-        }
-        "str_replace_editor" => {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("path missing"))?;
-            let old_str = args["old_string"]
-                .as_str()
-                .ok_or_else(|| anyhow!("old_string missing"))?;
-            let new_str = args["new_string"]
-                .as_str()
-                .ok_or_else(|| anyhow!("new_string missing"))?;
-            Ok(execute_str_replace(path, old_str, new_str))
-        }
-        "grep_search" => {
-            let query = args["query"]
-                .as_str()
-                .ok_or_else(|| anyhow!("query missing"))?;
-            let path = args["path"].as_str();
-            execute_grep_search(query, path)
-        }
-        "list_directory" => {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("path missing"))?;
-            let recursive = args["recursive"].as_bool().unwrap_or(false);
-            execute_list_directory(path, recursive)
-        }
-        "execute_bash" => {
-            let command = args["command"]
-                .as_str()
-                .ok_or_else(|| anyhow!("command missing"))?;
-            execute_bash(command).await
-        }
-        "fetch_web" => {
-            let url = args["url"].as_str().ok_or_else(|| anyhow!("url missing"))?;
-            execute_fetch_web(url).await
-        }
-        _ => Err(anyhow!("Unknown tool: {}", name)),
-    }
+         "read_file" => execute_read_file(&args),
+         "write_file" => execute_write_file(&args),
+         "str_replace_editor" => execute_str_replace(&args),
+         "grep_search" => execute_grep_search(&args),
+         "list_directory" => execute_list_directory(&args),
+         "execute_bash" => execute_bash(&args).await,
+         "fetch_web" => execute_fetch_web(&args).await,
+         _ => Err(anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
+     }
 }
 
 fn validate_path(path: &str) -> Result<()> {
@@ -262,63 +207,67 @@ fn validate_path(path: &str) -> Result<()> {
     for component in std::path::Path::new(path).components() {
         match component {
             std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                return Err(anyhow!("Security violation: Absolute paths are forbidden."));
-            }
+                return Err(anyhow!("[SECURITY_VIOLATION] Absolute paths are forbidden."));
+             }
             std::path::Component::ParentDir => {
                 depth -= 1;
-            }
+             }
             std::path::Component::Normal(_) => {
                 depth += 1;
-            }
+             }
             std::path::Component::CurDir => {}
-        }
+          }
         if depth < 0 {
             return Err(anyhow!(
-                "Security violation: Directory traversal outside workspace is forbidden."
-            ));
-        }
-    }
+                 "[SECURITY_VIOLATION] Directory traversal outside workspace is forbidden."
+             ));
+          }
+      }
     Ok(())
 }
 
 /// Prompts the user for confirmation and then executes the specified tool.
 /// This function encapsulates the user interaction for tool execution approval.
 pub async fn confirm_and_execute_tool(name: &str, args_json: &str) -> Result<String> {
-    // Ask for user confirmation before execution
-    print!("{}Execute this tool? (y/N): {}", C_CYAN, RESET);
+      // Ask for user confirmation before execution
+    print!("{}[CONFIRM]{} Execute tool '{}'? (y/N): ", C_CYAN, RESET, name);
     io::stdout().flush()?;
     let mut confirm = String::new();
     io::stdin().read_line(&mut confirm)?;
 
     let result = if confirm.trim().to_lowercase() == "y" {
         execute_tool(name, args_json).await
-    } else {
-        Ok("Execution denied by user.".to_string())
-    };
+       } else {
+        Ok("[DENIED] Tool execution skipped by user.".to_string())
+       };
 
-    // Log success/failure of the tool execution
+       // Log success/failure of the tool execution
     match &result {
-        Ok(_) => println!("✅ Tool executed successfully."),
-        Err(e) => println!("❌ Tool execution failed: {}", e),
-    };
+        Ok(_) => println!("[{}SUCCESS{}]", C_GREEN, RESET),
+        Err(e) => println!("[{}FAILED{}] {}", C_RED, RESET, e),
+       };
     result
 }
 
-fn execute_read_file(
-    path: &str,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
-) -> Result<String> {
-    let content = fs::read_to_string(path)?;
+fn execute_read_file(args: &serde_json::Value) -> Result<String> {
+    let path = args["path"].as_str()
+         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
+    let content = fs::read_to_string(path)
+         .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
-    let start = start_line.unwrap_or(1).max(1) - 1;
-    let end = end_line.unwrap_or(total_lines).min(total_lines);
+    let start = args["start_line"]
+        .as_u64()
+        .map(|v| (v as usize).saturating_sub(1))
+        .unwrap_or(0);
 
-    if start > end || start >= total_lines {
-        return Ok(json!({ "path": path, "error": "Invalid line range" }).to_string());
-    }
+    let end = args["end_line"]
+        .as_u64()
+        .map(|v| (v as usize).min(total_lines))
+        .unwrap_or(total_lines);    if start > end || start >= total_lines {
+        return Err(anyhow!("[INVALID_ARGUMENTS] Invalid line range (total lines: {})", total_lines));
+      }
 
     let sliced_content = lines[start..end].join("\n");
 
@@ -335,32 +284,27 @@ fn execute_read_file(
     .to_string())
 }
 
-fn execute_write_file(path: &str, content: &str) -> String {
-    if content.len() as u64 > MAX_FILE_SIZE {
-        return json!({
-            "success": false,
-            "path": path,
-            "error_code": "FILE_TOO_LARGE",
-            "error": "File content exceeds 10MB limit"
-        })
-        .to_string();
-    }
+fn execute_write_file(args: &serde_json::Value) -> Result<String> {
+    let path = args["path"].as_str()
+          .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
+    let content = args["content"].as_str()
+          .ok_or_else(|| anyhow!("[MISSING_PARAMETER] content is required"))?;
 
-    match atomic_write_with_dir(path, content) {
-        Ok(bytes) => json!({
-            "success": true,
-            "path": path,
-            "bytes_written": bytes
-        })
-        .to_string(),
-        Err(e) => json!({
-            "success": false,
-            "path": path,
-            "error_code": "WRITE_FAILED",
-            "error": e.to_string()
-        })
-        .to_string(),
-    }
+    if let Err(e) = validate_path(path) {
+        return Err(anyhow!("[OUTSIDE_WORKSPACE] {}", e));
+       }
+
+    if content.len() as u64 > MAX_FILE_SIZE {
+        return Err(anyhow!("[FILE_TOO_LARGE] File content exceeds 10MB limit"));
+       }    let bytes =
+        atomic_write_with_dir(path, content).map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+
+    Ok(json!({
+        //"success": true,
+        "path": path,
+        "bytes_written": bytes
+    })
+    .to_string())
 }
 
 fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
@@ -393,84 +337,102 @@ fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
     Ok(content.len())
 }
 
-fn execute_str_replace(path: &str, old_str: &str, new_str: &str) -> String {
-    let metadata = match fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) => return json!({ "success": false, "path": path, "error": e.to_string(), "error_code": "READ_FAILED" }).to_string(),
-    };
+fn execute_str_replace(args: &serde_json::Value) -> Result<String> {
+    let path = args["path"]
+         .as_str()
+         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
+    let old_str = args["old_string"]
+         .as_str()
+         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] old_string is required"))?;
+    let new_str = args["new_string"]
+         .as_str()
+         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] new_string is required"))?;
 
+    if let Err(e) = validate_path(path) {
+        return Err(anyhow!("[OUTSIDE_WORKSPACE] {}", e));
+     }
+
+    let metadata = fs::metadata(path)
+        .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not stat '{}': {}", path, e))?;
     if metadata.len() > MAX_FILE_SIZE {
-        return json!({ "success": false, "path": path, "error_code": "FILE_TOO_LARGE", "error": "File exceeds 10MB limit" }).to_string();
-    }
+        return Err(anyhow!("[FILE_TOO_LARGE] File exceeds 10MB limit"));
+     }
 
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            return json!({ "success": false, "path": path, "error": e.to_string() }).to_string();
-        }
-    };
+    let content = fs::read_to_string(path)
+        .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
 
-    // Try exact match first
+     // Try exact match first
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
-        match atomic_write_with_dir(path, &new_content) {
-            Ok(_) => return json!({ "success": true, "path": path, "occurrences_replaced": 1, "match_type": "exact" }).to_string(),
-            Err(e) => return json!({ "success": false, "path": path, "error": e.to_string(), "error_code": "WRITE_FAILED" }).to_string(),
-        }
-    }
+        atomic_write_with_dir(path, &new_content).map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+        return Ok(json!({
+             "path": path,
+             "occurrences_replaced": 1,
+             "match_type": "exact"
+         })
+         .to_string());
+     }
 
-    // Fallback to fuzzy match by normalizing whitespace
+     // Fallback to fuzzy match by normalizing whitespace
     let escaped = regex::escape(old_str).replace(r" ", r"\s*");
-    let re = match Regex::new(&escaped) {
-        Ok(r) => r,
-        Err(_) => {
-            return json!({ "success": false, "path": path, "error": "Invalid regex pattern" })
-                .to_string();
-        }
-    };
+    let re = Regex::new(&escaped).map_err(|e| anyhow!("[INVALID_ARGUMENTS] Invalid regex pattern: {}", e))?;
 
     let matches: Vec<_> = re.find_iter(&content).collect();
 
     if matches.is_empty() {
-        return json!({ "success": false, "path": path, "error": "old_string not found" })
-            .to_string();
-    }
+        return Err(anyhow!("[NO_MATCH] old_string not found in '{}'", path));
+     }
     if matches.len() > 1 {
-        return json!({ "success": false, "path": path, "error": "Multiple matches found. Be more specific." }).to_string();
-    }
+        return Err(anyhow!("[AMBIGUOUS_MATCH] Multiple matches found ({}). Be more specific.", matches.len()));
+     }
 
     let new_content = re
-        .replace(&content, |_caps: &regex::Captures| new_str.to_string())
-        .to_string();
-    if let Err(e) = fs::write(path, new_content) {
-        return json!({ "success": false, "path": path, "error": e.to_string() }).to_string();
-    }
-    json!({ "success": true, "path": path, "occurrences_replaced": 1, "match_type": "fuzzy" })
-        .to_string()
+         .replace(&content, |_caps: &regex::Captures| new_str.to_string())
+         .to_string();
+    atomic_write_with_dir(path, &new_content).map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+
+
+    Ok(json!({
+        "path": path,
+        "occurrences_replaced": 1,
+        "match_type": "fuzzy"
+    })
+    .to_string())
 }
 
-fn execute_list_directory(path: &str, recursive: bool) -> Result<String> {
+fn execute_list_directory(args: &serde_json::Value) -> Result<String> {
+    let path = args["path"]
+          .as_str()
+          .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
+    let recursive = args["recursive"].as_bool().unwrap_or(false);
     let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let metadata = entry.metadata()?;
+    for entry in fs::read_dir(path)
+            .map_err(|e| anyhow!("[DIRECTORY_READ_FAILED] Could not read directory '{}': {}", path, e))? {
+        let entry = entry
+            .map_err(|e| anyhow!("[DIRECTORY_READ_FAILED] Error reading entry in '{}': {}", path, e))?;
+        let file_type = entry.file_type()
+            .map_err(|e| anyhow!("[DIRECTORY_READ_FAILED] Error getting file type: {}", e))?;
+        let metadata = entry.metadata()
+            .map_err(|e| anyhow!("[DIRECTORY_READ_FAILED] Error getting metadata: {}", e))?;
         entries.push(json!({
-            "name": entry.file_name().to_string_lossy(),
-            "type": if file_type.is_dir() { "directory" } else { "file" },
-            "size": metadata.len()
-        }));
-    }
+             "name": entry.file_name().to_string_lossy(),
+             "type": if file_type.is_dir() { "directory" } else { "file" },
+             "size": metadata.len()
+          }));
+      }
     Ok(json!({ "path": path, "entries": entries, "recursive": recursive }).to_string())
 }
 
-fn execute_grep_search(query: &str, path: Option<&str>) -> Result<String> {
-    let search_path = path.unwrap_or(".");
+fn execute_grep_search(args: &serde_json::Value) -> Result<String> {
+    let query = args["query"].as_str()
+           .ok_or_else(|| anyhow!("[MISSING_PARAMETER] query is required"))?;
+    let search_path = args["path"].as_str().unwrap_or(".");
     let output = std::process::Command::new("grep")
-        .arg("-rnE")
-        .arg(query)
-        .arg(search_path)
-        .output()?;
+           .arg("-rnE")
+           .arg(query)
+           .arg(search_path)
+           .output()
+           .map_err(|e| anyhow!("[GREP_EXECUTION_FAILED] grep command failed: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut matches = Vec::new();
@@ -496,38 +458,41 @@ fn execute_grep_search(query: &str, path: Option<&str>) -> Result<String> {
     .to_string())
 }
 
-async fn execute_bash(command: &str) -> Result<String> {
+async fn execute_bash(args: &serde_json::Value) -> Result<String> {
+    let command = args["command"]
+            .as_str()
+            .ok_or_else(|| anyhow!("[MISSING_PARAMETER] command is required"))?;
     let cmd_trim = command.trim();
 
-    // Whitelist verification using pre-compiled regexes
+     // Whitelist verification using pre-compiled regexes
     let is_allowed = COMMAND_ALLOW_LIST_RE.iter().any(|re| re.is_match(cmd_trim));
 
     if !is_allowed {
-        return Err(anyhow!("Command not in whitelist. Security rejection."));
-    }
+        return Err(anyhow!("[BASH_NOT_WHITELISTED] Command not in whitelist: {}", cmd_trim));
+      }
 
-    // Robust check for absolute paths and directory traversal
+     // Robust check for absolute paths and directory traversal
     if ABSOLUTE_PATH_RE.is_match(cmd_trim) || PATH_TRAVERSAL_RE.is_match(cmd_trim) {
         return Err(anyhow!(
-            "Security violation: Absolute paths or directory traversal detected."
-        ));
-    }
+             "[SECURITY_VIOLATION] Absolute paths or directory traversal detected in bash command."
+         ));
+      }
 
-    // Basic check for interactive commands
+     // Basic check for interactive commands
     if ["nano", "vim", "top", "ssh"]
-        .iter()
-        .any(|&c| cmd_trim.contains(c))
-    {
-        return Err(anyhow!("Interactive commands are not allowed."));
-    }
+           .iter()
+           .any(|&c| cmd_trim.contains(c))
+       {
+        return Err(anyhow!("[BASH_INTERACTIVE] Interactive commands are not allowed."));
+      }
 
     let cmd_process = TokioCommand::new("bash").arg("-c").arg(cmd_trim).output();
 
     let output = match tokio::time::timeout(Duration::from_secs(30), cmd_process).await {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(anyhow!("Execution error: {}", e)),
-        Err(_) => return Err(anyhow!("Command timed out after 30 seconds.")),
-    };
+        Ok(Err(e)) => return Err(anyhow!("[BASH_EXECUTION_FAILED] Bash execution error: {}", e)),
+        Err(_) => return Err(anyhow!("[BASH_TIMED_OUT] Command timed out after 30 seconds.")),
+       };
 
     let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -551,21 +516,25 @@ async fn execute_bash(command: &str) -> Result<String> {
     .to_string())
 }
 
-async fn execute_fetch_web(url: &str) -> Result<String> {
+async fn execute_fetch_web(args: &serde_json::Value) -> Result<String> {
+    let url = args["url"].as_str().ok_or_else(|| anyhow!("[MISSING_PARAMETER] url is required"))?;
     validate_url(url)?;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+          .timeout(Duration::from_secs(10))
+          .build()
+          .map_err(|e| anyhow!("[NETWORK_REQUEST_FAILED] Failed to build HTTP client: {}", e))?;
 
-    let res = client.get(url).send().await?;
+    let res = client.get(url).send().await
+          .map_err(|e| anyhow!("[NETWORK_REQUEST_FAILED] Failed to send request to '{}': {}", url, e))?;
     let content_type = res
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("text/html")
-        .to_string();
-    let body = res.text().await?;
+          .headers()
+          .get("content-type")
+          .and_then(|v| v.to_str().ok())
+          .unwrap_or("text/html")
+          .to_string();
+    let body = res.text().await
+          .map_err(|e| anyhow!("[NETWORK_REQUEST_FAILED] Failed to read response from '{}': {}", url, e))?;
 
     let clean_text = strip_html_tags(&body);
     let truncated_content = if clean_text.len() > 20480 {
@@ -585,24 +554,24 @@ async fn execute_fetch_web(url: &str) -> Result<String> {
 
 fn validate_url(url: &str) -> Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(anyhow!("Invalid scheme. Only http/https allowed."));
-    }
+        return Err(anyhow!("[INVALID_URL] Invalid scheme. Only http/https allowed."));
+      }
     let host_port = url.split('/').nth(2).unwrap_or("");
     let host = host_port.split(':').next().unwrap_or("");
 
     if host.to_lowercase() == "localhost" {
-        return Err(anyhow!("Access to localhost is forbidden."));
-    }
+        return Err(anyhow!("[SECURITY_VIOLATION] Access to localhost is forbidden."));
+      }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         let is_private = match ip {
             IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
             IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00, // Unique Local Address (fc00::/7)
-        };
+         };
         if is_private {
-            return Err(anyhow!("Access to private network is forbidden."));
-        }
-    }
+            return Err(anyhow!("[SECURITY_VIOLATION] Access to private network is forbidden."));
+         }
+      }
     Ok(())
 }
 
@@ -653,12 +622,12 @@ fn strip_html_tags(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use std::fs;
 
-    // Helper to generate a unique temporary path for testing
+    // Helper to generate a unique temporary path for testing (relative path)
     fn get_temp_path(name: &str) -> std::path::PathBuf {
-        let mut path = env::temp_dir();
+        fs::create_dir_all("./tmp").ok();
+        let mut path = std::path::Path::new("./tmp").to_path_buf();
         path.push(format!(
             "agt_test_{}_{}",
             name,
@@ -677,13 +646,21 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         // Test full file read
-        let res = execute_read_file(path_str, None, None).unwrap();
+        let args = json!({
+            "path": path_str,
+        });
+        let res = execute_read_file(&args).unwrap();
         let val: serde_json::Value = serde_json::from_str(&res).unwrap();
         assert_eq!(val["total_lines"], 4);
         assert!(val["content"].as_str().unwrap().contains("line4"));
 
         // Test specific line range read (lines 2-3)
-        let res = execute_read_file(path_str, Some(2), Some(3)).unwrap();
+        let args = json!({
+            "path": path_str,
+            "start_line":Some(2),
+            "end_line":Some(3)
+        });
+        let res = execute_read_file(&args).unwrap();
         let val: serde_json::Value = serde_json::from_str(&res).unwrap();
         assert_eq!(val["content"], "line2\nline3");
         assert!(val["truncated"].as_bool().unwrap());
@@ -696,11 +673,14 @@ mod tests {
         let path = get_temp_path("write");
         let path_str = path.to_str().unwrap();
         let content = "test content for write_file";
+        let args = json!({
+            "path": path_str,
+            "content": content
+        });
 
-        let res = execute_write_file(path_str, content);
+        let res = execute_write_file(&args).unwrap();
         let val: serde_json::Value = serde_json::from_str(&res).unwrap();
         assert_eq!(val["path"], path_str);
-        assert_eq!(val["success"], true);
         assert_eq!(val["bytes_written"], content.len() as u64);
 
         let actual_content = fs::read_to_string(path_str).unwrap();
@@ -716,18 +696,21 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         // Match
-        let res1 = execute_str_replace(path_str, "println!( \"hello\" );", "println!(\"world\");");
-        assert!(res1.contains("\"success\":true"));
+        let _res1 = execute_str_replace(
+            &json!({ "path": path_str, "old_string": "println!( \"hello\" );", "new_string": "println!(\"world\");" }),
+        );
 
         let content = fs::read_to_string(path_str).unwrap();
         assert!(content.contains("println!(\"world\");"));
 
         // Fuzzy match
-        let res2 = execute_str_replace(path_str, "println! ( \"world\" ) ;", "fixed();");
+        let res2 = execute_str_replace(
+            &json!({ "path": path_str, "old_string": "println! ( \"world\" ) ;", "new_string": "fixed();" }),
+        );
         assert!(
-            res2.contains("\"success\":true"),
+            res2.as_ref().unwrap().contains("\"match_type\":\"fuzzy\""),
             "Fuzzy match failed: {}",
-            res2
+            res2.as_ref().unwrap()
         );
 
         let content = fs::read_to_string(path_str).unwrap();
@@ -739,7 +722,7 @@ mod tests {
     #[test]
     fn test_list_directory() {
         // Test directory listing for the project root
-        let res = execute_list_directory(".", false).unwrap();
+        let res = execute_list_directory(&json!({ "path": ".", "recursive": false })).unwrap();
         assert!(res.contains("src"));
         assert!(res.contains("Cargo.toml") || res.contains("Cargo.lock"));
     }
@@ -747,7 +730,9 @@ mod tests {
     #[test]
     fn test_grep_search() {
         // Search for a function definition within the project source
-        let res = execute_grep_search("pub fn get_tool_definitions", Some("src")).unwrap();
+        let res =
+            execute_grep_search(&json!({ "query": "pub fn get_tool_definitions", "path": "src" }))
+                .unwrap();
         assert!(res.contains("tools.rs"));
         assert!(res.contains("\"line\":"));
     }
@@ -755,24 +740,26 @@ mod tests {
     #[tokio::test]
     async fn test_execute_bash_security() {
         // Test an allowed command from the whitelist
-        let res = execute_bash("echo 'test execution'").await.unwrap();
+        let res = execute_bash(&json!({ "command": "echo 'test execution'" }))
+            .await
+            .unwrap();
         assert!(res.contains("test execution"));
         assert!(res.contains("\"exit_code\":0"));
 
         // Test a command blocked by the security whitelist
-        let res = execute_bash("rm -rf /tmp/some_non_existent_file").await;
+        let res = execute_bash(&json!({ "command": "rm -rf /tmp/some_non_existent_file" })).await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Security rejection"));
+        assert!(res.unwrap_err().to_string().contains("BASH_NOT_WHITELISTED"));
     }
 
     #[tokio::test]
     async fn test_fetch_web_validation() {
         // Test invalid URL scheme
-        let res = execute_fetch_web("ftp://example.com").await;
+        let res = execute_fetch_web(&json!({ "url": "ftp://example.com" })).await;
         assert!(res.is_err());
 
         // Test private network access rejection
-        let res = execute_fetch_web("http://127.0.0.1/admin").await;
+        let res = execute_fetch_web(&json!({ "url": "http://127.0.0.1/admin" })).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("forbidden"));
     }

@@ -40,9 +40,9 @@ fn truncate_str(s: &str, limit: usize) -> String {
     format!("{}...{}", first, last)
 }
 
-/// Truncate any long string values in result JSON for display.
-/// Walks the entire JSON tree and truncates every string that exceeds the limit.
-/// All strings use head 10 chars + ... + tail 10 chars.
+/// Truncate long string values and compress oversized arrays in result JSON for concise display.
+/// Walks the entire JSON tree, truncating strings over 10 chars and capping arrays at max 2 elements (first, ..., last).
+/// Returns a modified JSON string with all placeholders formatted without quotes.
 pub fn truncate_long_json(result: &str) -> String {
     let val: serde_json::Value = match serde_json::from_str(result) {
         Ok(v) => v,
@@ -58,6 +58,16 @@ pub fn truncate_long_json(result: &str) -> String {
                 }
             }
             serde_json::Value::Array(arr) => {
+                if arr.len() > 2 {
+                    let first = arr.remove(0);
+                    let last = arr.pop().unwrap();
+
+                    arr.clear();
+                    arr.push(first);
+                    arr.push(serde_json::Value::String("...".to_string()));
+                    arr.push(last);
+                }
+
                 for item in arr.iter_mut() {
                     walk(item);
                 }
@@ -323,6 +333,7 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             return;
         }
     };
+
     let obj = match json.as_object() {
         Some(o) => o,
         None => {
@@ -350,8 +361,8 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
                 truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 20)
             };
             println!(
-                "[{} bytes, {} lines (L{}-L{})] {} ... {}",
-                bytes, total, start, end, first, last
+                "[{} bytes, L{}-L{} (file total: {} lines)] {} ... {}",
+                bytes, start, end, total, first, last
             );
         }
         "write_file" => {
