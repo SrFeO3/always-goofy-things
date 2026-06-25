@@ -263,7 +263,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
     let re = match regex::Regex::new(&escaped) {
         Ok(r) => r,
         Err(_) => {
-            println!("{}Could not match old_string in: {}", C_RED, path);
+            println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
             println!("  old: {}{}{}", HDR_RED, old_s, RESET);
             println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
             return None;
@@ -272,7 +272,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
 
     let matches: Vec<_> = re.find_iter(&content).collect();
     if matches.is_empty() {
-        println!("{}Could not match old_string in: {}", C_RED, path);
+        println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
         println!("  old: {}{}{}", HDR_RED, old_s, RESET);
         println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
         return None;
@@ -453,14 +453,14 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
             if !stdout.is_empty() {
                 for line in stdout.lines() {
-                    println!(" stderr: {}", line);
+                    println!(" {}stdout{}:{} {}", C_GREEN, C_GRAY, RESET, line);
                 }
                 if !stdout.ends_with('\n') {
                     println!();
                 }
             }
             if !stderr.is_empty() {
-                println!(" stderr: {}", stderr);
+                println!(" {}stderr{}:{} {}", C_RED, C_GRAY, RESET, stderr);
                 if !stderr.ends_with('\n') {
                     eprintln!();
                 }
