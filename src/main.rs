@@ -269,14 +269,17 @@ async fn main() -> Result<()> {
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
-                    // Handle arguments that might be a JSON object (Ollama) or a stringified JSON (OpenAI)
-                    let args_str = if let Some(s) = call.function.arguments.as_str() {
-                        s.to_string()
-                    } else {
-                        call.function.arguments.to_string()
-                    };
+                    // Parse stringified JSON from OpenAI, or fallback to Null if it's already an object/null.
+                    // This handles both raw JSON objects (Ollama) and stringified JSON (OpenAI) safely.
+                    let args = call
+                        .function
+                        .arguments
+                        .as_str()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(serde_json::Value::Null);
 
                     let pretty = config.pretty_level > 0;
+                    let mut user_denied = false;
 
                     // 1. Show tool call request (LLM to Application)
                     println!(
@@ -285,59 +288,46 @@ async fn main() -> Result<()> {
                     );
                     println!("Tool: \x1b[93m{}\x1b[0m", call.function.name);
                     if pretty {
-                        println!(
-                            "Args: \x1b[93m{}\x1b[0m",
-                            pretty::truncate_long_json(&args_str)
-                        );
+                        println!("Args: \x1b[93m{}\x1b[0m", pretty::truncate_long_json(&args));
                     } else {
-                        println!("Args: \x1b[93m{}\x1b[0m", args_str);
+                        println!("Args: \x1b[93m{}\x1b[0m", &args);
                     }
 
                     // 2. Pretty print command
                     if pretty {
-                        pretty::pretty_print_command(&call.function.name, &args_str);
+                        pretty::pretty_print_command(&call.function.name, &args);
                     }
-
-                    let args_json: serde_json::Value =
-                        serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::Value::Null);
 
                     // 3. Confirm and execute
                     let tool_result =
-                        tools::confirm_and_execute_tool(&call.function.name, &args_json).await;
-                    let mut user_denied = false;
-                    let tool_result_str = match &tool_result {
-                        Ok(res) => {
-                            if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
-                                user_denied = true;
-                                println!("User denied");
-                            } else {
-                                println!("OK");
+                        match tools::confirm_and_execute_tool(&call.function.name, &args).await {
+                            Ok(res) => {
+                                if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
+                                    user_denied = true;
+                                    println!("User denied");
+                                } else {
+                                    println!("OK");
+                                }
+                                res
                             }
-                            serde_json::to_string(res).unwrap()
-                        }
-                        Err(e) => {
-                            println!("NG: {:?}", e);
-                            serde_json::json!({"error": e.to_string()}).to_string()
-                        }
-                    };
+                            Err(e) => {
+                                println!("NG: {}", e);
+                                serde_json::json!({"error": e.to_string()})
+                            }
+                        };
 
                     // 4. Pretty print result (only on Ok)
                     if pretty && !user_denied {
-                        if tool_result.is_ok() {
-                            pretty::pretty_print_result(
-                                &call.function.name,
-                                &tool_result_str,
-                                Some(&args_str),
-                            );
-                        }
+                        pretty::pretty_print_result(&call.function.name, &tool_result, Some(&args));
                     }
 
                     // 5. Show tool call response (Application to LLM)
+                    let tool_result_str = serde_json::to_string(&tool_result).unwrap();
                     if pretty {
                         println!(
                             "{}Tool Call Response: {}{}",
                             C_GRAY,
-                            pretty::truncate_long_json(&tool_result_str),
+                            pretty::truncate_long_json(&tool_result),
                             RESET
                         );
                     } else {

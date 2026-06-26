@@ -28,6 +28,8 @@
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!      - Error: Error reason (multi-line)
 
+use serde_json::Value;
+
 use super::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
 };
@@ -44,49 +46,42 @@ fn truncate_str(s: &str, limit: usize) -> String {
 /// Truncate long string values and compress oversized arrays in result JSON for concise display.
 /// Walks the entire JSON tree, truncating strings over 10 chars and capping arrays at max 2 elements (first, ..., last).
 /// Returns a modified JSON string with all placeholders formatted without quotes.
-pub fn truncate_long_json(result: &str) -> String {
-    let val: serde_json::Value = match serde_json::from_str(result) {
-        Ok(v) => v,
-        Err(_) => return result.to_string(),
-    };
+pub fn truncate_long_json(result: &Value) -> String {
+    let mut val = result.clone();
+    walk(&mut val);
+    serde_json::to_string(&val).unwrap_or_else(|_| result.to_string())
+}
 
-    fn walk(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::String(s) => {
-                let truncated = truncate_str(s, 10);
-                if truncated != *s {
-                    *s = truncated;
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                if arr.len() > 2 {
-                    let first = arr.remove(0);
-                    let last = arr.pop().unwrap();
-
-                    arr.clear();
-                    arr.push(first);
-                    arr.push(serde_json::Value::String("...".to_string()));
-                    arr.push(last);
-                }
-
-                for item in arr.iter_mut() {
-                    walk(item);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for (_, v) in map.iter_mut() {
-                    walk(v);
-                }
-            }
-            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+fn walk(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            let truncated = truncate_str(s, 10);
+            if truncated != *s {
+                *s = truncated;
             }
         }
+        Value::Array(arr) => {
+            if arr.len() > 2 {
+                let first = arr.remove(0);
+                let last = arr.pop().unwrap();
+
+                arr.clear();
+                arr.push(first);
+                arr.push(Value::String("...".to_string()));
+                arr.push(last);
+            }
+
+            for item in arr.iter_mut() {
+                walk(item);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                walk(v);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
-
-    let mut val = val;
-    walk(&mut val);
-
-    serde_json::to_string(&val).unwrap_or_else(|_| result.to_string())
 }
 
 // A single line of diff output.
@@ -214,8 +209,7 @@ fn group_diff(input: &[DiffLine]) -> Vec<DiffLine> {
     result
 }
 
-fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffLine>, &str)> {
-    let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine>, &str)> {
     let obj = args.as_object()?;
     let path = obj.get("path")?.as_str()?.to_string();
     let old_s = obj.get("old_string")?.as_str()?;
@@ -315,8 +309,7 @@ fn compute_str_replace_diff(args_json: &str) -> Option<(String, usize, Vec<DiffL
     Some((path, line_num, result, "fuzzy"))
 }
 
-fn compute_replace_lines(path: &str, args_json: &str) -> Option<(u64, u64)> {
-    let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+fn compute_replace_lines(path: &str, args: &Value) -> Option<(u64, u64)> {
     let new_s = args.get("new_string")?.as_str()?;
     let content = std::fs::read_to_string(path).ok()?;
     let pos = content.find(new_s)?;
@@ -326,19 +319,11 @@ fn compute_replace_lines(path: &str, args_json: &str) -> Option<(u64, u64)> {
     Some((start_line, end_line))
 }
 
-pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>) {
-    let json = match serde_json::from_str::<serde_json::Value>(result_str) {
-        Ok(v) => v,
-        Err(_) => {
-            println!("\x1b[90mResult:\x1b[0m {}", result_str);
-            return;
-        }
-    };
-
-    let obj = match json.as_object() {
+pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>) {
+    let obj = match result.as_object() {
         Some(o) => o,
         None => {
-            println!("\x1b[90mResult:\x1b[0m {}", result_str);
+            println!("\x1b[90mResult:\x1b[0m {}", result);
             return;
         }
     };
@@ -468,19 +453,15 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             println!("[{} bytes ({})] {} ... {}", bytes, url, first, last);
         }
         _ => {
-            println!("\x1b[90mResult:\x1b[0m {}", result_str);
+            println!("\x1b[90mResult:\x1b[0m {}", result);
         }
     }
 }
 
 // Pretty-print command preview before execution.
-pub fn pretty_print_command(name: &str, args_json: &str) {
+pub fn pretty_print_command(name: &str, args: &Value) {
     match name {
         "write_file" => {
-            let args = match serde_json::from_str::<serde_json::Value>(args_json) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
             let obj = match args.as_object() {
                 Some(o) => o,
                 None => return,
@@ -500,8 +481,7 @@ pub fn pretty_print_command(name: &str, args_json: &str) {
             show_diff_preview(&path, 1, diff, None);
         }
         "str_replace_editor" => {
-            if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args_json)
-            {
+            if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args) {
                 show_diff_preview(&path, start_line, diff, Some(match_type));
             }
         }
@@ -545,14 +525,13 @@ for i in range(1, 3):
         let temp_path = get_temp_path("hello_world");
         create_test_file(&temp_path);
 
-        let args_json = serde_json::json!({
+        let args = serde_json::json!({
             "new_string": "print(\"bonjour le monde\");",
             "old_string": "print(\"hello world\");",
             "path": temp_path.to_string_lossy()
-        })
-        .to_string();
+        });
 
-        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args) {
             show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
@@ -563,14 +542,13 @@ for i in range(1, 3):
         let temp_path = get_temp_path("how_are_you");
         create_test_file(&temp_path);
 
-        let args_json = serde_json::json!({
+        let args = serde_json::json!({
             "new_string": "print(\"comment allez-vous ?\");",
             "old_string": "print(\"how are you?\");",
             "path": temp_path.to_string_lossy()
-        })
-        .to_string();
+        });
 
-        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args) {
             show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
@@ -593,14 +571,13 @@ for i in range(1, 3):
         )
         .expect("Failed to create test file");
 
-        let args_json = serde_json::json!({
-           "new_string": "print(\"bonjour\");\nprint(\"comment allez-vous ?\");\nprint(\"bar\");",
-           "old_string": "print(\"hello world\");\nprint(\"how are you?\");\nprint(\"foo\");",
-           "path": temp_path.to_string_lossy()
-        })
-        .to_string();
+        let args = serde_json::json!({
+            "new_string": "print(\"bonjour\");\nprint(\"comment allez-vous ?\");\nprint(\"bar\");",
+            "old_string": "print(\"hello world\");\nprint(\"how are you?\");\nprint(\"foo\");",
+            "path": temp_path.to_string_lossy()
+        });
 
-        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args) {
             show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
@@ -621,14 +598,13 @@ vwxyz
         )
         .expect("Failed to create test file");
 
-        let args_json = serde_json::json!({
-           "new_string": "ABCDEFG\nHIJKLMN\n12345\n67890\nOPQRSTU\nVWXYZ",
-           "old_string": "abcdefg\nhijklmn\n12345\n67890\nopqrstu\nvwxyz",
-           "path": temp_path.to_string_lossy()
-        })
-        .to_string();
+        let args = serde_json::json!({
+            "new_string": "ABCDEFG\nHIJKLMN\n12345\n67890\nOPQRSTU\nVWXYZ",
+            "old_string": "abcdefg\nhijklmn\n12345\n67890\nopqrstu\nvwxyz",
+            "path": temp_path.to_string_lossy()
+        });
 
-        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args) {
             show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
@@ -639,13 +615,12 @@ vwxyz
         let temp_path = get_temp_path("not_found");
         create_test_file(&temp_path);
 
-        let args_json = serde_json::json!({
-           "new_string": "print(\"new stuff\");",
-           "old_string": "print(\"this does not exist\");",
-           "path": temp_path.to_string_lossy()
-        })
-        .to_string();
-        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args_json) {
+        let args = serde_json::json!({
+            "new_string": "print(\"new stuff\");",
+            "old_string": "print(\"this does not exist\");",
+            "path": temp_path.to_string_lossy()
+        });
+        if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(&args) {
             show_diff_preview(&path, start_line, diff, Some(&match_type));
         }
         let _ = fs::remove_file(&temp_path);
@@ -653,35 +628,32 @@ vwxyz
 
     #[test]
     fn test_pretty_print_command_write_file() {
-        let args_json = serde_json::json!({
+        let args = serde_json::json!({
             "path": "new_file.txt",
             "content": "hello\nworld\nfoo"
-        })
-        .to_string();
+        });
         // Should not panic; renders all lines as Added (green) with line numbers starting at 1
-        pretty_print_command("write_file", &args_json);
+        pretty_print_command("write_file", &args);
     }
 
     #[test]
     fn test_pretty_print_command_write_file_empty() {
-        let args_json = serde_json::json!({
+        let args = serde_json::json!({
             "path": "empty.txt",
             "content": ""
-        })
-        .to_string();
+        });
         // Should not panic even with empty content
-        pretty_print_command("write_file", &args_json);
+        pretty_print_command("write_file", &args);
     }
 
     #[test]
     fn test_pretty_print_command_write_file_multiline() {
-        let args_json = serde_json::json!({
+        let args = serde_json::json!({
             "path": "multi.py",
             "content": "#!/usr/bin/env python3\n\nprint(\"hello\")\nprint(\"world\")"
-        })
-        .to_string();
-        // Should render 5 lines (including blank line) as Added with line numbers 1–5
-        pretty_print_command("write_file", &args_json);
+        });
+        // Should render 4 lines (including blank line) as Added with line numbers 1–4
+        pretty_print_command("write_file", &args);
     }
 
     #[test]
@@ -690,8 +662,7 @@ vwxyz
             "success": true,
             "path": "output.txt",
             "bytes_written": 128
-        })
-        .to_string();
+        });
         // Should print a success summary line without panicking
         pretty_print_result("write_file", &result, None);
     }
@@ -701,8 +672,7 @@ vwxyz
         let result = serde_json::json!({
             "success": false,
             "error": "Permission denied"
-        })
-        .to_string();
+        });
         // Should print an error line without panicking
         pretty_print_result("write_file", &result, None);
     }
