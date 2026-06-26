@@ -78,6 +78,10 @@ pub struct Config {
     #[arg(short = 'k', long, env = "LLM_API_KEY")]
     pub llm_api_key: Option<String>,
 
+    /// Reflex mode
+    #[arg(long, env = "UNSAFE_REFLEX_MODE", default_value_t = false)]
+    pub unsafe_reflex: bool,
+
     /// UI verbosity for LLM conversation display
     #[arg(
       short = 'v',
@@ -113,6 +117,7 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
     );
     println!("CONFIGURATION:");
     println!("  working-dir    : {}", current_dir.display());
+    println!("  unsafe-reflex  : {}", config.unsafe_reflex);
     println!("  llm-url        : {}", config.llm_url);
     println!("  llm-model      : {}", config.llm_model);
     println!(

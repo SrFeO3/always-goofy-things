@@ -25,10 +25,11 @@ use serde::{Deserialize, Serialize};
 
 mod cmd;
 mod pretty;
+mod reflex;
 mod startup;
 mod tools;
 
-use startup::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
+use startup::{C_CYAN, C_GRAY, C_GREEN, C_RED, C_YELLOW, RESET};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -124,7 +125,7 @@ async fn main() -> Result<()> {
             ## 4. Response Style\n\
             - Briefly explain the purpose of a tool before calling it.\n\
             - Maintain system rules at the top of the context for inference efficiency.",
-            tools::COMMAND_ALLOW_LIST.join(", ")
+            tools::ALLOW_COMMAND_LIST.join(", ")
         ),
         reasoning_content: None,
         tool_calls: None,
@@ -134,7 +135,7 @@ async fn main() -> Result<()> {
     // Main conversation loop
     let mut turn: i32 = 1;
     loop {
-        let query_prompt = format!("\n(user-{}) ", turn);
+        let query_prompt = format!("\nUser-{} > ", turn);
         let readline = query_reader.readline(&query_prompt);
 
         let input = match readline {
@@ -321,25 +322,30 @@ async fn main() -> Result<()> {
                     }
 
                     // 3. Confirm and execute
-                    let tool_result =
-                        match tools::confirm_and_execute_tool(&call.function.name, &args).await {
-                            Ok(res) => {
-                                if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
-                                    user_denied = true;
-                                    println!(
-                                        "{}*{} Tool execution was denied by user.",
-                                        C_MAGENTA, RESET
-                                    );
-                                } else {
-                                    println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
-                                }
-                                res
+                    let tool_result = match tools::confirm_and_execute_tool(
+                        &call.function.name,
+                        &args,
+                        config.unsafe_reflex,
+                    )
+                    .await
+                    {
+                        Ok(res) => {
+                            if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
+                                user_denied = true;
+                                println!(
+                                    "{}*{} Tool execution was denied by user.",
+                                    C_YELLOW, RESET
+                                );
+                            } else {
+                                println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                             }
-                            Err(e) => {
-                                println!("{}*{} Tool execution failed.: {}", C_RED, RESET, e);
-                                serde_json::json!({"error": e.to_string()})
-                            }
-                        };
+                            res
+                        }
+                        Err(e) => {
+                            println!("{}*{} Tool execution failed.: {}", C_RED, RESET, e);
+                            serde_json::json!({"error": e.to_string()})
+                        }
+                    };
 
                     // 4. Pretty print result (only on Ok)
                     if pretty && !user_denied {

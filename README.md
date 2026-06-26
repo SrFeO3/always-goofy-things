@@ -1,15 +1,15 @@
 # Always-Goofy-Things
 
-To demonstrate the core mechanics of iterative LLM function-calling, this lightweight, experimental CLI application showcases the workflow in the context of AI-assisted software development. It interacts with LLMs to reason about tasks, execute system tools safely with user confirmation, and provide streaming responses with visible "thinking" processes.
+To demonstrate the core mechanics of iterative LLM function-calling, this lightweight, experimental CLI application showcases the workflow in the context of AI-assisted software development. It interacts with LLMs to reason about tasks, executes system tools via user confirmation paired with an unsafe reflex mode, and streams the "thinking" process.
 
 > [!CAUTION]
 > **Experimental Implementation**: Prototype for demonstration purposes. AI unpredictability and application bugs may cause unexpected behavior.
-> **Security Risk**: Local shell execution and network accessibility are enabled. Flawed AI commands or software failure can cause system damage, data loss, or unauthorized data exfiltration.
+> **Security Risk**: Local shell execution and network accessibility are enabled. Automating safety checkpoints via unsafe reflex mode, flawed AI commands, or software failure can cause system damage, data loss, or unauthorized data exfiltration.
 > **Billing Alert**: AI reasoning loops, oversized contexts, or software control failures can rapidly spike API costs. Monitor usage closely.
 
 ## Features
 - **Tool-Augmented Iteration**: Automatically calls tools for file I/O, search, bash execution, and web fetching.
-- **Safety Guards**: Includes experimental allowlist verification and explicit user approval (y/N).
+- **Safety Guards & Unsafe Reflex**: Balances explicit user approval (y/N) and experimental deterministic "unsafe reflex" mode that automatically resolves safety checkpoints.
 - **Streaming "Thinking"**: Displays the model's reasoning process in a subtle reddish tint.
 - **Open Standards**: Supports Ollama and OpenAI-compatible APIs.
 
@@ -29,7 +29,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`3`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
-
+| `--unsafe_reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
 Controls how much of the LLM conversation is displayed on the terminal.

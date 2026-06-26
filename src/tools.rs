@@ -25,9 +25,10 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
+use super::reflex::auto_confirm;
 use super::startup::{C_CYAN, RESET};
 
-pub const COMMAND_ALLOW_LIST: &[&str] = &[
+pub const ALLOW_COMMAND_LIST: &[&str] = &[
     "^ls",
     "^cat",
     "^echo",
@@ -61,8 +62,8 @@ pub const COMMAND_ALLOW_LIST: &[&str] = &[
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
-static COMMAND_ALLOW_LIST_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    COMMAND_ALLOW_LIST
+static ALLOW_COMMAND_LIST_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    ALLOW_COMMAND_LIST
         .iter()
         .map(|&p| Regex::new(p).unwrap())
         .collect()
@@ -227,19 +228,28 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Prompts the user for confirmation and then executes the specified tool.
-/// This function encapsulates the user interaction for tool execution approval.
+/// Confirms tool execution (via user interaction or auto-rules) and executes it.
+/// This function encapsulates the approval logic for tool execution.
 pub async fn confirm_and_execute_tool(
     name: &str,
     args: &serde_json::Value,
+    unsafe_reflex: bool,
 ) -> Result<serde_json::Value> {
-    // Ask for user confirmation before execution
-    print!("{}Execute this tool ({})? (y/N): {}", C_CYAN, name, RESET);
-    io::stdout().flush()?;
-    let mut confirm = String::new();
-    io::stdin().read_line(&mut confirm)?;
+    let confirmed = if unsafe_reflex && auto_confirm(name, args).await {
+        true
+    } else {
+        print!(
+            "   {}Execute this tool ({})? (y/N): {}",
+            C_CYAN, name, RESET
+        );
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
 
-    if confirm.trim().to_lowercase() == "y" {
+        input.trim().eq_ignore_ascii_case("y")
+    };
+
+    if confirmed {
         execute_tool(name, args).await
     } else {
         Ok(json!({"status": "denied", "message": "Tool execution skipped by user."}))
@@ -481,7 +491,7 @@ async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
     let cmd_trim = command.trim();
 
     // Whitelist verification using pre-compiled regexes
-    let is_allowed = COMMAND_ALLOW_LIST_RE.iter().any(|re| re.is_match(cmd_trim));
+    let is_allowed = ALLOW_COMMAND_LIST_RE.iter().any(|re| re.is_match(cmd_trim));
 
     if !is_allowed {
         return Err(anyhow!(
