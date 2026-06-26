@@ -323,6 +323,7 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
 
     match name {
         "read_file" => {
+            let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             let total = obj.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
             let start = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
             let end = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -335,8 +336,8 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
                 truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 20)
             };
             println!(
-                "[{} bytes, L{}-L{} (file total: {} lines)] {} ... {}",
-                bytes, start, end, total, first, last
+                "[{} bytes, L{}-L{} (file total: {} lines) ({})] {} ... {}",
+                bytes, start, end, total, path, first, last
             );
         }
         "write_file" => {
@@ -458,6 +459,13 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
 // Pretty-print command preview before execution.
 pub fn pretty_print_command(name: &str, args: &Value) {
     match name {
+        "read_file" => {
+            let path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => return,
+            };
+            println!("-- Read: {}", path);
+        }
         "write_file" => {
             let obj = match args.as_object() {
                 Some(o) => o,
@@ -488,6 +496,27 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 None => return,
             };
             println!("-- Command: {}", cmd);
+        }
+        "grep_search" => {
+            let query = match args.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q.to_string(),
+                None => return,
+            };
+            println!("-- Grep: {}", query);
+        }
+        "list_directory" => {
+            let path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => return,
+            };
+            println!("-- List: {}", path);
+        }
+        "fetch_web" => {
+            let url = match args.get("url").and_then(|v| v.as_str()) {
+                Some(u) => u.to_string(),
+                None => return,
+            };
+            println!("-- Fetch: {}", url);
         }
         _ => {}
     }
