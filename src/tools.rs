@@ -43,6 +43,7 @@ pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^cargo build",
     "^cargo check",
     "^cargo clean",
+    "^cargo fmt",
     "^cargo init",
     "^cargo test",
     "^cargo --version$",
