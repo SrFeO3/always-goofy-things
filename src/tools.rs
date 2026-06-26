@@ -25,7 +25,7 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
-use super::startup::{C_CYAN, C_GREEN, C_RED, RESET};
+use super::startup::{C_CYAN, RESET};
 
 pub const COMMAND_ALLOW_LIST: &[&str] = &[
     "^ls",
@@ -181,10 +181,7 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
     ]
 }
 
-pub async fn execute_tool(name: &str, args_json: &str) -> Result<String> {
-    let args: serde_json::Value =
-        serde_json::from_str(args_json).map_err(|e| anyhow!("[JSON_PARSE_FAILED] {}", e))?;
-
+pub async fn execute_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Value> {
     // Path security check for tools that take 'path'
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
@@ -230,31 +227,24 @@ fn validate_path(path: &str) -> Result<()> {
 
 /// Prompts the user for confirmation and then executes the specified tool.
 /// This function encapsulates the user interaction for tool execution approval.
-pub async fn confirm_and_execute_tool(name: &str, args_json: &str) -> Result<String> {
+pub async fn confirm_and_execute_tool(
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value> {
     // Ask for user confirmation before execution
-    print!(
-        "{}[CONFIRM]{} Execute tool '{}'? (y/N): ",
-        C_CYAN, RESET, name
-    );
+    print!("{}Execute this tool ({})? (y/N): {}", C_CYAN, name, RESET);
     io::stdout().flush()?;
     let mut confirm = String::new();
     io::stdin().read_line(&mut confirm)?;
 
-    let result = if confirm.trim().to_lowercase() == "y" {
-        execute_tool(name, args_json).await
+    if confirm.trim().to_lowercase() == "y" {
+        execute_tool(name, args).await
     } else {
-        Ok("[DENIED] Tool execution skipped by user.".to_string())
-    };
-
-    // Log success/failure of the tool execution
-    match &result {
-        Ok(_) => println!("[{}SUCCESS{}]", C_GREEN, RESET),
-        Err(e) => println!("[{}FAILED{}] {}", C_RED, RESET, e),
-    };
-    result
+        Ok(json!({"status": "denied", "message": "Tool execution skipped by user."}))
+    }
 }
 
-fn execute_read_file(args: &serde_json::Value) -> Result<String> {
+fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -267,7 +257,6 @@ fn execute_read_file(args: &serde_json::Value) -> Result<String> {
         .as_u64()
         .map(|v| (v as usize).saturating_sub(1))
         .unwrap_or(0);
-
     let end = args["end_line"]
         .as_u64()
         .map(|v| (v as usize).min(total_lines))
@@ -290,11 +279,10 @@ fn execute_read_file(args: &serde_json::Value) -> Result<String> {
         "total_lines": total_lines,
         "content": sliced_content,
         "truncated": truncated
-    })
-    .to_string())
+    }))
 }
 
-fn execute_write_file(args: &serde_json::Value) -> Result<String> {
+fn execute_write_file(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -309,15 +297,13 @@ fn execute_write_file(args: &serde_json::Value) -> Result<String> {
     if content.len() as u64 > MAX_FILE_SIZE {
         return Err(anyhow!("[FILE_TOO_LARGE] File content exceeds 10MB limit"));
     }
-    let bytes =
-        atomic_write_with_dir(path, content).map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+    let bytes = atomic_write_with_dir(path, content)
+        .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 
     Ok(json!({
-        //"success": true,
         "path": path,
         "bytes_written": bytes
-    })
-    .to_string())
+    }))
 }
 
 fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
@@ -350,7 +336,7 @@ fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
     Ok(content.len())
 }
 
-fn execute_str_replace(args: &serde_json::Value) -> Result<String> {
+fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -378,13 +364,12 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<String> {
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
         atomic_write_with_dir(path, &new_content)
-            .map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+            .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
         return Ok(json!({
             "path": path,
             "occurrences_replaced": 1,
             "match_type": "exact"
-        })
-        .to_string());
+        }));
     }
 
     // Fallback to fuzzy match by normalizing whitespace
@@ -407,17 +392,17 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<String> {
     let new_content = re
         .replace(&content, |_caps: &regex::Captures| new_str.to_string())
         .to_string();
-    atomic_write_with_dir(path, &new_content).map_err(|e| anyhow!("[FILE_WRITE_FAILED] {}", e))?;
+    atomic_write_with_dir(path, &new_content)
+        .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 
     Ok(json!({
         "path": path,
         "occurrences_replaced": 1,
         "match_type": "fuzzy"
-    })
-    .to_string())
+    }))
 }
 
-fn execute_list_directory(args: &serde_json::Value) -> Result<String> {
+fn execute_list_directory(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -449,10 +434,10 @@ fn execute_list_directory(args: &serde_json::Value) -> Result<String> {
            "size": metadata.len()
         }));
     }
-    Ok(json!({ "path": path, "entries": entries, "recursive": recursive }).to_string())
+    Ok(json!({ "path": path, "entries": entries, "recursive": recursive }))
 }
 
-fn execute_grep_search(args: &serde_json::Value) -> Result<String> {
+fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Value> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] query is required"))?;
@@ -484,11 +469,10 @@ fn execute_grep_search(args: &serde_json::Value) -> Result<String> {
         "matches": matches,
         "total_matches": matches.len(),
         "truncated": false
-    })
-    .to_string())
+    }))
 }
 
-async fn execute_bash(args: &serde_json::Value) -> Result<String> {
+async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
     let command = args["command"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] command is required"))?;
@@ -556,11 +540,10 @@ async fn execute_bash(args: &serde_json::Value) -> Result<String> {
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": exit_code
-    })
-    .to_string())
+    }))
 }
 
-async fn execute_fetch_web(args: &serde_json::Value) -> Result<String> {
+async fn execute_fetch_web(args: &serde_json::Value) -> Result<serde_json::Value> {
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] url is required"))?;
@@ -609,8 +592,7 @@ async fn execute_fetch_web(args: &serde_json::Value) -> Result<String> {
         "title": "Web Page Content", // Placeholder as full HTML parsing is heavy
         "content": truncated_content,
         "content_type": content_type
-    })
-    .to_string())
+    }))
 }
 
 fn validate_url(url: &str) -> Result<()> {
@@ -716,8 +698,7 @@ mod tests {
         let args = json!({
             "path": path_str,
         });
-        let res = execute_read_file(&args).unwrap();
-        let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+        let val = execute_read_file(&args).unwrap();
         assert_eq!(val["total_lines"], 4);
         assert!(val["content"].as_str().unwrap().contains("line4"));
 
@@ -727,8 +708,7 @@ mod tests {
             "start_line":Some(2),
             "end_line":Some(3)
         });
-        let res = execute_read_file(&args).unwrap();
-        let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+        let val = execute_read_file(&args).unwrap();
         assert_eq!(val["content"], "line2\nline3");
         assert!(val["truncated"].as_bool().unwrap());
 
@@ -745,8 +725,7 @@ mod tests {
             "content": content
         });
 
-        let res = execute_write_file(&args).unwrap();
-        let val: serde_json::Value = serde_json::from_str(&res).unwrap();
+        let val = execute_write_file(&args).unwrap();
         assert_eq!(val["path"], path_str);
         assert_eq!(val["bytes_written"], content.len() as u64);
 
@@ -775,7 +754,7 @@ mod tests {
             &json!({ "path": path_str, "old_string": "println! ( \"world\" ) ;", "new_string": "fixed();" }),
         );
         assert!(
-            res2.as_ref().unwrap().contains("\"match_type\":\"fuzzy\""),
+            res2.as_ref().unwrap()["match_type"] == "fuzzy",
             "Fuzzy match failed: {}",
             res2.as_ref().unwrap()
         );
@@ -790,8 +769,18 @@ mod tests {
     fn test_list_directory() {
         // Test directory listing for the project root
         let res = execute_list_directory(&json!({ "path": ".", "recursive": false })).unwrap();
-        assert!(res.contains("src"));
-        assert!(res.contains("Cargo.toml") || res.contains("Cargo.lock"));
+        let entries: Vec<&str> = res["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(entries.iter().any(|n| *n == "src"));
+        assert!(
+            entries
+                .iter()
+                .any(|n| *n == "Cargo.toml" || *n == "Cargo.lock")
+        );
     }
 
     #[test]
@@ -800,8 +789,14 @@ mod tests {
         let res =
             execute_grep_search(&json!({ "query": "pub fn get_tool_definitions", "path": "src" }))
                 .unwrap();
-        assert!(res.contains("tools.rs"));
-        assert!(res.contains("\"line\":"));
+        let matches: Vec<&str> = res["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert!(matches.iter().any(|p| p.contains("tools.rs")));
+        assert!(res["total_matches"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -810,8 +805,8 @@ mod tests {
         let res = execute_bash(&json!({ "command": "echo 'test execution'" }))
             .await
             .unwrap();
-        assert!(res.contains("test execution"));
-        assert!(res.contains("\"exit_code\":0"));
+        assert_eq!(res["exit_code"], 0);
+        assert!(res["stdout"].as_str().unwrap().contains("test execution"));
 
         // Test a command blocked by the security whitelist
         let res = execute_bash(&json!({ "command": "rm -rf /tmp/some_non_existent_file" })).await;

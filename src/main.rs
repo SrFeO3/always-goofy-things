@@ -27,6 +27,8 @@ mod pretty;
 mod startup;
 mod tools;
 
+use startup::{C_GRAY, RESET};
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
@@ -296,33 +298,50 @@ async fn main() -> Result<()> {
                         pretty::pretty_print_command(&call.function.name, &args_str);
                     }
 
+                    let args_json: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::Value::Null);
+
                     // 3. Confirm and execute
                     let tool_result =
-                        tools::confirm_and_execute_tool(&call.function.name, &args_str).await;
+                        tools::confirm_and_execute_tool(&call.function.name, &args_json).await;
+                    let mut user_denied = false;
                     let tool_result_str = match &tool_result {
-                        Ok(res) => res.clone(),
-                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        Ok(res) => {
+                            if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
+                                user_denied = true;
+                                println!("User denied");
+                            } else {
+                                println!("OK");
+                            }
+                            serde_json::to_string(res).unwrap()
+                        }
+                        Err(e) => {
+                            println!("NG: {:?}", e);
+                            serde_json::json!({"error": e.to_string()}).to_string()
+                        }
                     };
 
-                    // 4. Pretty print result
-                    if pretty {
-                        pretty::pretty_print_result(
-                            &call.function.name,
-                            &tool_result_str,
-                            Some(&args_str),
-                        );
+                    // 4. Pretty print result (only on Ok)
+                    if pretty && !user_denied {
+                        if tool_result.is_ok() {
+                            pretty::pretty_print_result(
+                                &call.function.name,
+                                &tool_result_str,
+                                Some(&args_str),
+                            );
+                        }
                     }
 
                     // 5. Show tool call response (Application to LLM)
                     if pretty {
                         println!(
-                            "{}Result: {}{}",
-                            startup::C_GRAY,
+                            "{}Tool Call Response: {}{}",
+                            C_GRAY,
                             pretty::truncate_long_json(&tool_result_str),
-                            startup::RESET
+                            RESET
                         );
                     } else {
-                        println!("Result: {}", tool_result_str);
+                        println!("Tool Call Response: {}", tool_result_str);
                     }
 
                     messages.push(Message {

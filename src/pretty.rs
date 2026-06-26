@@ -21,8 +21,9 @@
 //!     - Success: Minimal, `ls`-like terminal output (multi-line)
 //!     - Error: Error reason (1 line)
 //! - `execute_bash`: Run terminal commands to perform development tasks.
-//!     - Success: Minimal terminal output (multi-line)
-//!     - Error: Error reason (multi-line)
+//!       - Preview: Show the command to be executed (1 line)
+//!      - Success: Minimal terminal output (multi-line)
+//!      - Error: Error reason (multi-line)
 //! - `fetch_web`: Fetch and extract text content from a specified URL.
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!      - Error: Error reason (multi-line)
@@ -344,11 +345,6 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
 
     match name {
         "read_file" => {
-            let error = obj.get("error").and_then(|v| v.as_str());
-            if let Some(e) = error {
-                println!("\x1b[91m✗ {}\x1b[0m", e);
-                return;
-            }
             let total = obj.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
             let start = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
             let end = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -366,18 +362,6 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             );
         }
         "write_file" => {
-            let success = obj
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !success {
-                let error = obj
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                println!("\x1b[91m✗ {}\x1b[0m", error);
-                return;
-            }
             let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             let bytes = obj
                 .get("bytes_written")
@@ -386,18 +370,6 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             println!("[{} bytes ({})]", bytes, path);
         }
         "str_replace_editor" => {
-            let success = obj
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !success {
-                let error = obj
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                println!("\x1b[91m✗ {}\x1b[0m", error);
-                return;
-            }
             let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("?");
 
             // Extract match_type from the result JSON
@@ -464,14 +436,14 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
             if !stdout.is_empty() {
                 for line in stdout.lines() {
-                    println!(" {}stdout{}:{} {}", C_GREEN, C_GRAY, RESET, line);
+                    println!(" {}stdout:{} {}", C_GRAY, RESET, line);
                 }
                 if !stdout.ends_with('\n') {
                     println!();
                 }
             }
             if !stderr.is_empty() {
-                println!(" {}stderr{}:{} {}", C_RED, C_GRAY, RESET, stderr);
+                println!(" {}stderr:{} {}", C_GRAY, RESET, stderr);
                 if !stderr.ends_with('\n') {
                     eprintln!();
                 }
@@ -483,11 +455,6 @@ pub fn pretty_print_result(name: &str, result_str: &str, args_json: Option<&str>
             }
         }
         "fetch_web" => {
-            let error = obj.get("error").and_then(|v| v.as_str());
-            if let Some(e) = error {
-                println!("\x1b[91m✗ {}\x1b[0m", e);
-                return;
-            }
             let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("?");
             let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let bytes = content.len() as u64;
