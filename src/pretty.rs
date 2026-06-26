@@ -413,17 +413,21 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
             let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
             let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
             if !stdout.is_empty() {
+                println!("{}stdout:{}", C_GRAY, RESET);
                 for line in stdout.lines() {
-                    println!(" {}stdout:{} {}", C_GRAY, RESET, line);
+                    println!("{}", line);
                 }
                 if !stdout.ends_with('\n') {
                     println!();
                 }
             }
             if !stderr.is_empty() {
-                println!(" {}stderr:{} {}", C_GRAY, RESET, stderr);
+                println!("{}stderr:{}", C_GRAY, RESET);
+                for line in stderr.lines() {
+                    println!("{}", line);
+                }
                 if !stderr.ends_with('\n') {
-                    eprintln!();
+                    println!();
                 }
             }
             if exit == 0 {

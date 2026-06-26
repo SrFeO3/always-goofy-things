@@ -29,6 +29,8 @@ mod tools;
 
 use startup::{C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
+use crate::startup::C_CYAN;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     role: String,
@@ -100,7 +102,8 @@ async fn main() -> Result<()> {
     let mut query_reader = DefaultEditor::new()?;
 
     println!(
-        "\n\x1b[36mDescribe your task and press Enter to start (or exit/quit/^D to end).\x1b[0m"
+        "{}Describe your task and press Enter to start (or exit/quit/^D to end).{}",
+        C_CYAN, RESET
     );
 
     let mut messages = vec![Message {
@@ -269,8 +272,6 @@ async fn main() -> Result<()> {
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
-                    println!("DEBUG: {:?}", call);
-
                     // Parse stringified JSON from OpenAI, or fallback to Null if it's already an object/null.
                     // This handles both raw JSON objects (Ollama) and stringified JSON (OpenAI) safely.
                     let args = call
@@ -284,13 +285,15 @@ async fn main() -> Result<()> {
                     let mut user_denied = false;
 
                     // 1. Show tool call request (LLM to Application)
-                    println!(
-                        "--- [TOOL EXECUTION REQUESTED{}] ---",
-                        if pretty { " (BRIEF)" } else { "(FULL)" }
-                    );
+                    println!("--- [TOOL EXECUTION REQUESTED] ---");
                     println!("Tool: {}{}{}", C_YELLOW, call.function.name, RESET);
                     if pretty {
-                        println!("Args: {}{}{}", C_YELLOW, pretty::truncate(&args), RESET);
+                        println!(
+                            "Args (truncated): {}{}{}",
+                            C_YELLOW,
+                            pretty::truncate(&args),
+                            RESET
+                        );
                     } else {
                         println!("Args: {}{}{}", C_YELLOW, &args, RESET);
                     }
