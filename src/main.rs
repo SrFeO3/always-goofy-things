@@ -23,13 +23,12 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 
+mod cmd;
 mod pretty;
 mod startup;
 mod tools;
 
-use startup::{C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
-
-use crate::startup::C_CYAN;
+use startup::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -102,7 +101,7 @@ async fn main() -> Result<()> {
     let mut query_reader = DefaultEditor::new()?;
 
     println!(
-        "{}Describe your task and press Enter to start (or exit/quit/^D to end).{}",
+        "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
         C_CYAN, RESET
     );
 
@@ -133,8 +132,10 @@ async fn main() -> Result<()> {
     }];
 
     // Main conversation loop
+    let mut turn: i32 = 1;
     loop {
-        let readline = query_reader.readline("\nUser > ");
+        let query_prompt = format!("\n(user-{}) ", turn);
+        let readline = query_reader.readline(&query_prompt);
 
         let input = match readline {
             Ok(line) => {
@@ -145,7 +146,7 @@ async fn main() -> Result<()> {
             Err(ReadlineError::Interrupted) => {
                 // Ctrl+C: Don't exit, show guidance instead
                 println!(
-                    "\x1b[93mUse 'exit' or 'quit' to end the session, or press Ctrl+D.\x1b[0m"
+                    "\x1b[93mUse '/exit' or '/quit' to end the session, or press Ctrl+D.\x1b[0m"
                 );
                 continue;
             }
@@ -159,14 +160,30 @@ async fn main() -> Result<()> {
                 break;
             }
         };
-
         if input.trim().is_empty() {
             // Check for empty input after trimming
             continue;
         }
-        if input == "exit" || input == "quit" {
+        if input == "/exit" || input == "/quit" || input == "exit" || input == "quit" {
             // Keep the exit/quit command
             break;
+        }
+
+        // Check for slash commands before processing as a regular query
+        if let Some(result) = cmd::try_handle_slash_command(&input, &mut messages, turn) {
+            match result {
+                cmd::SlashCmdResult::NoAdvance => {
+                    // e.g. /help - just re-prompt
+                    continue;
+                }
+                cmd::SlashCmdResult::RewoundTo(target) => {
+                    // Reset turn counter to target + 1 (next turn after rewound point)
+                    turn = target + 1;
+                    // Reset last_sent_count to match the new message count
+                    last_sent_count = messages.len();
+                    continue;
+                }
+            }
         }
 
         // If the last message was from the user, it means the previous LLM call failed.
@@ -355,6 +372,7 @@ async fn main() -> Result<()> {
             }
             break 'reasoning_loop;
         }
+        turn += 1;
     }
     Ok(())
 }
