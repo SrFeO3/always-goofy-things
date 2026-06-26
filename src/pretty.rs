@@ -35,53 +35,46 @@ use super::startup::{
 };
 
 fn truncate_str(s: &str, limit: usize) -> String {
-    if s.chars().count() <= limit * 2 + 3 {
+    let char_count = s.chars().count();
+    if char_count <= limit * 2 + 3 {
         return s.to_string();
     }
     let first: String = s.chars().take(limit).collect();
-    let last: String = s.chars().rev().take(limit).collect();
+    let last: String = s.chars().skip(char_count - limit).collect();
     format!("{}...{}", first, last)
 }
 
-/// Truncate long string values and compress oversized arrays in result JSON for concise display.
-/// Walks the entire JSON tree, truncating strings over 10 chars and capping arrays at max 2 elements (first, ..., last).
-/// Returns a modified JSON string with all placeholders formatted without quotes.
-pub fn truncate_long_json(result: &Value) -> String {
-    let mut val = result.clone();
-    walk(&mut val);
-    serde_json::to_string(&val).unwrap_or_else(|_| result.to_string())
-}
-
-fn walk(value: &mut Value) {
+fn walk(value: &Value) -> Value {
     match value {
-        Value::String(s) => {
-            let truncated = truncate_str(s, 10);
-            if truncated != *s {
-                *s = truncated;
-            }
-        }
+        Value::String(s) => Value::String(truncate_str(s, 10)),
         Value::Array(arr) => {
-            if arr.len() > 2 {
-                let first = arr.remove(0);
-                let last = arr.pop().unwrap();
-
-                arr.clear();
-                arr.push(first);
-                arr.push(Value::String("...".to_string()));
-                arr.push(last);
-            }
-
-            for item in arr.iter_mut() {
-                walk(item);
+            if arr.len() <= 2 {
+                Value::Array(arr.iter().map(walk).collect())
+            } else {
+                let first = walk(&arr[0]);
+                let last = walk(arr.last().unwrap());
+                Value::Array(vec![first, Value::String("...".to_string()), last])
             }
         }
         Value::Object(map) => {
-            for (_, v) in map.iter_mut() {
-                walk(v);
-            }
+            let new_map = map
+                .iter()
+                .map(|(k, v)| (k.clone(), walk(v)))
+                .collect::<serde_json::Map<String, Value>>();
+            Value::Object(new_map)
         }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        Value::Null => Value::Null,
+        Value::Bool(b) => Value::Bool(*b),
+        Value::Number(n) => Value::Number(n.clone()),
     }
+}
+
+/// Truncate long string values and compress oversized arrays in result JSON for concise display.
+/// Walks the entire JSON tree immutably (never mutates `original`), truncating strings over
+/// 10 chars and capping arrays at max 3 elements (first, ..., last). Returns a new JSON string.
+pub fn truncate(original: &Value) -> String {
+    let truncated = walk(original);
+    serde_json::to_string(&truncated).unwrap_or_else(|_| original.to_string())
 }
 
 // A single line of diff output.
@@ -434,9 +427,9 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
                 }
             }
             if exit == 0 {
-                println!("[{}{}{}]", C_GREEN, exit, RESET);
+                println!("[exit {}{}{}]", C_GREEN, exit, RESET);
             } else {
-                println!("[{}{}{}]", C_RED, exit, RESET);
+                println!("[exit {}{}{}]", C_RED, exit, RESET);
             }
         }
         "fetch_web" => {
@@ -484,6 +477,13 @@ pub fn pretty_print_command(name: &str, args: &Value) {
             if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args) {
                 show_diff_preview(&path, start_line, diff, Some(match_type));
             }
+        }
+        "execute_bash" => {
+            let cmd = match args.get("command").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            println!("-- Command: {}", cmd);
         }
         _ => {}
     }

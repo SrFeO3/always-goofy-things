@@ -27,7 +27,7 @@ mod pretty;
 mod startup;
 mod tools;
 
-use startup::{C_GRAY, RESET};
+use startup::{C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -269,6 +269,8 @@ async fn main() -> Result<()> {
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
+                    println!("DEBUG: {:?}", call);
+
                     // Parse stringified JSON from OpenAI, or fallback to Null if it's already an object/null.
                     // This handles both raw JSON objects (Ollama) and stringified JSON (OpenAI) safely.
                     let args = call
@@ -286,11 +288,11 @@ async fn main() -> Result<()> {
                         "--- [TOOL EXECUTION REQUESTED{}] ---",
                         if pretty { " (BRIEF)" } else { "(FULL)" }
                     );
-                    println!("Tool: \x1b[93m{}\x1b[0m", call.function.name);
+                    println!("Tool: {}{}{}", C_YELLOW, call.function.name, RESET);
                     if pretty {
-                        println!("Args: \x1b[93m{}\x1b[0m", pretty::truncate_long_json(&args));
+                        println!("Args: {}{}{}", C_YELLOW, pretty::truncate(&args), RESET);
                     } else {
-                        println!("Args: \x1b[93m{}\x1b[0m", &args);
+                        println!("Args: {}{}{}", C_YELLOW, &args, RESET);
                     }
 
                     // 2. Pretty print command
@@ -304,14 +306,17 @@ async fn main() -> Result<()> {
                             Ok(res) => {
                                 if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
                                     user_denied = true;
-                                    println!("User denied");
+                                    println!(
+                                        "{}*{} Tool execution was denied by user.",
+                                        C_MAGENTA, RESET
+                                    );
                                 } else {
-                                    println!("OK");
+                                    println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                                 }
                                 res
                             }
                             Err(e) => {
-                                println!("NG: {}", e);
+                                println!("{}*{} Tool execution failed.: {}", C_RED, RESET, e);
                                 serde_json::json!({"error": e.to_string()})
                             }
                         };
@@ -325,13 +330,13 @@ async fn main() -> Result<()> {
                     let tool_result_str = serde_json::to_string(&tool_result).unwrap();
                     if pretty {
                         println!(
-                            "{}Tool Call Response: {}{}",
+                            "{}Tool Call Response: {}{}\n",
                             C_GRAY,
-                            pretty::truncate_long_json(&tool_result),
+                            pretty::truncate(&tool_result),
                             RESET
                         );
                     } else {
-                        println!("Tool Call Response: {}", tool_result_str);
+                        println!("Tool Call Response: {}\n", tool_result_str);
                     }
 
                     messages.push(Message {

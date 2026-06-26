@@ -20,10 +20,12 @@ pub const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
 pub const BG_RED: &str = "\x1b[48;2;190;85;85m";
 pub const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
 
-pub const C_GRAY: &str = "\x1b[90m";
+pub const C_GRAY: &str = "\x1b[38;2;120;120;120m";
 pub const C_RED: &str = "\x1b[38;2;195;60;60m";
 pub const C_GREEN: &str = "\x1b[38;2;40;145;75m";
 pub const C_CYAN: &str = "\x1b[36m";
+pub const C_MAGENTA: &str = "\x1b[38;2;170;70;145m";
+pub const C_YELLOW: &str = "\x1b[93m";
 
 pub const RESET: &str = "\x1b[0m";
 pub const ERASE_LINE: &str = "\x1b[K";
