@@ -145,12 +145,16 @@ fn is_safe_grep_query(query: &str) -> bool {
 /// Validates a safe subpath by restricting input to ASCII alphanumerics, `_`, `-`, `/`, `.`, and an optional leading `./`.
 /// This is a basic, restrictive heuristic to prevent directory traversal by explicitly disallowing `..` and certain segment patterns.
 fn is_safe_subpath(mut path_str: &str) -> bool {
-    if path_str == "./" {
+    if path_str == "." || path_str == "./" {
         return true;
     }
 
     if path_str.starts_with("./") {
         path_str = &path_str[2..];
+    }
+
+    if path_str.ends_with("\\\\(") {
+        path_str = &path_str[..3];
     }
 
     if path_str.is_empty()
