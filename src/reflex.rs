@@ -75,23 +75,29 @@ pub async fn auto_confirm(name: &str, args: &serde_json::Value) -> bool {
                 Some(o) => o,
                 None => return false,
             };
-            let path = match obj.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return false,
-            };
+
             let query = match obj.get("query").and_then(|v| v.as_str()) {
                 Some(q) => q.to_string(),
                 None => return false,
             };
 
-            if is_safe_subpath(&path) && is_safe_grep_query(&query) {
-                print_auto_confirmed(&format!(
-                    "A reasonably quiet query along a peaceful path　(path: {}, query: '{}')",
-                    query, path
-                ));
-                true
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if is_safe_grep_query(&query) && is_safe_subpath(&path) {
+                    print_auto_confirmed(&format!(
+                        "A reasonably quiet query along a peaceful path (path: '{}', query: '{}')",
+                        query, path
+                    ));
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                if is_safe_grep_query(&query) {
+                    print_auto_confirmed(&format!("A reasonably quiet query: {}", query));
+                    true
+                } else {
+                    false
+                }
             }
         }
         "list_directory" => {
