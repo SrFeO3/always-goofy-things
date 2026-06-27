@@ -212,7 +212,10 @@ async fn main() -> Result<()> {
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
+        // `done` tracks whether this turn completed successfully (assistant responded normally).
+        // If the loop exits via error/Ctrl+C/empty-limit, done=false and we do NOT increment turn.
         let mut empty_retry_count: usize = 0;
+        let mut done: bool = false;
         'reasoning_loop: loop {
             let llm_future = call_llm(
                 &config.llm_url,
@@ -384,9 +387,12 @@ async fn main() -> Result<()> {
                 // Re-query LLM with tool execution results
                 continue 'reasoning_loop;
             }
+            done = true;
             break 'reasoning_loop;
         }
-        turn += 1;
+        if done {
+            turn += 1;
+        }
     }
     Ok(())
 }
