@@ -101,6 +101,9 @@ async fn main() -> Result<()> {
 
     let mut query_reader = DefaultEditor::new()?;
 
+    // Mutable model name so `/model` can switch it on the fly
+    let mut llm_model = config.llm_model.clone();
+
     println!(
         "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
         C_CYAN, RESET
@@ -169,9 +172,9 @@ async fn main() -> Result<()> {
             // Keep the exit/quit command
             break;
         }
-
         // Check for slash commands before processing as a regular query
-        if let Some(result) = cmd::try_handle_slash_command(&input, &mut messages, turn) {
+        if let Some(result) = cmd::try_handle_slash_command(&input, &mut messages, turn, &llm_model)
+        {
             match result {
                 cmd::SlashCmdResult::NoAdvance => {
                     // e.g. /help - just re-prompt
@@ -182,6 +185,11 @@ async fn main() -> Result<()> {
                     turn = target + 1;
                     // Reset last_sent_count to match the new message count
                     last_sent_count = messages.len();
+                    continue;
+                }
+                cmd::SlashCmdResult::ModelChanged(new_model) => {
+                    // Switch to the new model for subsequent LLM calls
+                    llm_model = new_model;
                     continue;
                 }
             }
@@ -208,7 +216,7 @@ async fn main() -> Result<()> {
         'reasoning_loop: loop {
             let llm_future = call_llm(
                 &config.llm_url,
-                &config.llm_model,
+                &llm_model,
                 config.llm_api_key.as_ref(),
                 &messages,
                 config.verbose_level,

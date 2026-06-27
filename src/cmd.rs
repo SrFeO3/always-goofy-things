@@ -4,18 +4,21 @@
 //! - `/help`, `/h`    - display help text
 //! - `/rewind <turn>` - roll back conversation history to a specific turn
 //! - `/history [-a]`  - print conversation history summary
+//! - `/model [name]`  - switch the active LLM on the fly
 
 use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
 /// Result of handling a slash command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCmdResult {
     /// Command requires no turn change (e.g. /help), just re-prompt.
     NoAdvance,
     /// Rewind succeeded — reset the turn counter to this value.
     RewoundTo(i32),
+    /// Model was switched to the new name.
+    ModelChanged(String),
 }
 
 /// Check if the input starts with a slash command, and handle it if so.
@@ -27,6 +30,7 @@ pub fn try_handle_slash_command(
     input: &str,
     messages: &mut Vec<crate::Message>,
     turn: i32,
+    current_model: &str,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -52,6 +56,10 @@ pub fn try_handle_slash_command(
             handle_history(arg, messages);
             Some(SlashCmdResult::NoAdvance)
         }
+        "/model" => {
+            let new_model = handle_model(arg, current_model);
+            Some(SlashCmdResult::ModelChanged(new_model))
+        }
         _ => {
             eprintln!(
                 "\x1b[93mUnknown command: {}\x1b[0m Type /help for available commands.",
@@ -63,22 +71,48 @@ pub fn try_handle_slash_command(
 }
 
 // ---------------------------------------------------------------------------
+// /model
+// ---------------------------------------------------------------------------
+
+/// Handle `/model [name]`.
+///
+/// Without an argument, print the currently active model name.
+/// With an argument, switch to the provided model name and confirm.
+fn handle_model(arg: Option<&str>, current_model: &str) -> String {
+    match arg {
+        Some(name) if !name.is_empty() => {
+            println!(
+                "\x1b[32m✓ Switched model: {} → {}\x1b[0m",
+                current_model, name
+            );
+            name.to_string()
+        }
+        _ => {
+            println!("\x1b[93mCurrent model: {}\x1b[0m", current_model);
+            current_model.to_string()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // /help
 // ---------------------------------------------------------------------------
 
 /// Print the help text (matches the spec in `work/spec/slash_command.md`).
 fn print_help() {
     println!(
-        "\
-\x1b[1mUsage:\x1b[0m \x1b[0m/<command> [options]
+        "\x1b[1mUsage:\x1b[0m \x1b[0m/<command> [options]
 
 \x1b[1mCore Commands:\x1b[0m
    /h, /help        Display this help text and exit
    /rewind <turn>   Roll back conversation to <turn> and discard newer history
    /history [-a]    Print conversation history summary (-a, --all for raw payload)
+   /model [name]    Switch the active LLM on the fly (no arg: show current)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
+   \x1b[90m/model        - Show the currently active model\x1b[0m
+   \x1b[90m/model qwen   - Switch to 'qwen' model and continue\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m"
     );
