@@ -502,7 +502,11 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 Some(q) => q.to_string(),
                 None => return,
             };
-            println!("-- Grep: {}", query);
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                println!("-- Grep: {} (in {})", query, path);
+            } else {
+                println!("-- Grep: {}", query);
+            }
         }
         "list_directory" => {
             let path = match args.get("path").and_then(|v| v.as_str()) {
