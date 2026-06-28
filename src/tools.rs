@@ -348,6 +348,164 @@ fn atomic_write_with_dir(path: &str, content: &str) -> Result<usize> {
     Ok(content.len())
 }
 
+/// Build a concise mismatch report showing why fuzzy match was needed.
+/// For whitespace-only diffs, reports per-line indentation shortages/excesses.
+fn build_fuzzy_mismatch_report(provided: &str, actual: &str) -> serde_json::Value {
+    // --- Whitespace-only diff: analyze per-line indentation & spacing ---
+    let p_lines: Vec<&str> = provided.lines().collect();
+    let a_lines: Vec<&str> = actual.lines().collect();
+
+    let mut line_issues: Vec<serde_json::Value> = Vec::new();
+    let max_lines = p_lines.len().max(a_lines.len());
+
+    for i in 0..max_lines {
+        let p_line = p_lines.get(i).unwrap_or(&"");
+        let a_line = a_lines.get(i).unwrap_or(&"");
+
+        if p_line == a_line {
+            continue; // identical line, skip
+        }
+
+        let line_num = i + 1;
+
+        // Compare leading whitespace (indentation)
+        let p_leading = p_line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        let a_leading = a_line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+
+        // Compare trailing whitespace
+        let p_trailing = p_line
+            .chars()
+            .rev()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        let a_trailing = a_line
+            .chars()
+            .rev()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+
+        // Compare internal spacing: count whitespace runs between non-whitespace tokens
+        // Strip leading/trailing first, then split to get only internal gaps
+        let p_trimmed = p_line.trim_matches(|c| c == ' ' || c == '\t');
+        let a_trimmed = a_line.trim_matches(|c| c == ' ' || c == '\t');
+        let p_internal_ws: Vec<usize> = p_trimmed
+            .split(|c: char| !c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().count())
+            .collect();
+        let a_internal_ws: Vec<usize> = a_trimmed
+            .split(|c: char| !c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().count())
+            .collect();
+        let mut line_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+        if p_leading != a_leading {
+            line_map.insert(
+                format!("{}", line_num),
+                json!({ "expected_lead": a_leading, "your_lead": p_leading }),
+            );
+        }
+
+        if p_trailing != a_trailing {
+            let entry = line_map.entry(format!("{}", line_num)).or_insert(json!({}));
+            entry
+                .as_object_mut()
+                .unwrap()
+                .insert("expected_trail".to_string(), json!(a_trailing));
+            entry
+                .as_object_mut()
+                .unwrap()
+                .insert("your_trail".to_string(), json!(p_trailing));
+        }
+
+        if p_internal_ws != a_internal_ws {
+            // Report each differing internal gap
+            let min_w = p_internal_ws.len().min(a_internal_ws.len());
+            for j in 0..min_w {
+                if p_internal_ws[j] != a_internal_ws[j] {
+                    let gap_key = format!("internal_gap_{}", j + 1);
+                    let entry = line_map.entry(format!("{}", line_num)).or_insert(json!({}));
+                    entry
+                        .as_object_mut()
+                        .unwrap()
+                        .insert(format!("expected_{}", gap_key), json!(a_internal_ws[j]));
+                    entry
+                        .as_object_mut()
+                        .unwrap()
+                        .insert(format!("your_{}", gap_key), json!(p_internal_ws[j]));
+                }
+            }
+            if p_internal_ws.len() != a_internal_ws.len() {
+                let entry = line_map.entry(format!("{}", line_num)).or_insert(json!({}));
+                entry
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("expected_gap_count".to_string(), json!(a_internal_ws.len()));
+                entry
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("your_gap_count".to_string(), json!(p_internal_ws.len()));
+            }
+        }
+
+        if line_map.is_empty() {
+            // Lines differ only in newline style or tabs-vs-spaces
+            line_map.insert(
+                format!("{}", line_num),
+                json!({ "note": "unspecified whitespace difference" }),
+            );
+        }
+
+        for (line_key, data) in line_map {
+            line_issues.push(json!({
+                "line": line_key,
+                "diff": data,
+            }));
+        }
+    }
+
+    // Detect extra/missing lines (newline mismatch)
+    let p_line_count = p_lines.len();
+    let a_line_count = a_lines.len();
+    let mut newline_issues: Vec<String> = Vec::new();
+    if p_line_count != a_line_count {
+        let diff = a_line_count as i32 - p_line_count as i32;
+        if diff > 0 {
+            newline_issues.push(format!(
+                "missing {} line(s): provided {} line(s) but file has {} line(s)",
+                diff, p_line_count, a_line_count
+            ));
+        } else {
+            newline_issues.push(format!(
+                "extra {} line(s): provided {} line(s) but file has {} line(s)",
+                -diff, p_line_count, a_line_count
+            ));
+        }
+    } // Build combined issues     // Flatten all issues into a single array
+    let mut all_issues: Vec<serde_json::Value> = Vec::new();
+    all_issues.extend(line_issues);
+    for issue in &newline_issues {
+        all_issues.push(json!({
+            "line": "extra_line",
+            "issues": [issue],
+        }));
+    }
+
+    json!({
+         "kind": "whitespace_only",
+         "total_lines_compared": max_lines,
+         "line_issues": all_issues,
+         "hint": "Use read_file to see the exact whitespace. Match indentation, internal spaces, and trailing spaces precisely.",
+    })
+}
+
 fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
@@ -400,17 +558,21 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
             matches.len()
         ));
     }
-
+    let actual_matched = matches[0].as_str();
     let new_content = re
         .replace(&content, |_caps: &regex::Captures| new_str.to_string())
         .to_string();
     atomic_write_with_dir(path, &new_content)
         .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 
+    // Build a short mismatch report for the LLM to learn from
+    let mismatch_report = build_fuzzy_mismatch_report(old_str, actual_matched);
+
     Ok(json!({
         "path": path,
         "occurrences_replaced": 1,
-        "match_type": "fuzzy"
+        "match_type": "fuzzy",
+        "fuzzy_mismatch": mismatch_report
     }))
 }
 
@@ -775,6 +937,120 @@ mod tests {
         assert!(content.contains("fixed();"));
 
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_fuzzy_mismatch_report_all_patterns() {
+        // 1. whitespace_only - leading indentation diff
+        let report = build_fuzzy_mismatch_report("foo bar", "  foo bar");
+        println!("\n=== whitespace_only: leading indent ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+
+        // 2. whitespace_only - trailing whitespace diff
+        let report = build_fuzzy_mismatch_report("foo bar", "foo bar    ");
+        println!("\n=== whitespace_only: trailing ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+
+        // 3. whitespace_only - internal spacing diff
+        let report = build_fuzzy_mismatch_report("foo  bar", "foo   bar");
+        println!("\n=== whitespace_only: internal gap ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+
+        // 4. whitespace_only - different internal gap count (per-gap values differ)
+        let report = build_fuzzy_mismatch_report("foo  bar  baz", "foo bar baz");
+        println!("\n=== whitespace_only: per-gap diff ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+
+        // 5. whitespace_only - tab vs space (unspecified)
+        let report = build_fuzzy_mismatch_report("foo\tbar", "foo bar");
+        println!("\n=== whitespace_only: tab vs space (unspecified) ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+
+        // 6. extra_line - different line counts (same tokens)
+        let report = build_fuzzy_mismatch_report("foo bar\nbaz", "foo\nbar\nbaz");
+        println!("\n=== whitespace_only: extra line ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_vs_report_gap_analysis() {
+        // Simulate the fuzzy matching regex to find mismatches
+        // between what fuzzy CAN match vs what report CAN detect
+
+        // CASE A: provided has tab, actual has spaces
+        // Fuzzy regex: "foo\tbar" -> regex::escape -> "foo\tbar" (tab stays literal, NOT \s*)
+        // So fuzzy would FAIL to match "foo  bar" (no mismatch report generated!)
+        // This is a GAP: NO_REPORT because fuzzy itself fails
+        let re = Regex::new(r"foo\tbar").unwrap();
+        assert!(
+            !re.is_match("foo  bar"),
+            "Expected fuzzy match to FAIL (tab in provided, spaces in file)"
+        );
+        println!("\n=== CASE A: tab vs spaces -> fuzzy FAILs, NO report generated ===");
+
+        // CASE B: provided has space, actual has tab
+        // Fuzzy regex: "foo bar" -> regex::escape -> "foo" + "\s*" + "bar"
+        // So fuzzy WOULD match "foo\tbar" (mismatch report IS generated)
+        let re = Regex::new(r"foo\s*bar").unwrap();
+        assert!(
+            re.is_match("foo\tbar"),
+            "Expected fuzzy match to SUCCEED (space in provided, tab in file)"
+        );
+        // What does the report say?
+        let report = build_fuzzy_mismatch_report("foo bar", "foo\tbar");
+        println!("\n=== CASE B: space vs tab -> fuzzy SUCCEEDS, report says ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        // split_whitespace splits both on space and tab -> tokens are ["foo", "bar"] == ["foo", "bar"]
+        // So report says "whitespace_only" with "unspecified whitespace difference" (tab vs space)
+
+        // CASE C: provided has newline, actual has spaces
+        // Fuzzy regex: "foo\nbar" -> regex::escape -> "foo\nbar" (newline stays literal, NOT \s*)
+        // So fuzzy would FAIL to match "foo  bar" (no mismatch report generated!)
+        let re = Regex::new(r"foo\nbar").unwrap();
+        assert!(
+            !re.is_match("foo  bar"),
+            "Expected fuzzy match to FAIL (newline in provided, spaces in file)"
+        );
+        println!("\n=== CASE C: newline vs spaces -> fuzzy FAILs, NO report generated ===");
+
+        // CASE D: provided has space, actual has newline (cross-line match!)
+        // Fuzzy regex: "foo bar" -> regex::escape -> "foo\s*bar"
+        // \s* matches newline -> fuzzy WOULD match "foo\nbar"
+        let re = Regex::new(r"foo\s*bar").unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Expected fuzzy match to SUCCEED (space in provided, newline in file)"
+        );
+        let report = build_fuzzy_mismatch_report("foo bar", "foo\nbar");
+        println!("\n=== CASE D: space vs newline -> fuzzy SUCCEEDS (cross-line!), report says ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        // split_whitespace: ["foo", "bar"] == ["foo", "bar"] -> whitespace_only, but
+        // provided has 1 line, actual has 2 lines -> extra_line + unspecified diff
+
+        // CASE E: provided has extra internal whitespace run (double space vs single space)
+        // Fuzzy regex: "foo  bar" -> regex::escape -> "foo  bar" -> replace space -> "foo\s*\s*bar"
+        // (each space independently becomes \s*)
+        // This still matches "foo bar" (single space), because \s* matches 0
+        let re = Regex::new(r"foo\s*\s*bar").unwrap();
+        assert!(
+            re.is_match("foo bar"),
+            "Expected fuzzy match to SUCCEED (double space in provided, single in file)"
+        );
+        let report = build_fuzzy_mismatch_report("foo  bar", "foo bar");
+        println!("\n=== CASE E: double space vs single -> fuzzy SUCCEEDS, report says ===");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        // split_whitespace: ["foo", "bar"] == ["foo", "bar"] -> whitespace_only
+        // leading=0,0  trailing=0,0  internal_ws: provided="  " (2), actual=" " (1)
+
+        // CASE F: provided has trailing newline, actual does not
+        // Fuzzy regex: "foo bar\n" -> escape -> "foo bar\n" -> replace space -> "foo\s*bar\n"
+        // The trailing \n is literal -> requires actual to end with newline
+        let re = Regex::new(r"foo\s*bar\n").unwrap();
+        assert!(
+            !re.is_match("foo bar"),
+            "Expected fuzzy match to FAIL (trailing newline in provided, none in file)"
+        );
+        println!("\n=== CASE F: trailing newline -> fuzzy FAILs, NO report generated ===");
     }
 
     #[test]
