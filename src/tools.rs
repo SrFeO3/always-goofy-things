@@ -74,6 +74,22 @@ static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=
 static PATH_TRAVERSAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
 
+/// Records how a tool execution was approved (or denied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolRunDecisionKind {
+    UserConfirm,
+    UserCancel,
+    AutoConfirm,
+    SystemError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRunDecision {
+    pub proceed: bool,
+    pub kind: ToolRunDecisionKind,
+    pub reason: Option<String>,
+}
+
 pub fn get_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -227,31 +243,58 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Confirms tool execution (via user interaction or auto-rules) and executes it.
+/// Confirms tool execution (via user interaction or auto-rules).
 /// This function encapsulates the approval logic for tool execution.
-pub async fn confirm_and_execute_tool(
+/// Returns `ToolRunDecision` - whether to proceed and how it was decided.
+/// I/O errors are handled internally and returned as `SystemError`.
+pub async fn confirm_execute_tool(
     name: &str,
     args: &serde_json::Value,
     unsafe_reflex: bool,
-) -> Result<serde_json::Value> {
-    let confirmed = if unsafe_reflex && auto_confirm(name, args).await {
-        true
-    } else {
-        print!(
-            "   {}Execute this tool ({})? (y/N): {}",
-            C_CYAN, name, RESET
-        );
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+) -> ToolRunDecision {
+    if unsafe_reflex && let (proceed, reason) = auto_confirm(name, args) {
+        if proceed {
+            return ToolRunDecision {
+                proceed: true,
+                kind: ToolRunDecisionKind::AutoConfirm,
+                reason,
+            };
+        }
+    }
 
-        input.trim().eq_ignore_ascii_case("y")
-    };
+    print!(
+        "      {}Execute this tool ({})? (y/N) {}",
+        C_CYAN, name, RESET
+    );
+    if io::stdout().flush().is_err() {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some("Failed to flush stdout".to_string()),
+        };
+    }
 
-    if confirmed {
-        execute_tool(name, args).await
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some("Failed to read stdin".to_string()),
+        };
+    }
+
+    if input.trim().eq_ignore_ascii_case("y") {
+        ToolRunDecision {
+            proceed: true,
+            kind: ToolRunDecisionKind::UserConfirm,
+            reason: None,
+        }
     } else {
-        Ok(json!({"status": "denied", "message": "Tool execution skipped by user."}))
+        ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::UserCancel,
+            reason: None,
+        }
     }
 }
 

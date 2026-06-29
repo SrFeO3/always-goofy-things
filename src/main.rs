@@ -22,6 +22,7 @@ use futures_util::StreamExt;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 mod cmd;
 mod pretty;
@@ -29,7 +30,9 @@ mod reflex;
 mod startup;
 mod tools;
 
-use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_RED, C_YELLOW, RESET};
+use tools::{ToolRunDecision, ToolRunDecisionKind};
+
+use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -45,6 +48,8 @@ struct Message {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     #[serde(skip)]
     pub model: Option<String>,
+    #[serde(skip)]
+    pub tool_call_decision: Option<tools::ToolRunDecision>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -139,6 +144,7 @@ async fn main() -> Result<()> {
         tool_call_id: None,
         timestamp: chrono::Utc::now(),
         model: None,
+        tool_call_decision: None,
     }];
 
     // Main conversation loop
@@ -216,6 +222,7 @@ async fn main() -> Result<()> {
                 tool_call_id: None,
                 timestamp: chrono::Utc::now(),
                 model: None,
+                tool_call_decision: None,
             });
         }
 
@@ -341,30 +348,86 @@ async fn main() -> Result<()> {
                     }
 
                     // 3. Confirm and execute
-                    let tool_result = match tools::confirm_and_execute_tool(
+                    let tool_result: serde_json::Value;
+
+                    let tool_call_decision = tools::confirm_execute_tool(
                         &call.function.name,
                         &args,
                         config.unsafe_reflex,
                     )
-                    .await
-                    {
-                        Ok(res) => {
-                            if res.get("status").and_then(|s| s.as_str()) == Some("denied") {
-                                user_denied = true;
+                    .await;
+                    let tool_call_decision_reason =
+                        tool_call_decision.reason.as_deref().unwrap_or("");
+
+                    if !tool_call_decision.proceed {
+                        match &tool_call_decision {
+                            ToolRunDecision {
+                                kind: ToolRunDecisionKind::UserCancel,
+                                ..
+                            } => {
                                 println!(
-                                    "{}*{} Tool execution was denied by user.",
+                                    "{}*{} Tool execution was canceled by user.",
                                     C_YELLOW, RESET
                                 );
-                            } else {
-                                println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
+                                tool_result = json!({"status": "denied", "message": "Tool execution skipped by user."});
+                                user_denied = true;
                             }
-                            res
+                            ToolRunDecision {
+                                kind: ToolRunDecisionKind::SystemError,
+                                ..
+                            } => {
+                                println!(
+                                    "{}*{} Tool execution was canceled due to a system error: {}",
+                                    C_RED, RESET, tool_call_decision_reason
+                                );
+                                tool_result = json!({"status": "error", "message": format!("Tool execution skipped due to a system error: {}", tool_call_decision_reason)});
+                            }
+                            _ => {
+                                println!(
+                                    "{}**{} Tool execution was canceled due to unknown app bug",
+                                    C_RED, RESET
+                                );
+                                tool_result =
+                                    json!({"status": "error", "message": "unknown app bug"});
+                            }
                         }
-                        Err(e) => {
-                            println!("{}*{} Tool execution failed.: {}", C_RED, RESET, e);
-                            serde_json::json!({"error": e.to_string()})
+                    } else {
+                        match &tool_call_decision {
+                            ToolRunDecision {
+                                kind: ToolRunDecisionKind::UserConfirm,
+                                ..
+                            } => {
+                                println!(
+                                    "     {} User-confirmed{}: {}{}",
+                                    C_GREEN, RESET, tool_call_decision_reason, RESET
+                                );
+                            }
+                            ToolRunDecision {
+                                kind: ToolRunDecisionKind::AutoConfirm,
+                                ..
+                            } => {
+                                println!(
+                                    "     {} Auto-confirmed{}: {}{}",
+                                    C_MAGENTA, RESET, tool_call_decision_reason, RESET
+                                );
+                            }
+                            _ => unreachable!(
+                                "confirmed is true but decision is not a confirm variant"
+                            ),
                         }
-                    };
+
+                        // execute tool and get tool_result json for following steps
+                        match tools::execute_tool(&call.function.name, &args).await {
+                            Ok(res) => {
+                                println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
+                                tool_result = res;
+                            }
+                            Err(e) => {
+                                println!("{}*{} Tool execution failed: {}", C_RED, RESET, e);
+                                tool_result = json!({"error": e.to_string()});
+                            }
+                        }
+                    }
 
                     // 4. Pretty print result (only on Ok)
                     if pretty && !user_denied {
@@ -391,6 +454,7 @@ async fn main() -> Result<()> {
                         tool_call_id: Some(call.id),
                         timestamp: chrono::Utc::now(),
                         model: None,
+                        tool_call_decision: Some(tool_call_decision),
                     });
                 }
                 // Re-query LLM with tool execution results
@@ -515,6 +579,7 @@ async fn call_llm(
         tool_call_id: None,
         timestamp: chrono::Utc::now(),
         model: Some(model.to_string()),
+        tool_call_decision: None,
     };
 
     let stream = res.bytes_stream();

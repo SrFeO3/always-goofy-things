@@ -10,7 +10,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
-use super::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_YELLOW, RESET};
+use super::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 /// Result of handling a slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +278,35 @@ fn handle_history(arg: Option<&str>, messages: &Vec<crate::Message>) {
                         }
                     }
                 } else if msg.role == "tool" {
+                    if let Some(ref decision) = msg.tool_call_decision {
+                        let (label, color) = match &decision.kind {
+                            crate::tools::ToolRunDecisionKind::UserConfirm => {
+                                ("User-confirmed", C_GREEN)
+                            }
+                            crate::tools::ToolRunDecisionKind::AutoConfirm => {
+                                ("Auto-confirmed", C_MAGENTA)
+                            }
+                            crate::tools::ToolRunDecisionKind::UserCancel => {
+                                ("User-canceled", C_YELLOW)
+                            }
+                            crate::tools::ToolRunDecisionKind::SystemError => {
+                                ("System-error", C_RED)
+                            }
+                        };
+                        let reason_str = decision
+                            .reason
+                            .as_deref()
+                            .map(|r| format!(": {}", r))
+                            .unwrap_or_default();
+                        println!(
+                            "         Decision({}): {}{}{}{}",
+                            msg.tool_call_id.as_deref().unwrap_or("?"),
+                            color,
+                            label,
+                            RESET,
+                            reason_str
+                        );
+                    }
                     println!(
                         "       Tool result({}): {}",
                         msg.tool_call_id.as_deref().unwrap_or("?"),

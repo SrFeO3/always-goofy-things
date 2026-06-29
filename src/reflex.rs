@@ -1,141 +1,130 @@
 //! Unsafe reflex
 //! Automatically determines if a tool call can bypass manual confirmation.
 
-use super::startup::{C_MAGENTA, RESET};
-
 const AUTO_CONFIRM_STRICT_COMMAND_LIST: &[&str] = &["cargo check", "cargo check 2>&1", "cargo fmt"];
-
-/// Print an auto-confirmed message with color.
-fn print_auto_confirmed(reason: &str) {
-    println!(
-        "   {}✓ Auto-confirmed{}: {}{}",
-        C_MAGENTA, RESET, reason, RESET
-    );
-}
 
 /// Automatically determines if a tool call can bypass manual confirmation.
 ///
 /// Returns `true` if the tool is allowed and its path-based arguments pass
 /// the subpath constraint checks. Returns `false` otherwise.
-pub async fn auto_confirm(name: &str, args: &serde_json::Value) -> bool {
+pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<String>) {
     match name {
         "read_file" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
             let path = match obj.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p.to_string(),
-                None => return false,
+                None => return (false, None),
             };
 
             if is_safe_subpath(&path) {
-                print_auto_confirmed(&format!("A reasonably peaceful path: {}", path));
-                true
+                (true, Some(format!("A reasonably peaceful path: {}", path)))
             } else {
-                false
+                (false, None)
             }
         }
         "write_file" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
             let path = match obj.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p.to_string(),
-                None => return false,
+                None => return (false, None),
             };
 
             if is_safe_subpath(&path) {
-                print_auto_confirmed(&format!("A reasonably peaceful path: {}", path));
-                true
+                (true, Some(format!("A reasonably peaceful path: {}", path)))
             } else {
-                false
+                (false, None)
             }
         }
         "str_replace_editor" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
             let path = match obj.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p.to_string(),
-                None => return false,
+                None => return (false, None),
             };
 
             if is_safe_subpath(&path) {
-                print_auto_confirmed(&format!("A reasonably peaceful path: {}", path));
-                true
+                (true, Some(format!("A reasonably peaceful path: {}", path)))
             } else {
-                false
+                (false, None)
             }
         }
         "grep_search" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
 
             let query = match obj.get("query").and_then(|v| v.as_str()) {
                 Some(q) => q.to_string(),
-                None => return false,
+                None => return (false, None),
             };
 
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                 if is_safe_grep_query(&query) && is_safe_subpath(&path) {
-                    print_auto_confirmed(&format!(
-                        "A reasonably quiet query along a peaceful path (path: '{}', query: '{}')",
-                        query, path
-                    ));
-                    true
+                    (
+                        true,
+                        Some(format!(
+                            "A reasonably quiet query along a peaceful path (path: '{}', query: '{}')",
+                            query, path
+                        )),
+                    )
                 } else {
-                    false
+                    (false, None)
                 }
             } else {
                 if is_safe_grep_query(&query) {
-                    print_auto_confirmed(&format!("A reasonably quiet query: {}", query));
-                    true
+                    (true, Some(format!("A reasonably quiet query: {}", query)))
                 } else {
-                    false
+                    (false, None)
                 }
             }
         }
         "list_directory" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
             let path = match obj.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p.to_string(),
-                None => return false,
+                None => return (false, None),
             };
 
             if is_safe_subpath(&path) {
-                print_auto_confirmed(&format!("A reasonably peaceful path: {}", path));
-                true
+                (true, Some(format!("A reasonably peaceful path: {}", path)))
             } else {
-                false
+                (false, None)
             }
         }
         "execute_bash" => {
             let obj = match args.as_object() {
                 Some(o) => o,
-                None => return false,
+                None => return (false, None),
             };
             let command = match obj.get("command").and_then(|v| v.as_str()) {
                 Some(c) => c,
-                None => return false,
+                None => return (false, None),
             };
 
             if AUTO_CONFIRM_STRICT_COMMAND_LIST.contains(&command) {
-                print_auto_confirmed(&format!("A reasonably polite command: {}", command));
-                true
+                (
+                    true,
+                    Some(format!("A reasonably polite command: {}", command)),
+                )
             } else {
-                false
+                (false, None)
             }
         }
-        "fetch_web" => false,
-        _ => false,
+        "fetch_web" => (false, None),
+        _ => (false, None),
     }
 }
 
