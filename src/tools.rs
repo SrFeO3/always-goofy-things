@@ -142,12 +142,11 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "List files and directories in a given directory. Use this tool to explore the project structure before reading or editing files.",
+                "description": "List files and directories in a given directory (non-recursive). Use this tool to explore the project structure before reading or editing files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
-                        "recursive": { "type": "boolean", "description": "Whether to list subdirectories recursively." }
                     },
                     "required": ["path"]
                 }
@@ -580,7 +579,6 @@ fn execute_list_directory(args: &serde_json::Value) -> Result<serde_json::Value>
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
-    let recursive = args["recursive"].as_bool().unwrap_or(false);
     let mut entries = Vec::new();
     for entry in fs::read_dir(path).map_err(|e| {
         anyhow!(
@@ -608,7 +606,7 @@ fn execute_list_directory(args: &serde_json::Value) -> Result<serde_json::Value>
            "size": metadata.len()
         }));
     }
-    Ok(json!({ "path": path, "entries": entries, "recursive": recursive }))
+    Ok(json!({ "path": path, "entries": entries }))
 }
 
 fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Value> {
@@ -1056,7 +1054,7 @@ mod tests {
     #[test]
     fn test_list_directory() {
         // Test directory listing for the project root
-        let res = execute_list_directory(&json!({ "path": ".", "recursive": false })).unwrap();
+        let res = execute_list_directory(&json!({ "path": "." })).unwrap();
         let entries: Vec<&str> = res["entries"]
             .as_array()
             .unwrap()
