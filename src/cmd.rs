@@ -10,6 +10,8 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
+use super::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_YELLOW, RESET};
+
 /// Result of handling a slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCmdResult {
@@ -229,7 +231,8 @@ fn handle_history(arg: Option<&str>, messages: &Vec<crate::Message>) {
 
     // Skip the first message if it's the system prompt
     if !messages.is_empty() && messages[0].role == "system" {
-        println!("\x1b[36m[System] system prompt\x1b[0m");
+        let ts = messages[0].timestamp.format("%m/%d %H:%M:%S");
+        println!("\x1b[36m[System]\x1b[0m {} system prompt", ts);
         i = 1;
     }
 
@@ -237,41 +240,49 @@ fn handle_history(arg: Option<&str>, messages: &Vec<crate::Message>) {
         // Collect user message
         if i < messages.len() && messages[i].role == "user" {
             turn += 1;
+            let ts = messages[i].timestamp.format("%m/%d %H:%M:%S");
             let content = &messages[i].content;
-            let preview = truncate(content, 80);
+            let preview = truncate_and_flatten(content, 60);
             println!(
-                "\x1b[1mTurn {}:\x1b[0m \x1b[34m(User)\x1b[0m {}",
-                turn, preview
+                "\x1b[1mTurn {}:\x1b[0m {} \x1b[34m(User)\x1b[0m {}",
+                turn, ts, preview
             );
             i += 1;
 
             // Collect assistant message(s)
+            let mut llm_call_num = 0;
             while i < messages.len() && messages[i].role != "user" {
                 let msg = &messages[i];
                 if msg.role == "assistant" {
-                    let mut summary = String::from("  \x1b[32m(Assistant)\x1b[0m");
+                    llm_call_num += 1;
+                    let ts = msg.timestamp.format("%m/%d %H:%M:%S");
+                    let model = msg.model.as_deref().unwrap_or("?");
+                    println!(
+                        "   {}LLM call{}({}-{}) {}: {}[{}]{}",
+                        C_GREEN, RESET, turn, llm_call_num, ts, C_DIM_GREEN, model, RESET
+                    );
                     if let Some(ref reasoning) = msg.reasoning_content {
-                        let reasoning_preview = truncate(reasoning, 60);
-                        summary.push_str(&format!(
-                            "\n    \x1b[90m(reasoning)\x1b[0m {}",
-                            reasoning_preview
-                        ));
+                        println!("     Thinking: {}", truncate_and_flatten(reasoning, 60));
                     }
-                    let content_preview = truncate(&msg.content, 60);
-                    summary.push_str(&format!("\n    {}", content_preview));
-
+                    if msg.content.trim().is_empty() {
+                        println!("     Response: {}No message content{}", C_DIM_GRAY, RESET);
+                    } else {
+                        println!("     Response: {}", truncate_and_flatten(&msg.content, 60));
+                    }
                     if let Some(ref tool_calls) = msg.tool_calls {
                         for tc in tool_calls {
-                            summary.push_str(&format!(
-                                "\n    \x1b[35m[tool]\x1b[0m {}",
-                                tc.function.name
-                            ));
+                            println!(
+                                "       {}Tool call{}({}): {}",
+                                C_YELLOW, RESET, tc.id, tc.function.name
+                            );
                         }
                     }
-                    println!("{}", summary);
                 } else if msg.role == "tool" {
-                    let content_preview = truncate(&msg.content, 60);
-                    println!("    \x1b[35m[tool result]\x1b[0m {}", content_preview);
+                    println!(
+                        "       Tool result({}): {}",
+                        msg.tool_call_id.as_deref().unwrap_or("?"),
+                        truncate_and_flatten(&msg.content, 60)
+                    );
                 }
                 i += 1;
             }
@@ -285,12 +296,13 @@ fn handle_history(arg: Option<&str>, messages: &Vec<crate::Message>) {
 }
 
 /// Truncate a string to a max length, appending "..." if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().take(max).collect();
-    let result: String = chars.into_iter().collect();
-    if s.chars().count() > max {
-        format!("{}...", result)
+fn truncate_and_flatten(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().take(max + 1).collect();
+    let result = if chars.len() > max {
+        let truncated: String = chars[..max].iter().collect();
+        format!("{}...", truncated)
     } else {
-        result
-    }
+        chars.into_iter().collect()
+    };
+    result.replace("\r\n", " \\n ").replace('\n', " \\n ")
 }

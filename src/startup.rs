@@ -27,6 +27,9 @@ pub const C_CYAN: &str = "\x1b[36m";
 pub const C_MAGENTA: &str = "\x1b[38;2;170;70;145m";
 pub const C_YELLOW: &str = "\x1b[93m";
 
+pub const C_DIM_GRAY: &str = "\x1b[90m";
+pub const C_DIM_GREEN: &str = "\x1b[92;2;3m";
+
 pub const RESET: &str = "\x1b[0m";
 pub const ERASE_LINE: &str = "\x1b[K";
 pub const EMPTY: &str = "";

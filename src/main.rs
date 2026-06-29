@@ -29,7 +29,7 @@ mod reflex;
 mod startup;
 mod tools;
 
-use startup::{C_CYAN, C_GRAY, C_GREEN, C_RED, C_YELLOW, RESET};
+use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_RED, C_YELLOW, RESET};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -41,6 +41,10 @@ struct Message {
     tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip)]
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(skip)]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -133,6 +137,8 @@ async fn main() -> Result<()> {
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
+        timestamp: chrono::Utc::now(),
+        model: None,
     }];
 
     // Main conversation loop
@@ -208,6 +214,8 @@ async fn main() -> Result<()> {
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
+                timestamp: chrono::Utc::now(),
+                model: None,
             });
         }
 
@@ -375,13 +383,14 @@ async fn main() -> Result<()> {
                     } else {
                         println!("Tool Call Response: {}\n", tool_result_str);
                     }
-
                     messages.push(Message {
                         role: "tool".to_string(),
                         content: tool_result_str,
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: Some(call.id),
+                        timestamp: chrono::Utc::now(),
+                        model: None,
                     });
                 }
                 // Re-query LLM with tool execution results
@@ -498,13 +507,14 @@ async fn call_llm(
             req_json
         ));
     }
-
     let mut full_message = Message {
         role: "assistant".to_string(),
         content: String::new(),
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
+        timestamp: chrono::Utc::now(),
+        model: Some(model.to_string()),
     };
 
     let stream = res.bytes_stream();
@@ -573,7 +583,7 @@ async fn call_llm(
 
                 if let Some(reasoning) = reasoning_val.and_then(|v| v.as_str()) {
                     if !is_thinking {
-                        print!("\n\x1b[92;2;3m[Thinking]\n");
+                        print!("\n{}[Thinking]\n", C_DIM_GREEN);
                         is_thinking = true;
                     }
                     print!("{}", reasoning);
