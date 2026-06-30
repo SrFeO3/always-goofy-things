@@ -21,6 +21,8 @@ pub enum SlashCmdResult {
     RewoundTo(i32),
     /// Model was switched to the new name.
     ModelChanged(String),
+    /// Session was restored. Reset turn counter to this value.
+    RestoredTo(i32),
 }
 
 /// Check if the input starts with a slash command, and handle it if so.
@@ -62,6 +64,13 @@ pub fn try_handle_slash_command(
             let new_model = handle_model(arg, current_model);
             Some(SlashCmdResult::ModelChanged(new_model))
         }
+        "/restore" => match handle_restore(messages) {
+            Ok(new_turn) => Some(SlashCmdResult::RestoredTo(new_turn)),
+            Err(e) => {
+                eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
+                Some(SlashCmdResult::NoAdvance)
+            }
+        },
         _ => {
             eprintln!(
                 "\x1b[93mUnknown command: {}\x1b[0m Type /help for available commands.",
@@ -110,13 +119,15 @@ fn print_help() {
    /rewind <turn>   Roll back conversation to <turn> and discard newer history
    /history [-a]    Print conversation history summary (-a, --all for raw payload)
    /model [name]    Switch the active LLM on the fly (no arg: show current)
+   /restore         Restore the previous session from disk
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
    \x1b[90m/model        - Show the currently active model\x1b[0m
    \x1b[90m/model qwen   - Switch to 'qwen' model and continue\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
-   \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m"
+   \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
+   \x1b[90m/restore      - Restore the latest session from disk\x1b[0m"
     );
 }
 
@@ -334,4 +345,67 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
         chars.into_iter().collect()
     };
     result.replace("\r\n", " \\n ").replace('\n', " \\n ")
+}
+
+// ---------------------------------------------------------------------------
+// /restore
+// ---------------------------------------------------------------------------
+
+/// Handle `/restore`.
+///
+/// Restores the previous session from `previous_session.jsonl`, replacing
+/// the current conversation. Returns the calculated new turn count.
+fn handle_restore(messages: &mut Vec<crate::Message>) -> Result<i32> {
+    use crate::session;
+
+    let restored = session::restore_previous_session()?;
+    if restored.is_empty() {
+        println!(
+            "\x1b[93mNo previous session found.{}\x1b[0m",
+            session::session_file_display()
+        );
+        return Err(anyhow!("No previous session to restore"));
+    }
+
+    // Confirm with the user
+    println!(
+        "\x1b[93m⚠️  Restoring will replace the current conversation with {} saved message(s).\x1b[0m",
+        restored.len()
+    );
+    print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
+    io::stdout().flush().context("Failed to flush stdout")?;
+
+    let mut confirm = String::new();
+    io::stdin()
+        .read_line(&mut confirm)
+        .context("Failed to read confirmation")?;
+    if !confirm.trim().eq_ignore_ascii_case("y") {
+        println!("\x1b[93mCancelled.\x1b[0m");
+        return Err(anyhow!("User cancelled the restore"));
+    }
+
+    // Replace messages with restored ones
+    messages.clear();
+    messages.extend(restored);
+
+    // Calculate restored turns (each turn = user + assistant/tool)
+    let mut restored_turns = 0i32;
+    let mut i = 0;
+    if !messages.is_empty() && messages[0].role == "system" {
+        i = 1;
+    }
+    while i < messages.len() {
+        if messages[i].role == "user" {
+            restored_turns += 1;
+        }
+        i += 1;
+    }
+
+    println!(
+        "\x1b[32m✓ Restored {} messages ({} turn(s)) from previous session.\x1b[0m",
+        messages.len(),
+        restored_turns
+    );
+
+    Ok(restored_turns)
 }

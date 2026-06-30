@@ -27,6 +27,7 @@ use serde_json::json;
 mod cmd;
 mod pretty;
 mod reflex;
+mod session;
 mod startup;
 mod tools;
 
@@ -146,6 +147,10 @@ async fn main() -> Result<()> {
         model: None,
         tool_call_decision: None,
     }];
+    // On startup: move meaningful last_session -> previous_session if it exists
+    let _ = session::init_session();
+    // Save system message as the first line of the new session
+    let _ = session::save_message(&messages[0]);
 
     // Main conversation loop
     let mut turn: i32 = 1;
@@ -204,6 +209,13 @@ async fn main() -> Result<()> {
                     llm_model = new_model;
                     continue;
                 }
+                cmd::SlashCmdResult::RestoredTo(target) => {
+                    // Reset turn counter to target + 1 (next turn after restored point)
+                    turn = target + 1;
+                    // Reset last_sent_count to match the new message count
+                    last_sent_count = messages.len();
+                    continue;
+                }
             }
         }
 
@@ -224,6 +236,7 @@ async fn main() -> Result<()> {
                 model: None,
                 tool_call_decision: None,
             });
+            let _ = session::save_message(messages.last().unwrap());
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
@@ -288,6 +301,7 @@ async fn main() -> Result<()> {
             empty_retry_count = 0;
 
             messages.push(assistant_msg.clone());
+            let _ = session::save_message(&assistant_msg);
             last_sent_count = messages.len();
 
             // Accumulate and display statistics for each LLM call
@@ -456,6 +470,7 @@ async fn main() -> Result<()> {
                         model: None,
                         tool_call_decision: Some(tool_call_decision),
                     });
+                    let _ = session::save_message(messages.last().unwrap());
                 }
                 // Re-query LLM with tool execution results
                 continue 'reasoning_loop;

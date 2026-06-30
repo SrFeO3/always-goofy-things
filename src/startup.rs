@@ -11,7 +11,7 @@ pub const MAX_EMPTY_RETRY: usize = 1;
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
 pub const APP_BIN_NAME: &str = "always-goofy-things";
-pub const APP_DESCRIPTION: &str = "A mere LLM loop for software development tasks.";
+pub const APP_DESCRIPTION: &str = "A lightweight LLM loop for software development tasks.";
 
 // ANSI escape sequences for text styling.
 pub const HDR_RED: &str = "\x1b[48;2;218;75;80m";
