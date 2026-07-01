@@ -1,18 +1,23 @@
-//! Implementation of executable tool capabilities for the LLM assistant.
-//! Provides bash execution, fuzzy string replacement, and URL fetching.
+//! Tool implementations for the LLM assistant.
 //!
-//! WARNING: The following tools perform direct operations on the local system
-//! and network, such as file modification and command execution. Use only in
-//! a secure environment to prevent unintended data loss or security breaches.
+//! Implements capabilities such as shell command execution, fuzzy text replacement,
+//! and URL fetching.
 //!
-//! Available Tools:
-//! `read_file`: Read a file's content, optionally within a specific line range.
-//! `write_file`: Create a new file or overwrite an existing one with full content.
-//! `str_replace_editor`: Replace specific text blocks in a file for code modification.
-//! `grep_search`: Search for text patterns across files in the workspace.
-//! `list_directory`: List the contents of a directory to explore the project structure.
-//! `execute_bash`: Run terminal commands to perform development tasks.
-//! `fetch_web`: Fetch and extract text content from a specified URL.
+//! # Safety Warning
+//!
+//! The following tools perform direct operations on the local system
+//! and network, such as file modification, command execution, and internet access.
+//! Use only in a secure environment to prevent unintended data loss or security breaches.
+//!
+//! # Available Tools
+//!
+//! - `read_file`: Read a file's content, optionally within a specific line range.
+//! - `write_file`: Create a new file or overwrite an existing one with full content.
+//! - `str_replace_editor`: Replace specific text blocks in a file for code modification.
+//! - `grep_search`: Search for text patterns across files in the workspace.
+//! - `list_directory`: List the contents of a directory to explore the project structure.
+//! - `execute_bash`: Run terminal commands to perform development tasks.
+//! - `fetch_web`: Fetch and extract text content from a specified URL.
 
 use std::fs;
 use std::io::{self, Write};

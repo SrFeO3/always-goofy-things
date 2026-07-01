@@ -1,11 +1,12 @@
-//! Session persistence: save and restore conversations.
+//! Session persistence for conversation history.
 //!
-//! Uses `directories::ProjectDirs` to locate the data directory.
-//! Each conversation line is stored as one JSON object (JSONL format).
+//! Saves and restores conversation logs in JSON Lines (JSONL) format
+//! within platform-specific application data directories.
 //!
-//! File schema:
-//!   - `last_session.jsonl`    — current session (appended during conversation)
-//!   - `previous_session.jsonl` — last completed session (moved here on startup)
+//! # Persistence Files
+//!
+//! - `last_session.jsonl`: Active session log, appended during conversation.
+//! - `previous_session.jsonl`: Prior completed session, moved on startup.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};

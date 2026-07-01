@@ -1,4 +1,7 @@
-//! Startup: CLI configuration parsing, verbosity/prettiness levels, and startup banner.
+//! CLI initialization and runtime configuration.
+//!
+//! Parses command-line arguments, renders the startup banner,
+//! and defines global configuration constants for the application.
 
 use std::env;
 

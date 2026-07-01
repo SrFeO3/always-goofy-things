@@ -1,5 +1,9 @@
-//! Pretty UI
-//! Provide a more user-friendly CLI during tool execution.
+//! Pretty UI rendering for tool execution.
+//!
+//! Provides a more user-friendly and human-readable CLI experience
+//! during the tool calling process.
+//!
+//! # Pretty-Printed Tools
 //!
 //! - `read_file`: Read a file's content, optionally within a specific line range.
 //!     - Success: File size, first 10 chars, and last 10 chars (excluding newlines) (1 line)

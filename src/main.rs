@@ -1,11 +1,17 @@
-//! Main entry point for the CLI.
+//! CLI entry point and main execution loop.
 //!
-//! WARNING: This application executes autonomous actions on your behalf, including
+//! Coordinates the application's lifecycle and runs the interactive
+//! LLM conversation loop.
+//!
+//! # Safety Warning
+//!
+//! This application executes autonomous actions on your behalf, including
 //! file system modifications, shell command execution, and internet access.
 //! Review tool calls carefully before granting execution as these operations
 //! may impact your local environment or interact with external servers.
 //!
-//! Logic Flow:
+//! # Execution Flow
+//!
 //! 1. [User Input]   : Capture query from the terminal.
 //! 2. [Reason Loop]  : Recursive cycle for complex tasks.
 //!    - LLM Call     : Process context and decide next action.
@@ -25,9 +31,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod cmd;
+mod persistence;
 mod pretty;
 mod reflex;
-mod session;
 mod startup;
 mod tools;
 
@@ -148,9 +154,9 @@ async fn main() -> Result<()> {
         tool_call_decision: None,
     }];
     // On startup: move meaningful last_session -> previous_session if it exists
-    let _ = session::init_session();
+    let _ = persistence::init_session();
     // Save system message as the first line of the new session
-    let _ = session::save_message(&messages[0]);
+    let _ = persistence::save_message(&messages[0]);
 
     // Main conversation loop
     let mut turn: i32 = 1;
@@ -236,7 +242,7 @@ async fn main() -> Result<()> {
                 model: None,
                 tool_call_decision: None,
             });
-            let _ = session::save_message(messages.last().unwrap());
+            let _ = persistence::save_message(messages.last().unwrap());
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
@@ -301,7 +307,7 @@ async fn main() -> Result<()> {
             empty_retry_count = 0;
 
             messages.push(assistant_msg.clone());
-            let _ = session::save_message(&assistant_msg);
+            let _ = persistence::save_message(&assistant_msg);
             last_sent_count = messages.len();
 
             // Accumulate and display statistics for each LLM call
@@ -470,7 +476,7 @@ async fn main() -> Result<()> {
                         model: None,
                         tool_call_decision: Some(tool_call_decision),
                     });
-                    let _ = session::save_message(messages.last().unwrap());
+                    let _ = persistence::save_message(messages.last().unwrap());
                 }
                 // Re-query LLM with tool execution results
                 continue 'reasoning_loop;

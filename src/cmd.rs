@@ -1,10 +1,16 @@
-//! Slash command handling.
+//! Slash command dispatching and processing.
 //!
-//! Currently implements:
-//! - `/help`, `/h`    - display help text
-//! - `/rewind <turn>` - roll back conversation history to a specific turn
-//! - `/history [-a]`  - print conversation history summary
-//! - `/model [name]`  - switch the active LLM on the fly
+//! Provides direct control over the LLM loop's conversation context
+//! and session configuration via user-input commands.
+//!
+//! # Supported Commands
+//!
+//! - `/help`, `/h`: Display help text.
+//! - `/rewind <turn>`: Roll back conversation history to a specific turn.
+//! - `/history [-a]`: Show a summary of the conversation history.
+//! - `/model [name]`: Switch the active LLM on the fly.
+//! - `/restore`: Restore the previous session from disk.
+//! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
 use std::io::{self, Write};
 
@@ -115,7 +121,7 @@ fn print_help() {
         "\x1b[1mUsage:\x1b[0m \x1b[0m/<command> [options]
 
 \x1b[1mCore Commands:\x1b[0m
-   /h, /help        Display this help text and exit
+   /h, /help        Display this help text
    /rewind <turn>   Roll back conversation to <turn> and discard newer history
    /history [-a]    Print conversation history summary (-a, --all for raw payload)
    /model [name]    Switch the active LLM on the fly (no arg: show current)
@@ -356,13 +362,13 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
 /// Restores the previous session from `previous_session.jsonl`, replacing
 /// the current conversation. Returns the calculated new turn count.
 fn handle_restore(messages: &mut Vec<crate::Message>) -> Result<i32> {
-    use crate::session;
+    use crate::persistence;
 
-    let restored = session::restore_previous_session()?;
+    let restored = persistence::restore_previous_session()?;
     if restored.is_empty() {
         println!(
             "\x1b[93mNo previous session found.{}\x1b[0m",
-            session::session_file_display()
+            persistence::session_file_display()
         );
         return Err(anyhow!("No previous session to restore"));
     }

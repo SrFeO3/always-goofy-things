@@ -1,5 +1,7 @@
-//! Unsafe reflex
-//! Automatically determines if a tool call can bypass manual confirmation.
+//! Unsafe reflex bypass for tool execution.
+//!
+//! Automatically determines if a tool call can bypass manual confirmation
+//! based on predefined execution policies.
 
 const AUTO_CONFIRM_STRICT_COMMAND_LIST: &[&str] = &["cargo check", "cargo check 2>&1", "cargo fmt"];
 
