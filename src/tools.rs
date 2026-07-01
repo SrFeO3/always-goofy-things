@@ -508,7 +508,7 @@ fn build_fuzzy_mismatch_report(provided: &str, actual: &str) -> serde_json::Valu
         for (line_key, data) in line_map {
             line_issues.push(json!({
                 "line": line_key,
-                "diff": data,
+                "numerical_diff": data,
             }));
         }
     }
@@ -541,10 +541,10 @@ fn build_fuzzy_mismatch_report(provided: &str, actual: &str) -> serde_json::Valu
     }
 
     json!({
-         "kind": "whitespace_only",
+         "kind": "invalid_whitespace_or_indentation",
          "total_lines_compared": max_lines,
          "line_issues": all_issues,
-         "hint": "Use read_file to see the exact whitespace. Match indentation, internal spaces, and trailing spaces precisely.",
+         "hint": "CRITICAL: Fuzzy match applied due to wrong spaces/indentation. Next time, you MUST run `read_file` first and copy the target lines character-for-character to ensure a 100% exact match.",
     })
 }
 
@@ -580,7 +580,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         return Ok(json!({
             "path": path,
             "occurrences_replaced": 1,
-            "match_type": "exact"
+            "match_type": "exact_match_applied"
         }));
     }
 
@@ -613,7 +613,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     Ok(json!({
         "path": path,
         "occurrences_replaced": 1,
-        "match_type": "fuzzy",
+        "match_type": "fuzzy_match_applied",
         "fuzzy_mismatch": mismatch_report
     }))
 }
