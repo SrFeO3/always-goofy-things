@@ -34,7 +34,7 @@
 
 use serde_json::Value;
 
-use super::startup::{
+use crate::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
 };
 

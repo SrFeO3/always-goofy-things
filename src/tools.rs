@@ -30,8 +30,8 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
-use super::reflex::auto_confirm;
-use super::startup::{C_CYAN, RESET};
+use crate::reflex::auto_confirm;
+use crate::startup::{C_CYAN, RESET};
 
 pub const ALLOW_COMMAND_LIST: &[&str] = &[
     "^ls",

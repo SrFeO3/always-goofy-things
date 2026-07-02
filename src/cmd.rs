@@ -16,7 +16,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
-use super::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
+use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 /// Result of handling a slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
