@@ -34,6 +34,7 @@ mod cmd;
 mod persistence;
 mod pretty;
 mod reflex;
+mod reflex_literal_filter;
 mod startup;
 mod tools;
 

@@ -3,6 +3,10 @@
 //! Automatically determines if a tool call can bypass manual confirmation
 //! based on predefined execution policies.
 
+use crate::reflex_literal_filter::is_safe_grep_query;
+use crate::reflex_literal_filter::is_safe_subpath;
+use crate::reflex_literal_filter::is_shallow_matched_command;
+
 const AUTO_CONFIRM_STRICT_COMMAND_LIST: &[&str] = &["cargo check", "cargo check 2>&1", "cargo fmt"];
 
 /// Automatically determines if a tool call can bypass manual confirmation.
@@ -121,6 +125,11 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                     true,
                     Some(format!("A reasonably polite command: {}", command)),
                 )
+            } else if is_shallow_matched_command(&command) {
+                (
+                    true,
+                    Some(format!("A reasonably familiar pattern: {}", command)),
+                )
             } else {
                 (false, None)
             }
@@ -128,42 +137,4 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
         "fetch_web" => (false, None),
         _ => (false, None),
     }
-}
-
-fn is_safe_grep_query(query: &str) -> bool {
-    if query.is_empty() {
-        return false;
-    }
-    query
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ' ')
-}
-
-/// Validates a safe subpath by restricting input to ASCII alphanumerics, `_`, `-`, `/`, `.`, and an optional leading `./`.
-/// This is a basic, restrictive heuristic to prevent directory traversal by explicitly disallowing `..` and certain segment patterns.
-fn is_safe_subpath(mut path_str: &str) -> bool {
-    if path_str == "." || path_str == "./" {
-        return true;
-    }
-
-    if path_str.starts_with("./") {
-        path_str = &path_str[2..];
-    }
-
-    if path_str.ends_with("\\\\(") {
-        path_str = &path_str[..3];
-    }
-
-    if path_str.is_empty()
-        || path_str.starts_with('/')
-        || path_str.ends_with('/')
-        || path_str.contains("//")
-        || path_str.contains("..")
-    {
-        return false;
-    }
-
-    path_str
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.')
 }
