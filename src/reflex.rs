@@ -3,11 +3,10 @@
 //! Automatically determines if a tool call can bypass manual confirmation
 //! based on predefined execution policies.
 
+use crate::reflex_literal_filter::is_exact_matched_command;
 use crate::reflex_literal_filter::is_safe_grep_query;
 use crate::reflex_literal_filter::is_safe_subpath;
 use crate::reflex_literal_filter::is_shallow_matched_command;
-
-const AUTO_CONFIRM_STRICT_COMMAND_LIST: &[&str] = &["cargo check", "cargo check 2>&1", "cargo fmt"];
 
 /// Automatically determines if a tool call can bypass manual confirmation.
 ///
@@ -120,7 +119,7 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                 None => return (false, None),
             };
 
-            if AUTO_CONFIRM_STRICT_COMMAND_LIST.contains(&command) {
+            if is_exact_matched_command(&command) {
                 (
                     true,
                     Some(format!("A reasonably polite command: {}", command)),
