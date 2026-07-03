@@ -35,7 +35,11 @@
 use serde_json::Value;
 
 use crate::startup::{
-    BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED, RESET,
+    BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, C_YELLOW, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED,
+    RESET,
+};
+use crate::tools_fuzzy::{
+    build_full_fuzzy_pattern, build_space_fuzzy_pattern, build_tab_fuzzy_pattern,
 };
 
 fn truncate_str(s: &str, limit: usize) -> String {
@@ -132,9 +136,21 @@ fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
 fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_type: Option<&str>) {
     println!();
     let match_label = match match_type {
-        Some("exact") => format!("[{}exact{}]", C_GREEN, RESET),
-        Some("fuzzy") => format!("[{}fuzzy{}]", C_RED, RESET),
-        _ => String::new(),
+        Some("exact_match") => format!("[{}exact{}] {}", C_GREEN, RESET, "Perfect match."),
+        Some("space_fuzzy_match") => format!(
+            "[{}space_fuzzy{}] {}",
+            C_GREEN, RESET, "Space-only fuzzy match."
+        ),
+        Some("tab_fuzzy_match") => format!(
+            "[{}tab_fuzzy{}] {}",
+            C_YELLOW, RESET, "Tab characters detected in indents."
+        ),
+        Some("full_fuzzy_match") => format!(
+            "[{}fuzzy{}] {}",
+            C_RED, RESET, "Major mismatch in line breaks or structure. "
+        ),
+        Some(_) => String::new(),
+        None => String::new(),
     };
     if match_label.is_empty() {
         println!("-- Code Preview: {} --", path);
@@ -206,7 +222,7 @@ fn group_diff(input: &[DiffLine]) -> Vec<DiffLine> {
     result
 }
 
-fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine>, &str)> {
+fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine>, String)> {
     let obj = args.as_object()?;
     let path = obj.get("path")?.as_str()?.to_string();
     let old_s = obj.get("old_string")?.as_str()?;
@@ -255,14 +271,43 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
         for line in file_lines.iter().take(ctx_after).skip(end) {
             result.push(DiffLine::Context(line.to_string()));
         }
-
         let line_num = ctx_before + start_pos.saturating_sub(ctx_before) + 1;
-        return Some((path, line_num, result, "exact"));
+        return Some((path, line_num, result, "exact_match".to_string()));
     }
 
-    // Fallback: fuzzy match by treating spaces as \s*
-    let escaped = regex::escape(old_s).replace(r" ", r"\s*");
-    let re = match regex::Regex::new(&escaped) {
+    // Step 2: Space-fuzzy match - only horizontal space count variation ([ ]*)
+    let space_fuzzy_pattern = build_space_fuzzy_pattern(old_s);
+    if let Ok(space_re) = regex::Regex::new(&space_fuzzy_pattern) {
+        if let Some(res) = try_fuzzy_diff(
+            &content,
+            &space_re,
+            old_s,
+            new_s,
+            &file_lines,
+            "space_fuzzy_match",
+        ) {
+            return Some(res);
+        }
+    }
+
+    // Step 3: Tab-fuzzy match - tabs in old_s become [ \t]* (space/tab mix)
+    let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_s);
+    if let Ok(tab_re) = regex::Regex::new(&tab_fuzzy_pattern) {
+        if let Some(res) = try_fuzzy_diff(
+            &content,
+            &tab_re,
+            old_s,
+            new_s,
+            &file_lines,
+            "tab_fuzzy_match",
+        ) {
+            return Some(res);
+        }
+    }
+
+    // Step 4: Full fuzzy match - all whitespace fully flexible
+    let full_pattern = build_full_fuzzy_pattern(old_s);
+    let re = match regex::Regex::new(&full_pattern) {
         Ok(r) => r,
         Err(_) => {
             println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
@@ -272,15 +317,32 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
         }
     };
 
-    let matches: Vec<_> = re.find_iter(&content).collect();
-    if matches.is_empty() {
-        println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
-        println!("  old: {}{}{}", HDR_RED, old_s, RESET);
-        println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
+    if let Some(res) = try_fuzzy_diff(&content, &re, old_s, new_s, &file_lines, "full_fuzzy_match")
+    {
+        return Some(res);
+    }
+
+    println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
+    println!("  old: {}{}{}", HDR_RED, old_s, RESET);
+    println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
+    None
+}
+
+/// Try to fuzzy-match `old_s` in `content` using the given regex,
+/// and return a diff preview tuple if a unique match is found.
+fn try_fuzzy_diff(
+    content: &str,
+    re: &regex::Regex,
+    _old_s: &str,
+    new_s: &str,
+    file_lines: &[&str],
+    match_type_str: &str,
+) -> Option<(String, usize, Vec<DiffLine>, String)> {
+    let matches: Vec<_> = re.find_iter(content).collect();
+    if matches.is_empty() || matches.len() > 1 {
         return None;
     }
 
-    // Use the first match to find the line range
     let m = &matches[0];
     let matched_text = &content[m.start()..m.end()];
     let matched_lines: Vec<&str> = matched_text.lines().collect();
@@ -303,7 +365,12 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
     }
 
     let line_num = ctx_before + start_line_num.saturating_sub(ctx_before) + 1;
-    Some((path, line_num, result, "fuzzy"))
+    Some((
+        content.to_string(),
+        line_num,
+        result,
+        match_type_str.to_string(),
+    ))
 }
 
 fn compute_replace_lines(path: &str, args: &Value) -> Option<(u64, u64)> {
@@ -364,11 +431,22 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
             } else {
                 None
             };
-
             let match_label = match match_type {
-                Some("exact") => format!("[{}exact{}]", C_GREEN, RESET),
-                Some("fuzzy") => format!("[{}fuzzy{}]", C_RED, RESET),
-                _ => String::new(),
+                Some("exact_match") => format!("[{}exact{}] {}", C_GREEN, RESET, "Perfect match."),
+                Some("space_fuzzy_match") => format!(
+                    "[{}space_fuzzy{}] {}",
+                    C_GREEN, RESET, "Space-only fuzzy match."
+                ),
+                Some("tab_fuzzy_match") => format!(
+                    "[{}tab_fuzzy{}] {}",
+                    C_YELLOW, RESET, "Tab characters detected in indents."
+                ),
+                Some("full_fuzzy_match") => format!(
+                    "[{}fuzzy{}] {}",
+                    C_RED, RESET, "Major mismatch in line breaks or structure. "
+                ),
+                Some(_) => String::new(),
+                None => String::new(),
             };
 
             match line_range {
@@ -491,7 +569,7 @@ pub fn pretty_print_command(name: &str, args: &Value) {
         }
         "str_replace_editor" => {
             if let Some((path, start_line, diff, match_type)) = compute_str_replace_diff(args) {
-                show_diff_preview(&path, start_line, diff, Some(match_type));
+                show_diff_preview(&path, start_line, diff, Some(&match_type));
             }
         }
         "execute_bash" => {

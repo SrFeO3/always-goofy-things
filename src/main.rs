@@ -37,6 +37,7 @@ mod reflex;
 mod reflex_literal_filter;
 mod startup;
 mod tools;
+mod tools_fuzzy;
 
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 

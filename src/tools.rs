@@ -32,6 +32,9 @@ use tokio::process::Command as TokioCommand;
 
 use crate::reflex::auto_confirm;
 use crate::startup::{C_CYAN, RESET};
+use crate::tools_fuzzy::{
+    build_full_fuzzy_pattern, build_space_fuzzy_pattern, build_tab_fuzzy_pattern,
+};
 
 pub const ALLOW_COMMAND_LIST: &[&str] = &[
     "^ls",
@@ -577,7 +580,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     let content = fs::read_to_string(path)
         .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
 
-    // Try exact match first
+    // --- Step 1: Try exact match first (single occurrence) ---
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
         atomic_write_with_dir(path, &new_content)
@@ -585,16 +588,57 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         return Ok(json!({
             "path": path,
             "occurrences_replaced": 1,
-            "match_type": "exact_match_applied"
+            "match_type": "Perfect match."
         }));
     }
 
-    // Fallback to fuzzy match by normalizing whitespace
-    let escaped = regex::escape(old_str).replace(r" ", r"\s*");
-    let re = Regex::new(&escaped)
-        .map_err(|e| anyhow!("[INVALID_ARGUMENTS] Invalid regex pattern: {}", e))?;
+    // --- Step 2: Space-fuzzy match (horizontal whitespace only, no tabs/newlines) ---
+    let space_fuzzy_pattern = build_space_fuzzy_pattern(old_str);
+    if let Ok(re) = Regex::new(&space_fuzzy_pattern) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "space_fuzzy_match") {
+            Ok(res) => return Ok(res),
+            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            _ => {} // Continue to next stage if NO_MATCH
+        }
+    }
 
-    let matches: Vec<_> = re.find_iter(&content).collect();
+    // --- Step 3: Tab-fuzzy match (horizontal whitespace: spaces + tabs) ---
+    let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_str);
+    if let Ok(re) = Regex::new(&tab_fuzzy_pattern) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "tab_fuzzy_match") {
+            Ok(res) => return Ok(res),
+            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            _ => {} // Continue to next stage if NO_MATCH
+        }
+    }
+
+    // --- Step 4: Full fuzzy match (all whitespace incl. line breaks + \r\n / \n differences) ---
+    let full_pattern = build_full_fuzzy_pattern(old_str);
+    if let Ok(re) = Regex::new(&full_pattern) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "full_fuzzy_match") {
+            Ok(res) => return Ok(res),
+            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            _ => {} // Final stage, let it fall through to the final NO_MATCH error
+        }
+    }
+
+    // All fallbacks (exact / space-fuzzy / tab-fuzzy / full-fuzzy) were exhausted — old_string truly isn't in file.
+    Err(anyhow!(
+        "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / full-fuzzy stages",
+        path,
+    ))
+}
+
+/// Shared helper for fuzzy replace attempts (used by tab_fuzzy and full_fuzzy steps).
+fn try_fuzzy_replace(
+    content: &str,
+    re: &Regex,
+    old_str: &str,
+    new_str: &str,
+    path: &str,
+    match_type: &str,
+) -> Result<serde_json::Value> {
+    let matches: Vec<_> = re.find_iter(content).collect();
 
     if matches.is_empty() {
         return Err(anyhow!("[NO_MATCH] old_string not found in '{}'", path));
@@ -607,19 +651,30 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     }
     let actual_matched = matches[0].as_str();
     let new_content = re
-        .replace(&content, |_caps: &regex::Captures| new_str.to_string())
+        .replace(content, |_caps: &regex::Captures| new_str.to_string())
         .to_string();
     atomic_write_with_dir(path, &new_content)
         .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 
-    // Build a short mismatch report for the LLM to learn from
+    // Build a mismatch report
     let mismatch_report = build_fuzzy_mismatch_report(old_str, actual_matched);
 
+    let match_result = match match_type {
+        "space_fuzzy_match" => "Space count mismatch: matched by allowing flexible space runs.",
+        "tab_fuzzy_match" => {
+            "Tab/Space mismatch: matched by treating tabs and spaces as equivalent."
+        }
+        "full_fuzzy_match" => {
+            "Line break/Structure mismatch: matched by ignoring all whitespace and newlines."
+        }
+        _ => "Fuzzy match applied.",
+    };
+
     Ok(json!({
-        "path": path,
-        "occurrences_replaced": 1,
-        "match_type": "fuzzy_match_applied",
-        "fuzzy_mismatch": mismatch_report
+         "path": path,
+         "occurrences_replaced": 1,
+         "match_type": match_result,
+         "fuzzy_match_detail": mismatch_report
     }))
 }
 
@@ -974,13 +1029,132 @@ mod tests {
             &json!({ "path": path_str, "old_string": "println! ( \"world\" ) ;", "new_string": "fixed();" }),
         );
         assert!(
-            res2.as_ref().unwrap()["match_type"] == "fuzzy",
+            res2.as_ref().unwrap()["match_type"]
+                .as_str()
+                .unwrap()
+                .contains("mismatch"),
             "Fuzzy match failed: {}",
             res2.as_ref().unwrap()
         );
 
         let content = fs::read_to_string(path_str).unwrap();
         assert!(content.contains("fixed();"));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_four_stage_fuzzy_match() {
+        let path = get_temp_path("four_stage");
+        let path_str = path.to_str().unwrap();
+
+        // Case 1: Exact match
+        fs::write(&path, "fn hello() {\n    println!(\"hi\");\n}").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "println!(\"hi\");",
+            "new_string": "println!(\"bye\");"
+        }));
+        assert_eq!(res.as_ref().unwrap()["match_type"], "Perfect match.");
+        assert!(
+            fs::read_to_string(path_str)
+                .unwrap()
+                .contains("println!(\"bye\");")
+        );
+
+        // Case 2: Space-fuzzy match (Space count difference - avoid substring match)
+        fs::write(&path, "let x = 1  +  2;").unwrap(); // double spaces
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "let x = 1 + 2;", // single spaces
+            "new_string": "let x = 3;"
+        }));
+        assert_eq!(
+            res.as_ref().unwrap()["match_type"],
+            "Space count mismatch: matched by allowing flexible space runs."
+        );
+        assert!(res.as_ref().unwrap().get("fuzzy_match_detail").is_some());
+
+        // Case 3: Tab-fuzzy match (Tab vs Space)
+        fs::write(&path, "fn hello() {\n\tprintln!(\"hi\");\n}").unwrap(); // tab
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "    println!(\"hi\");", // 4 spaces
+            "new_string": "println!(\"bye\");"
+        }));
+        assert_eq!(
+            res.as_ref().unwrap()["match_type"],
+            "Tab/Space mismatch: matched by treating tabs and spaces as equivalent."
+        );
+        assert!(res.as_ref().unwrap().get("fuzzy_match_detail").is_some());
+
+        // Case 4: Full-fuzzy match (Line break/Structure difference)
+        fs::write(&path, "fn hello() {\n    println!(\"hi\");\n}").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn hello() { println!(\"hi\"); }", // flattened
+            "new_string": "fn hello() { /* replaced */ }"
+        }));
+        assert_eq!(
+            res.as_ref().unwrap()["match_type"],
+            "Line break/Structure mismatch: matched by ignoring all whitespace and newlines."
+        );
+        assert!(res.as_ref().unwrap().get("fuzzy_match_detail").is_some());
+
+        // Case 5: Regex meta-characters in full-fuzzy (Ensure they are escaped)
+        fs::write(&path, "fn foo(x: i32) { x + 1 }").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn foo ( x : i32 ) { x + 1 }", // added spaces
+            "new_string": "fn foo(x: i32) { x + 2 }"
+        }));
+        assert_eq!(
+            res.as_ref().unwrap()["match_type"],
+            "Tab/Space mismatch: matched by treating tabs and spaces as equivalent."
+        );
+        assert!(
+            fs::read_to_string(path_str)
+                .unwrap()
+                .contains("fn foo(x: i32) { x + 2 }")
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_str_replace_ambiguous_and_no_match() {
+        let path = get_temp_path("ambiguous_no_match");
+        let path_str = path.to_str().unwrap();
+
+        // 1. Ambiguous match: multiple fuzzy matches
+        // Content has double spaces, search string has single spaces.
+        // This avoids the "Exact Match" shortcut (since count != 1) and
+        // triggers the Space-Fuzzy stage which should find 2 matches.
+        fs::write(
+            &path,
+            r"fn  foo() {}
+fn  foo() {}
+",
+        )
+        .unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn foo() {}",
+            "new_string": "fixed();"
+        }));
+
+        assert!(res.is_err(), "Expected error for ambiguous match");
+        assert!(res.unwrap_err().to_string().contains("AMBIGUOUS_MATCH"));
+
+        // 2. No match at all
+        fs::write(&path, "purely different content").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "not found",
+            "new_string": "replacement"
+        }));
+        assert!(res.is_err(), "Expected error for no match");
+        assert!(res.unwrap_err().to_string().contains("NO_MATCH"));
 
         fs::remove_file(path).ok();
     }
