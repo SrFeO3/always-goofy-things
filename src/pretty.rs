@@ -139,15 +139,14 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
         Some("exact_match") => format!("[{}exact{}] {}", C_GREEN, RESET, "Perfect match."),
         Some("space_fuzzy_match") => format!(
             "[{}space_fuzzy{}] {}",
-            C_GREEN, RESET, "Space-only fuzzy match."
+            C_YELLOW, RESET, "Space count mismatch"
         ),
-        Some("tab_fuzzy_match") => format!(
-            "[{}tab_fuzzy{}] {}",
-            C_YELLOW, RESET, "Tab characters detected in indents."
-        ),
+        Some("tab_fuzzy_match") => {
+            format!("[{}tab_fuzzy{}] {}", C_YELLOW, RESET, "Tab/Space mismatch")
+        }
         Some("full_fuzzy_match") => format!(
             "[{}fuzzy{}] {}",
-            C_RED, RESET, "Major mismatch in line breaks or structure. "
+            C_RED, RESET, "Line break/Structure mismatch"
         ),
         Some(_) => String::new(),
         None => String::new(),
@@ -170,7 +169,7 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
         match d {
             DiffLine::Context(c) => {
                 println!(
-                    " {}{:<4}{}{:<4} {}{} {}{}{}",
+                    " {}{:<5}{}{:<5} {}{} {}{}{}",
                     C_GRAY, old_cur, C_GRAY, new_cur, RESET, NOP, EMPTY, c, RESET
                 );
                 old_cur += 1;
@@ -179,7 +178,7 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
             DiffLine::Removed(c) => {
                 removed += 1;
                 println!(
-                    " {}{:<4}{}{:<4} {}{} {}{}{}",
+                    " {}{:<5}{}{:<5} {}{} {}{}{}",
                     HDR_RED, old_cur, EMPTY, EMPTY, BG_RED, DEL, ERASE_LINE, c, RESET
                 );
                 old_cur += 1;
@@ -187,7 +186,7 @@ fn show_diff_preview(path: &str, start_line: usize, diff: Vec<DiffLine>, match_t
             DiffLine::Added(c) => {
                 added += 1;
                 println!(
-                    " {}{:<4}{}{:<4} {}{} {}{}{}",
+                    " {}{:<5}{}{:<5} {}{} {}{}{}",
                     HDR_GREEN, EMPTY, EMPTY, new_cur, BG_GREEN, ADD, ERASE_LINE, c, RESET
                 );
                 new_cur += 1;
@@ -271,7 +270,9 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
         for line in file_lines.iter().take(ctx_after).skip(end) {
             result.push(DiffLine::Context(line.to_string()));
         }
-        let line_num = ctx_before + start_pos.saturating_sub(ctx_before) + 1;
+        // start_line: first visible row number in the preview (before context padding).
+        let visible_start = ctx_before.saturating_add(start_pos);
+        let line_num = visible_start + 1;
         return Some((path, line_num, result, "exact_match".to_string()));
     }
 
@@ -279,6 +280,7 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
     let space_fuzzy_pattern = build_space_fuzzy_pattern(old_s);
     if let Ok(space_re) = regex::Regex::new(&space_fuzzy_pattern) {
         if let Some(res) = try_fuzzy_diff(
+            &path,
             &content,
             &space_re,
             old_s,
@@ -294,13 +296,14 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
     let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_s);
     if let Ok(tab_re) = regex::Regex::new(&tab_fuzzy_pattern) {
         if let Some(res) = try_fuzzy_diff(
-            &content,
-            &tab_re,
+             &path,
+             &content,
+             &tab_re,
             old_s,
             new_s,
-            &file_lines,
-            "tab_fuzzy_match",
-        ) {
+             &file_lines,
+             "tab_fuzzy_match",
+         ) {
             return Some(res);
         }
     }
@@ -317,7 +320,7 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
         }
     };
 
-    if let Some(res) = try_fuzzy_diff(&content, &re, old_s, new_s, &file_lines, "full_fuzzy_match")
+    if let Some(res) = try_fuzzy_diff(&path, &content, &re, old_s, new_s, &file_lines, "full_fuzzy_match")
     {
         return Some(res);
     }
@@ -331,6 +334,7 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
 /// Try to fuzzy-match `old_s` in `content` using the given regex,
 /// and return a diff preview tuple if a unique match is found.
 fn try_fuzzy_diff(
+    file_path: &str,
     content: &str,
     re: &regex::Regex,
     _old_s: &str,
@@ -349,28 +353,29 @@ fn try_fuzzy_diff(
     let start_line_num = content[..m.start()].chars().filter(|c| *c == '\n').count();
     let end_line_num = start_line_num + matched_lines.len();
 
-    let new_lines: Vec<&str> = new_s.lines().collect();
-    let diff = group_diff(&compute_diff(matched_lines.as_slice(), &new_lines));
+        let new_lines: Vec<&str> = new_s.lines().collect();
+        let diff = group_diff(&compute_diff(matched_lines.as_slice(), &new_lines));
 
-    let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
-    let ctx_after = (end_line_num + 3).min(file_lines.len());
+        let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
+        let ctx_after = (end_line_num + 3).min(file_lines.len());
 
-    let mut result: Vec<DiffLine> = Vec::new();
-    for l in file_lines.iter().take(start_line_num).skip(ctx_before) {
-        result.push(DiffLine::Context(l.to_string()));
-    }
-    result.extend(diff);
-    for line in file_lines.iter().take(ctx_after).skip(end_line_num) {
-        result.push(DiffLine::Context(line.to_string()));
-    }
+        let mut result: Vec<DiffLine> = Vec::new();
+        for l in file_lines.iter().take(start_line_num).skip(ctx_before) {
+            result.push(DiffLine::Context(l.to_string()));
+        }
+        result.extend(diff);
+        for line in file_lines.iter().take(ctx_after).skip(end_line_num) {
+            result.push(DiffLine::Context(line.to_string()));
+        }
 
-    let line_num = ctx_before + start_line_num.saturating_sub(ctx_before) + 1;
-    Some((
-        content.to_string(),
-        line_num,
-        result,
-        match_type_str.to_string(),
-    ))
+        // start_line: position of first line shown in `result`, accounting for context padding.
+        let start_line = ctx_before + 1;
+        Some((
+            file_path.to_string(),
+            start_line,
+            result,
+            match_type_str.to_string(),
+        ))
 }
 
 fn compute_replace_lines(path: &str, args: &Value) -> Option<(u64, u64)> {
