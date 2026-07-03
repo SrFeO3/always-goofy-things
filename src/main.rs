@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
     let _current_dir = startup::print_startup_info(&config)?;
 
     let mut last_sent_count = 0;
+    let mut last_llm_call: Option<std::time::Instant> = None;
     let mut total_in_normal = 0u64;
     let mut total_in_cached = 0u64;
     let mut total_out = 0u64;
@@ -253,6 +254,17 @@ async fn main() -> Result<()> {
         let mut empty_retry_count: usize = 0;
         let mut done: bool = false;
         'reasoning_loop: loop {
+            if config.llm_rpm > 0 {
+                let min_interval = std::time::Duration::from_secs_f64(60.0 / config.llm_rpm as f64);
+                if let Some(last_call) = last_llm_call {
+                    let elapsed = last_call.elapsed();
+                    if elapsed < min_interval {
+                        tokio::time::sleep(min_interval - elapsed).await;
+                    }
+                }
+            }
+            last_llm_call = Some(std::time::Instant::now());
+
             let llm_future = call_llm(
                 &config.llm_url,
                 &llm_model,

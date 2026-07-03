@@ -107,6 +107,10 @@ pub struct Config {
       default_value_t = 1
     )]
     pub pretty_level: PrettyLevel,
+
+    /// Maximum requests per minute for the LLM API (0 = unlimited)
+    #[arg(short = 'r', long, env = "LLM_RPM", default_value_t = 0)]
+    pub llm_rpm: u32,
 }
 
 /// Print the startup banner and configuration summary.
@@ -132,6 +136,7 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
     );
     println!("  verbose-level  : {}", config.verbose_level);
     println!("  pretty-level   : {}", config.pretty_level);
+    println!("  llm-rpm        : {}", config.llm_rpm);
 
     Ok(current_dir)
 }
