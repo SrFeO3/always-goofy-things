@@ -159,9 +159,9 @@ async fn main() -> Result<()> {
         tool_call_decision: None,
     }];
     // On startup: move meaningful last_session -> previous_session if it exists
-    let _ = persistence::init_session();
+    persistence::init_session()?;
     // Save system message as the first line of the new session
-    let _ = persistence::save_message(&messages[0]);
+    persistence::save_message(&messages[0])?;
 
     // Main conversation loop
     let mut turn: i32 = 1;
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
                 model: None,
                 tool_call_decision: None,
             });
-            let _ = persistence::save_message(messages.last().unwrap());
+            persistence::save_message(messages.last().unwrap())?;
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
@@ -492,7 +492,7 @@ async fn main() -> Result<()> {
                         model: None,
                         tool_call_decision: Some(tool_call_decision),
                     });
-                    let _ = persistence::save_message(messages.last().unwrap());
+                    persistence::save_message(messages.last().unwrap())?;
                 }
                 // Re-query LLM with tool execution results
                 continue 'reasoning_loop;
