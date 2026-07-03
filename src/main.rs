@@ -68,6 +68,8 @@ struct ToolCall {
     #[serde(rename = "type", default)]
     pub tool_type: String,
     function: FunctionCall,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -730,12 +732,18 @@ async fn call_llm(
                                     name: String::new(),
                                     arguments: serde_json::Value::String(String::new()),
                                 },
+                                thought_signature: None,
                             });
                         }
 
                         let target = &mut tool_calls[index];
                         if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
                             target.id.push_str(id);
+                        }
+                        if let Some(sig) =
+                            call_json.get("thought_signature").and_then(|v| v.as_str())
+                        {
+                            target.thought_signature = Some(sig.to_string());
                         }
                         if let Some(func) = call_json.get("function") {
                             if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
