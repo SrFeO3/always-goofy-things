@@ -124,6 +124,8 @@ async fn main() -> Result<()> {
 
     // Mutable model name so `/model` can switch it on the fly
     let mut llm_model = config.llm_model.clone();
+    // Mutable session label so `/restore <label>` can switch it on the fly
+    let mut session_label = config.session_label.clone();
 
     println!(
         "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
@@ -159,9 +161,9 @@ async fn main() -> Result<()> {
         tool_call_decision: None,
     }];
     // On startup: move meaningful last_session -> previous_session if it exists
-    persistence::init_session()?;
+    persistence::init_session(&session_label)?;
     // Save system message as the first line of the new session
-    persistence::save_message(&messages[0])?;
+    persistence::save_message(&session_label, &messages[0])?;
 
     // Main conversation loop
     let mut turn: i32 = 1;
@@ -201,7 +203,8 @@ async fn main() -> Result<()> {
             break;
         }
         // Check for slash commands before processing as a regular query
-        if let Some(result) = cmd::try_handle_slash_command(&input, &mut messages, turn, &llm_model)
+        if let Some(result) =
+            cmd::try_handle_slash_command(&input, &mut messages, turn, &llm_model, &session_label)
         {
             match result {
                 cmd::SlashCmdResult::NoAdvance => {
@@ -220,11 +223,16 @@ async fn main() -> Result<()> {
                     llm_model = new_model;
                     continue;
                 }
-                cmd::SlashCmdResult::RestoredTo(target) => {
+                cmd::SlashCmdResult::RestoredTo {
+                    turn: target,
+                    label,
+                } => {
                     // Reset turn counter to target + 1 (next turn after restored point)
                     turn = target + 1;
                     // Reset last_sent_count to match the new message count
                     last_sent_count = messages.len();
+                    // Switch the active session label
+                    session_label = label;
                     continue;
                 }
             }
@@ -247,7 +255,7 @@ async fn main() -> Result<()> {
                 model: None,
                 tool_call_decision: None,
             });
-            persistence::save_message(messages.last().unwrap())?;
+            persistence::save_message(&session_label, messages.last().unwrap())?;
         }
 
         // Inner loop to handle tool execution and sequential LLM reasoning
@@ -323,7 +331,7 @@ async fn main() -> Result<()> {
             empty_retry_count = 0;
 
             messages.push(assistant_msg.clone());
-            let _ = persistence::save_message(&assistant_msg);
+            let _ = persistence::save_message(&session_label, &assistant_msg);
             last_sent_count = messages.len();
 
             // Accumulate and display statistics for each LLM call
@@ -492,7 +500,7 @@ async fn main() -> Result<()> {
                         model: None,
                         tool_call_decision: Some(tool_call_decision),
                     });
-                    persistence::save_message(messages.last().unwrap())?;
+                    persistence::save_message(&session_label, messages.last().unwrap())?;
                 }
                 // Re-query LLM with tool execution results
                 continue 'reasoning_loop;

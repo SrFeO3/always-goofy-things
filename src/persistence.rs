@@ -5,8 +5,8 @@
 //!
 //! # Persistence Files
 //!
-//! - `last_session.jsonl`: Active session log, appended during conversation.
-//! - `previous_session.jsonl`: Prior completed session, moved on startup.
+//! - `last_session_{label}.jsonl`: Active session log, appended during conversation.
+//! - `previous_session_{label}.jsonl`: Prior completed session, moved on startup.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -22,26 +22,32 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "SrFeO3", "always-goofy-things")
 }
 
-/// Path to the current session file (`last_session.jsonl`).
-fn last_session_path() -> Option<PathBuf> {
+/// Path to the current session file (`last_session_{label}.jsonl`).
+fn last_session_path(label: &str) -> Option<PathBuf> {
     let dirs = project_dirs()?;
-    Some(dirs.data_local_dir().join("last_session.jsonl"))
+    Some(
+        dirs.data_local_dir()
+            .join(format!("last_session_{}.jsonl", label)),
+    )
 }
 
-/// Path to the previous session file (`previous_session.jsonl`).
-fn previous_session_path() -> Option<PathBuf> {
+/// Path to the previous session file (`previous_session_{label}.jsonl`).
+fn previous_session_path(label: &str) -> Option<PathBuf> {
     let dirs = project_dirs()?;
-    Some(dirs.data_local_dir().join("previous_session.jsonl"))
+    Some(
+        dirs.data_local_dir()
+            .join(format!("previous_session_{}.jsonl", label)),
+    )
 }
 
 /// Called once at startup.
 ///
-/// - Read `last_session.jsonl`. If it contains meaningful conversation (>= 1 user turn),
-///   move it to `previous_session.jsonl` and start fresh.
+/// - Read `last_session_{label}.jsonl`. If it contains meaningful conversation (>= 1 user turn),
+///   move it to `previous_session_{label}.jsonl` and start fresh.
 /// - If empty or only system prompt, just clean it up (truncate).
-pub fn init_session() -> Result<()> {
+pub fn init_session(label: &str) -> Result<()> {
     let last_path =
-        last_session_path().ok_or_else(|| anyhow!("Could not determine session path"))?;
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session path"))?;
 
     // Ensure parent dir exists
     if let Some(parent) = last_path.parent() {
@@ -62,13 +68,17 @@ pub fn init_session() -> Result<()> {
 
     if has_user_turn {
         // Move last -> previous
-        let prev_path = previous_session_path()
+        let prev_path = previous_session_path(label)
             .ok_or_else(|| anyhow!("Could not determine previous session path"))?;
         if let Some(parent) = prev_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&last_path, &prev_path)
-            .with_context(|| "Failed to move last_session.jsonl to previous_session.jsonl")?;
+        std::fs::rename(&last_path, &prev_path).with_context(|| {
+            format!(
+                "Failed to move last_session_{}.jsonl to previous_session_{}.jsonl",
+                label, label
+            )
+        })?;
         // Create fresh empty last_session
         std::fs::File::create(&last_path)?;
     } else {
@@ -80,9 +90,9 @@ pub fn init_session() -> Result<()> {
 }
 
 /// Append a single message as one JSON line to the current session file.
-pub fn save_message(message: &Message) -> Result<()> {
+pub fn save_message(label: &str, message: &Message) -> Result<()> {
     let path =
-        last_session_path().ok_or_else(|| anyhow!("Could not determine session file path"))?;
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
 
     let json = serde_json::to_string(message)
         .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
@@ -98,10 +108,10 @@ pub fn save_message(message: &Message) -> Result<()> {
     Ok(())
 }
 
-/// Restore (copy) messages from `previous_session.jsonl` into `last_session.jsonl`
+/// Restore (copy) messages from `previous_session_{label}.jsonl` into `last_session_{label}.jsonl`
 /// and return the messages.
-pub fn restore_previous_session() -> Result<Vec<Message>> {
-    let prev_path = previous_session_path()
+pub fn restore_previous_session(label: &str) -> Result<Vec<Message>> {
+    let prev_path = previous_session_path(label)
         .ok_or_else(|| anyhow!("Could not determine previous session path"))?;
 
     if !prev_path.exists() {
@@ -112,7 +122,7 @@ pub fn restore_previous_session() -> Result<Vec<Message>> {
 
     // Copy previous -> last (so the restored session also becomes the new working session)
     let last_path =
-        last_session_path().ok_or_else(|| anyhow!("Could not determine last session path"))?;
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine last session path"))?;
     std::fs::copy(&prev_path, &last_path)?;
 
     Ok(messages)
@@ -146,17 +156,4 @@ fn read_messages_from(path: &std::path::Path) -> Result<Vec<Message>> {
     }
 
     Ok(messages)
-}
-
-/// Return the human-readable path of the session files (for display purposes).
-pub fn session_file_display() -> String {
-    format!(
-        "last={}, previous={}",
-        last_session_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-        previous_session_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-    )
 }

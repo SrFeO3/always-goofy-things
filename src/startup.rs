@@ -111,6 +111,10 @@ pub struct Config {
     /// Maximum requests per minute for the LLM API (0 = unlimited)
     #[arg(short = 'r', long, env = "LLM_RPM", default_value_t = 0)]
     pub llm_rpm: u32,
+
+    /// Session label for persistence (suffix for session files)
+    #[arg(short = 's', long, env = "SESSION_LABEL", default_value = "default")]
+    pub session_label: String,
 }
 
 /// Print the startup banner and configuration summary.
@@ -137,6 +141,7 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
     println!("  verbose-level  : {}", config.verbose_level);
     println!("  pretty-level   : {}", config.pretty_level);
     println!("  llm-rpm        : {}", config.llm_rpm);
+    println!("  session-label  : {}", config.session_label);
 
     Ok(current_dir)
 }

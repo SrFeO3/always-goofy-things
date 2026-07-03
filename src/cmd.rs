@@ -9,7 +9,7 @@
 //! - `/rewind <turn>`: Roll back conversation history to a specific turn.
 //! - `/history [-a]`: Show a summary of the conversation history.
 //! - `/model [name]`: Switch the active LLM on the fly.
-//! - `/restore`: Restore the previous session from disk.
+//! - `/restore [label]`: Restore the previous session, optionally for a specific label.
 //! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
 use std::io::{self, Write};
@@ -28,7 +28,7 @@ pub enum SlashCmdResult {
     /// Model was switched to the new name.
     ModelChanged(String),
     /// Session was restored. Reset turn counter to this value.
-    RestoredTo(i32),
+    RestoredTo { turn: i32, label: String },
 }
 
 /// Check if the input starts with a slash command, and handle it if so.
@@ -41,6 +41,7 @@ pub fn try_handle_slash_command(
     messages: &mut Vec<crate::Message>,
     turn: i32,
     current_model: &str,
+    current_label: &str,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -70,8 +71,11 @@ pub fn try_handle_slash_command(
             let new_model = handle_model(arg, current_model);
             Some(SlashCmdResult::ModelChanged(new_model))
         }
-        "/restore" => match handle_restore(messages) {
-            Ok(new_turn) => Some(SlashCmdResult::RestoredTo(new_turn)),
+        "/restore" => match handle_restore(messages, current_label, arg) {
+            Ok((new_turn, used_label)) => Some(SlashCmdResult::RestoredTo {
+                turn: new_turn,
+                label: used_label,
+            }),
             Err(e) => {
                 eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
                 Some(SlashCmdResult::NoAdvance)
@@ -125,7 +129,7 @@ fn print_help() {
    /rewind <turn>   Roll back conversation to <turn> and discard newer history
    /history [-a]    Print conversation history summary (-a, --all for raw payload)
    /model [name]    Switch the active LLM on the fly (no arg: show current)
-   /restore         Restore the previous session from disk
+   /restore [label]  Restore the previous session (optionally specifying a label to switch to)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
@@ -133,7 +137,8 @@ fn print_help() {
    \x1b[90m/model qwen   - Switch to 'qwen' model and continue\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
-   \x1b[90m/restore      - Restore the latest session from disk\x1b[0m"
+   \x1b[90m/restore      - Restore the latest session for current label\x1b[0m
+   \x1b[90m/restore work - Restore the latest session for label 'work' and switch to it\x1b[0m"
     );
 }
 
@@ -357,26 +362,35 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
 // /restore
 // ---------------------------------------------------------------------------
 
-/// Handle `/restore`.
+/// Handle `/restore [label]`.
 ///
-/// Restores the previous session from `previous_session.jsonl`, replacing
-/// the current conversation. Returns the calculated new turn count.
-fn handle_restore(messages: &mut Vec<crate::Message>) -> Result<i32> {
+/// Restores the previous session from `previous_session_{label}.jsonl`, replacing
+/// the current conversation. Returns the new turn count and the label used for restoration.
+fn handle_restore(
+    messages: &mut Vec<crate::Message>,
+    current_label: &str,
+    arg_label: Option<&str>,
+) -> Result<(i32, String)> {
     use crate::persistence;
 
-    let restored = persistence::restore_previous_session()?;
+    let label = arg_label.unwrap_or(current_label).trim().to_string();
+    let restored = persistence::restore_previous_session(&label)?;
     if restored.is_empty() {
         println!(
-            "\x1b[93mNo previous session found.{}\x1b[0m",
-            persistence::session_file_display()
+            "\x1b[93mNo previous session found for label '{}'.\x1b[0m",
+            label
         );
-        return Err(anyhow!("No previous session to restore"));
+        return Err(anyhow!(
+            "No previous session to restore for label '{}'",
+            label
+        ));
     }
 
     // Confirm with the user
     println!(
-        "\x1b[93m⚠️  Restoring will replace the current conversation with {} saved message(s).\x1b[0m",
-        restored.len()
+        "\x1b[93m⚠️  Restoring will replace the current conversation with {} saved message(s) from label '{}'.\x1b[0m",
+        restored.len(),
+        label
     );
     print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
     io::stdout().flush().context("Failed to flush stdout")?;
@@ -408,10 +422,11 @@ fn handle_restore(messages: &mut Vec<crate::Message>) -> Result<i32> {
     }
 
     println!(
-        "\x1b[32m✓ Restored {} messages ({} turn(s)) from previous session.\x1b[0m",
+        "\x1b[32m✓ Restored {} messages ({} turn(s)) from label '{}'.\x1b[0m",
         messages.len(),
-        restored_turns
+        restored_turns,
+        label
     );
 
-    Ok(restored_turns)
+    Ok((restored_turns, label))
 }
