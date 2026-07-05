@@ -127,10 +127,13 @@ fn is_basic_read_command(input: &str) -> bool {
     false
 }
 
-/// A single-path head/tail command (e.g., "head -n 10 path | tail -n 3").
+/// A single-path head/tail command (e.g., "head -n 10 path | tail -n 3", "head -10").
 fn is_head_tail_command(input: &str) -> bool {
     // head+tail or head only
-    if let Some(after_head) = input.strip_prefix("head -n ") {
+    if let Some(after_head) = input
+        .strip_prefix("head -n ")
+        .or_else(|| input.strip_prefix("head -"))
+    {
         let Some((num_str, remaining)) = after_head.split_once(' ') else {
             return false;
         };
@@ -138,7 +141,10 @@ fn is_head_tail_command(input: &str) -> bool {
             return false;
         }
 
-        if let Some((target_and_path, tail_num_str)) = remaining.rsplit_once(" | tail -n ") {
+        if let Some((target_and_path, tail_num_str)) = remaining
+            .rsplit_once(" | tail -n ")
+            .or_else(|| remaining.rsplit_once(" | tail -"))
+        {
             // head + tail
             if tail_num_str.parse::<usize>().is_err() {
                 return false;
@@ -151,7 +157,10 @@ fn is_head_tail_command(input: &str) -> bool {
     }
 
     // tail only
-    if let Some(after_tail) = input.strip_prefix("tail -n ") {
+    if let Some(after_tail) = input
+        .strip_prefix("tail -n ")
+        .or_else(|| input.strip_prefix("tail -"))
+    {
         let Some((num_str, remaining)) = after_tail.split_once(' ') else {
             return false;
         };
