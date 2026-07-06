@@ -126,6 +126,10 @@ async fn main() -> Result<()> {
     let mut llm_model = config.llm_model.clone();
     // Mutable session label so `/restore <label>` can switch it on the fly
     let mut session_label = config.session_label.clone();
+    // Mutable config values so `/config` can switch them on the fly
+    let mut verbose_level = config.verbose_level;
+    let mut pretty_level = config.pretty_level;
+    let mut llm_rpm = config.llm_rpm;
 
     println!(
         "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
@@ -203,9 +207,16 @@ async fn main() -> Result<()> {
             break;
         }
         // Check for slash commands before processing as a regular query
-        if let Some(result) =
-            cmd::try_handle_slash_command(&input, &mut messages, turn, &llm_model, &session_label)
-        {
+        if let Some(result) = cmd::try_handle_slash_command(
+            &input,
+            &mut messages,
+            turn,
+            &llm_model,
+            &session_label,
+            &mut verbose_level,
+            &mut pretty_level,
+            &mut llm_rpm,
+        ) {
             match result {
                 cmd::SlashCmdResult::NoAdvance => {
                     // e.g. /help - just re-prompt
@@ -221,6 +232,17 @@ async fn main() -> Result<()> {
                 cmd::SlashCmdResult::ModelChanged(new_model) => {
                     // Switch to the new model for subsequent LLM calls
                     llm_model = new_model;
+                    continue;
+                }
+                cmd::SlashCmdResult::ConfigChanged {
+                    verbose_level: vl,
+                    pretty_level: pl,
+                    llm_rpm: rpm,
+                } => {
+                    // Switch config values for subsequent LLM calls
+                    verbose_level = vl;
+                    pretty_level = pl;
+                    llm_rpm = rpm;
                     continue;
                 }
                 cmd::SlashCmdResult::RestoredTo {
@@ -264,8 +286,8 @@ async fn main() -> Result<()> {
         let mut empty_retry_count: usize = 0;
         let mut done: bool = false;
         'reasoning_loop: loop {
-            if config.llm_rpm > 0 {
-                let min_interval = std::time::Duration::from_secs_f64(60.0 / config.llm_rpm as f64);
+            if llm_rpm > 0 {
+                let min_interval = std::time::Duration::from_secs_f64(60.0 / llm_rpm as f64);
                 if let Some(last_call) = last_llm_call {
                     let elapsed = last_call.elapsed();
                     if elapsed < min_interval {
@@ -280,7 +302,7 @@ async fn main() -> Result<()> {
                 &llm_model,
                 config.llm_api_key.as_ref(),
                 &messages,
-                config.verbose_level,
+                verbose_level,
                 last_sent_count,
             );
             let ctrl_c_future = tokio::signal::ctrl_c();
@@ -318,14 +340,14 @@ async fn main() -> Result<()> {
                 if empty_retry_count > startup::MAX_EMPTY_RETRY {
                     println!(
                         "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
-                        config.llm_model, empty_retry_count
+                       llm_model, empty_retry_count
                     );
                     break 'reasoning_loop;
-                }
-                println!(
-                    "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
-                    config.llm_model, empty_retry_count
-                );
+                  }
+              println!(
+                     "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
+                   llm_model, empty_retry_count
+                  );
                 continue 'reasoning_loop;
             }
             empty_retry_count = 0;
@@ -369,7 +391,7 @@ async fn main() -> Result<()> {
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or(serde_json::Value::Null);
 
-                    let pretty = config.pretty_level > 0;
+                    let pretty = pretty_level > 0;
                     let mut user_denied = false;
 
                     // 1. Show tool call request (LLM to Application)

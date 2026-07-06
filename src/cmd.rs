@@ -9,6 +9,7 @@
 //! - `/rewind <turn>`: Roll back conversation history to a specific turn.
 //! - `/history [-a]`: Show a summary of the conversation history.
 //! - `/model [name]`: Switch the active LLM on the fly.
+//! - `/config [k] [v]`: Show or change app configuration (no arg: list all, -s/--short for aliases)
 //! - `/restore [label]`: Restore the previous session, optionally for a specific label.
 //! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
@@ -27,6 +28,12 @@ pub enum SlashCmdResult {
     RewoundTo(i32),
     /// Model was switched to the new name.
     ModelChanged(String),
+    /// Config values changed
+    ConfigChanged {
+        verbose_level: u8,
+        pretty_level: u8,
+        llm_rpm: u32,
+    },
     /// Session was restored. Reset turn counter to this value.
     RestoredTo { turn: i32, label: String },
 }
@@ -42,6 +49,9 @@ pub fn try_handle_slash_command(
     turn: i32,
     current_model: &str,
     current_label: &str,
+    verbose_level: &mut u8,
+    pretty_level: &mut u8,
+    llm_rpm: &mut u32,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -71,6 +81,17 @@ pub fn try_handle_slash_command(
             let new_model = handle_model(arg, current_model);
             Some(SlashCmdResult::ModelChanged(new_model))
         }
+        "/config" => match handle_config(arg, verbose_level, pretty_level, llm_rpm) {
+            Ok(changed) => Some(SlashCmdResult::ConfigChanged {
+                verbose_level: changed.verbose_level,
+                pretty_level: changed.pretty_level,
+                llm_rpm: changed.llm_rpm,
+            }),
+            Err(e) => {
+                eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
+                Some(SlashCmdResult::NoAdvance)
+            }
+        },
         "/restore" => match handle_restore(messages, current_label, arg) {
             Ok((new_turn, used_label)) => Some(SlashCmdResult::RestoredTo {
                 turn: new_turn,
@@ -116,6 +137,119 @@ fn handle_model(arg: Option<&str>, current_model: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// /config
+// ---------------------------------------------------------------------------
+
+/// Returns a tuple of (verbose_level, pretty_level, llm_rpm) after updates.
+pub struct ConfigSnapshot {
+    pub verbose_level: u8,
+    pub pretty_level: u8,
+    pub llm_rpm: u32,
+}
+
+/// Parse `key value` from arg. E.g. "v 2" -> Some(("v", "2")).
+/// Supports both short aliases (v, p, r) and full names.
+fn parse_config_kv(input: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
+    if parts.len() == 2 {
+        Some((parts[0].to_lowercase(), parts[1].trim().to_string()))
+    } else {
+        None
+    }
+}
+
+/// Handle `/config [k] [v]`.
+///
+/// - No arg: list all config values.
+/// - `-s` / `--short`: show short aliases for quick reference.
+/// - `key value`: set the config value (e.g. `v 3`, `pretty-level 2`, `llm-rpm 30`).
+fn handle_config(
+    arg: Option<&str>,
+    verbose_level: &mut u8,
+    pretty_level: &mut u8,
+    llm_rpm: &mut u32,
+) -> Result<ConfigSnapshot> {
+    let arg_str = arg.unwrap_or("").trim();
+
+    // No argument — list all config values
+    if arg_str.is_empty() {
+        println!("  \x1b[1mCurrent configuration:\x1b[0m");
+        println!("    verbose-level   : {}", verbose_level);
+        println!("    pretty-level    : {}", pretty_level);
+        println!("    llm-rpm         : {}", llm_rpm);
+        return Ok(ConfigSnapshot {
+            verbose_level: *verbose_level,
+            pretty_level: *pretty_level,
+            llm_rpm: *llm_rpm,
+        });
+    }
+
+    // `-s` or `--short`: show short aliases
+    if arg_str == "-s" || arg_str == "--short" {
+        println!("  \x1b[1mConfig aliases:\x1b[0m (use these with /config)");
+        println!("    \x1b[36mv\x1b[0m           — verbose-level (0-3)");
+        println!("    \x1b[36mp\x1b[0m           — pretty-level  (0-2)");
+        println!("    \x1b[36mr\x1b[0m           — llm-rpm       (0 = unlimited)");
+        return Ok(ConfigSnapshot {
+            verbose_level: *verbose_level,
+            pretty_level: *pretty_level,
+            llm_rpm: *llm_rpm,
+        });
+    }
+
+    // Parse "key value"
+    let kv = match parse_config_kv(arg_str) {
+        Some(kv) => kv,
+        None => return Err(anyhow!("Usage: /config <key> <value>  (e.g. /config v 3)")),
+    };
+
+    match kv.0.as_str() {
+        "v" | "verbose-level" | "verbose_level" | "verbose" => {
+            let val: u8 = kv.1.parse().map_err(|_| {
+                anyhow!("Invalid value for verbose-level: '{}'. Must be 0-3.", kv.1)
+            })?;
+            if val > 3 {
+                return Err(anyhow!("verbose-level must be 0-3, got {}", val));
+            }
+            *verbose_level = val;
+        }
+        "p" | "pretty-level" | "pretty_level" | "pretty" => {
+            let val: u8 = kv
+                .1
+                .parse()
+                .map_err(|_| anyhow!("Invalid value for pretty-level: '{}'. Must be 0-2.", kv.1))?;
+            if val > 2 {
+                return Err(anyhow!("pretty-level must be 0-2, got {}", val));
+            }
+            *pretty_level = val;
+        }
+        "r" | "llm-rpm" | "llm_rpm" | "rpm" => {
+            let val: u32 = kv.1.parse().map_err(|_| {
+                anyhow!(
+                    "Invalid value for llm-rpm: '{}'. Must be a non-negative integer.",
+                    kv.1
+                )
+            })?;
+            *llm_rpm = val;
+        }
+        _ => {
+            return Err(anyhow!(
+                "Unknown config key '{}'. Use /config -s for a list of keys.",
+                kv.0
+            ));
+        }
+    }
+
+    println!("  \x1b[32m✓ Changed {} to {}\x1b[0m", kv.0, kv.1);
+
+    Ok(ConfigSnapshot {
+        verbose_level: *verbose_level,
+        pretty_level: *pretty_level,
+        llm_rpm: *llm_rpm,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // /help
 // ---------------------------------------------------------------------------
 
@@ -129,12 +263,18 @@ fn print_help() {
    /rewind <turn>   Roll back conversation to <turn> and discard newer history
    /history [-a]    Print conversation history summary (-a, --all for raw payload)
    /model [name]    Switch the active LLM on the fly (no arg: show current)
-   /restore [label]  Restore the previous session (optionally specifying a label to switch to)
+   /config [k] [v]  Show or change app configuration (no arg: list all, -s for aliases)
+   /restore [label] Restore the previous session (optionally specifying a label to switch to)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
    \x1b[90m/model        - Show the currently active model\x1b[0m
    \x1b[90m/model qwen   - Switch to 'qwen' model and continue\x1b[0m
+   \x1b[90m/config       - List all current config values\x1b[0m
+   \x1b[90m/config -s    - Show config key aliases (e.g. v, p, r)\x1b[0m
+   \x1b[90m/config v 3   - Set verbose-level to 3\x1b[0m
+   \x1b[90m/config p 2   - Set pretty-level to 2\x1b[0m
+   \x1b[90m/config r 30  - Set llm-rpm to 30\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
    \x1b[90m/restore      - Restore the latest session for current label\x1b[0m
