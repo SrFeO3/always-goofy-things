@@ -14,6 +14,21 @@ pub fn is_safe_grep_query(query: &str) -> bool {
     if query.is_empty() {
         return false;
     }
+
+    let mut query = query;
+
+    if let Some(stripped) = query.strip_prefix('^') {
+        query = stripped;
+    }
+
+    if let Some(stripped) = query.strip_suffix('$') {
+        query = stripped;
+    }
+
+    if query.is_empty() {
+        return false;
+    }
+
     query
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ' ')
