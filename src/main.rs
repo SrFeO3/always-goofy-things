@@ -527,14 +527,9 @@ async fn call_llm(
     let tools = tools::get_tool_definitions();
     let messages_vec = messages.to_vec();
 
-    // Request usage data if using OpenAI-compatible endpoint or API key is set
-    let stream_options = if api_key.is_some() || url.contains("/v1/") {
-        Some(StreamOptions {
-            include_usage: true,
-        })
-    } else {
-        None
-    };
+    let stream_options = Some(StreamOptions {
+        include_usage: true,
+    });
 
     let req = ChatRequest {
         model: model.to_string(),
@@ -609,11 +604,21 @@ async fn call_llm(
             .text()
             .await
             .unwrap_or_else(|_| "Could not read body".to_string());
+        let payload_display = if req_json.len() > 62 {
+            format!(
+                "{}...({}bytes)...{}",
+                &req_json[..30],
+                req_json.len(),
+                &req_json[req_json.len().saturating_sub(30)..]
+            )
+        } else {
+            req_json.clone()
+        };
         return Err(anyhow!(
             "API Error ({})\nResponse: {}\nRequest Payload: {}",
             status,
             body,
-            req_json
+            payload_display
         ));
     }
     let mut full_message = Message {
