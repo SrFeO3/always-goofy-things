@@ -296,14 +296,14 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
     let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_s);
     if let Ok(tab_re) = regex::Regex::new(&tab_fuzzy_pattern) {
         if let Some(res) = try_fuzzy_diff(
-             &path,
-             &content,
-             &tab_re,
+            &path,
+            &content,
+            &tab_re,
             old_s,
             new_s,
-             &file_lines,
-             "tab_fuzzy_match",
-         ) {
+            &file_lines,
+            "tab_fuzzy_match",
+        ) {
             return Some(res);
         }
     }
@@ -320,8 +320,15 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
         }
     };
 
-    if let Some(res) = try_fuzzy_diff(&path, &content, &re, old_s, new_s, &file_lines, "full_fuzzy_match")
-    {
+    if let Some(res) = try_fuzzy_diff(
+        &path,
+        &content,
+        &re,
+        old_s,
+        new_s,
+        &file_lines,
+        "full_fuzzy_match",
+    ) {
         return Some(res);
     }
 
@@ -353,29 +360,29 @@ fn try_fuzzy_diff(
     let start_line_num = content[..m.start()].chars().filter(|c| *c == '\n').count();
     let end_line_num = start_line_num + matched_lines.len();
 
-        let new_lines: Vec<&str> = new_s.lines().collect();
-        let diff = group_diff(&compute_diff(matched_lines.as_slice(), &new_lines));
+    let new_lines: Vec<&str> = new_s.lines().collect();
+    let diff = group_diff(&compute_diff(matched_lines.as_slice(), &new_lines));
 
-        let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
-        let ctx_after = (end_line_num + 3).min(file_lines.len());
+    let ctx_before = ((start_line_num as i32).saturating_sub(2)).max(0) as usize;
+    let ctx_after = (end_line_num + 3).min(file_lines.len());
 
-        let mut result: Vec<DiffLine> = Vec::new();
-        for l in file_lines.iter().take(start_line_num).skip(ctx_before) {
-            result.push(DiffLine::Context(l.to_string()));
-        }
-        result.extend(diff);
-        for line in file_lines.iter().take(ctx_after).skip(end_line_num) {
-            result.push(DiffLine::Context(line.to_string()));
-        }
+    let mut result: Vec<DiffLine> = Vec::new();
+    for l in file_lines.iter().take(start_line_num).skip(ctx_before) {
+        result.push(DiffLine::Context(l.to_string()));
+    }
+    result.extend(diff);
+    for line in file_lines.iter().take(ctx_after).skip(end_line_num) {
+        result.push(DiffLine::Context(line.to_string()));
+    }
 
-        // start_line: position of first line shown in `result`, accounting for context padding.
-        let start_line = ctx_before + 1;
-        Some((
-            file_path.to_string(),
-            start_line,
-            result,
-            match_type_str.to_string(),
-        ))
+    // start_line: position of first line shown in `result`, accounting for context padding.
+    let start_line = ctx_before + 1;
+    Some((
+        file_path.to_string(),
+        start_line,
+        result,
+        match_type_str.to_string(),
+    ))
 }
 
 fn compute_replace_lines(path: &str, args: &Value) -> Option<(u64, u64)> {
