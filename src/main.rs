@@ -260,10 +260,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        // If the last message was from the user, it means the previous LLM call failed.
-        // We update the existing message instead of pushing a new one to avoid consecutive user roles.
-        if messages.last().map(|m| m.role.as_str()) == Some("user") {
-            if let Some(m) = messages.last_mut() {
+        // If a user message already exists for this turn (e.g. previous LLM call failed
+        // and tool responses may have been added), update the existing message instead of
+        // pushing a new one to avoid inflating the history turn count.
+        let user_msg_count = messages.iter().filter(|m| m.role == "user").count();
+        if user_msg_count >= turn as usize {
+            if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
                 m.content = input.to_string();
             }
         } else {
