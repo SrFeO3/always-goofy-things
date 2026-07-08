@@ -41,7 +41,9 @@ mod tools_fuzzy;
 
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 
-use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
+use startup::{
+    C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -81,6 +83,7 @@ struct FunctionCall {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ChatRequest {
     model: String,
+    max_tokens: usize,
     tools: Vec<serde_json::Value>,
     stream: bool,
     messages: Vec<Message>,
@@ -342,14 +345,14 @@ async fn main() -> Result<()> {
                 if empty_retry_count > startup::MAX_EMPTY_RETRY {
                     println!(
                         "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
-                       llm_model, empty_retry_count
+                        llm_model, empty_retry_count
                     );
                     break 'reasoning_loop;
-                  }
-              println!(
-                     "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
-                   llm_model, empty_retry_count
-                  );
+                }
+                println!(
+                    "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
+                    llm_model, empty_retry_count
+                );
                 continue 'reasoning_loop;
             }
             empty_retry_count = 0;
@@ -557,6 +560,7 @@ async fn call_llm(
 
     let req = ChatRequest {
         model: model.to_string(),
+        max_tokens: MAX_OUTPUT_TOKENS,
         messages: messages_vec,
         stream: true,
         tools,

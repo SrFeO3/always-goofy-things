@@ -11,6 +11,9 @@ use clap::Parser;
 /// Max retries when the LLM returns an empty response
 pub const MAX_EMPTY_RETRY: usize = 1;
 
+/// Maximum output tokens
+pub const MAX_OUTPUT_TOKENS: usize = 2048;
+
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
 pub const APP_BIN_NAME: &str = "always-goofy-things";
