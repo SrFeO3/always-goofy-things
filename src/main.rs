@@ -632,7 +632,7 @@ async fn call_llm(
             .text()
             .await
             .unwrap_or_else(|_| "Could not read body".to_string());
-        let payload_display = if req_json.len() > 62 {
+        let payload_display = if req_json.len() > 62 && verbose_level < 2 {
             format!(
                 "{}...({}bytes)...{}",
                 &req_json[..30],
