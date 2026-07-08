@@ -186,10 +186,24 @@ fn convert_tools_to_anthropic(tools: &[serde_json::Value]) -> Vec<serde_json::Va
 
 /// Convert messages for Anthropic API.
 /// Anthropic does not accept role: "tool". Instead:
-///   - OpenAI: { role: "tool", tool_call_id: "...", content: "..." }
-///   - Anthropic: { role: "user", content: [{ type: "tool_result", tool_use_id: "...", content: "..." }] }
+///    - OpenAI: { role: "tool", tool_call_id: "...", content: "..." }
+///    - Anthropic: { role: "user", content: [{ type: "tool_result", tool_use_id: "...", content: "..." }] }
+///
+/// Also converts role: "assistant" messages that contain tool_calls or reasoning_content
+/// into Anthropic's content-block-based format:
+///    - OpenAI: { role: "assistant", content: "...", tool_calls: [...] }
+///    - Anthropic: { role: "assistant", content: [
+///        { type: "thinking", thinking: "..." },
+///        { type: "text", text: "..." },
+///        { type: "tool_use", id: "...", name: "...", input: {...} }
+///      ] }
 fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
-    if msg.get("role") == Some(&json!("tool")) {
+    let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+
+    // 1. role: "tool" messages (Tool result: Application → LLM)
+    //    OpenAI/Ollama: { role: "tool", tool_call_id: "...", content: "..." }
+    //    Anthropic:     { role: "user", content: [{ type: "tool_result", tool_use_id: "...", content: "..." }] }
+    if role == "tool" {
         let tool_use_id = msg
             .get("tool_call_id")
             .and_then(|v| v.as_str())
@@ -205,6 +219,77 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
                 }
             ]
         })
+    }
+    // 2. role: "assistant" messages that contain tool_calls or reasoning_content (Assistant response: LLM → Application → LLM)
+    //    OpenAI/Ollama: { role: "assistant", content: "...", tool_calls: [...], reasoning_content: "..." }
+    //    Anthropic:     { role: "assistant", content: [
+    //        { type: "thinking", thinking: "..." },
+    //        { type: "text", text: "..." },
+    //        { type: "tool_use", id: "...", name: "...", input: {...} }
+    //      ] }
+    else if role == "assistant" {
+        let has_tool_calls = msg.get("tool_calls").and_then(|v| v.as_array()).is_some();
+        let has_reasoning = msg
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+
+        if has_tool_calls || has_reasoning {
+            let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+
+            // 2a. Add thinking block first if reasoning_content exists
+            if let Some(reasoning) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
+                if !reasoning.is_empty() {
+                    content_blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": reasoning
+                    }));
+                }
+            }
+
+            // 2b. Add text content block if present
+            if let Some(content_str) = msg.get("content").and_then(|v| v.as_str()) {
+                if !content_str.is_empty() {
+                    content_blocks.push(json!({
+                        "type": "text",
+                        "text": content_str
+                    }));
+                }
+            }
+
+            // 2c. Add tool_use blocks from tool_calls array
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                for tc in tool_calls {
+                    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(func) = tc.get("function") {
+                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let args = func.get("arguments");
+                        // Normalize arguments: parse JSON string to object, or use object directly
+                        let input = match args {
+                            Some(serde_json::Value::String(s)) => {
+                                serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+                            }
+                            Some(v) => v.clone(),
+                            None => json!({}),
+                        };
+
+                        content_blocks.push(json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": input
+                        }));
+                    }
+                }
+            }
+
+            json!({
+                "role": "assistant",
+                "content": content_blocks
+            })
+        } else {
+            msg.clone()
+        }
     } else {
         msg.clone()
     }
