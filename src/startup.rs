@@ -8,6 +8,8 @@ use std::env;
 use anyhow::{Result, anyhow};
 use clap::Parser;
 
+use crate::compat::LlmProvider;
+
 /// Max retries when the LLM returns an empty response
 pub const MAX_EMPTY_RETRY: usize = 1;
 
@@ -118,11 +120,15 @@ pub struct Config {
     /// Session label for persistence (suffix for session files)
     #[arg(short = 's', long, env = "SESSION_LABEL", default_value = "default")]
     pub session_label: String,
+
+    /// LLM API provider (auto-detected from URL if not specified)
+    #[arg(short = 'P', long, env = "LLM_PROVIDER", value_enum)]
+    pub provider: Option<LlmProvider>,
 }
 
 /// Print the startup banner and configuration summary.
 /// Returns the canonical working directory.
-pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
+pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std::path::PathBuf> {
     let current_dir = std::fs::canonicalize(&config.working_dir)
         .map_err(|e| anyhow!("Invalid working directory '{}': {}", config.working_dir, e))?;
     env::set_current_dir(&current_dir)?;
@@ -145,6 +151,7 @@ pub fn print_startup_info(config: &Config) -> Result<std::path::PathBuf> {
     println!("  pretty-level   : {}", config.pretty_level);
     println!("  llm-rpm        : {}", config.llm_rpm);
     println!("  session-label  : {}", config.session_label);
+    println!("  llm-provider   : {}", provider);
 
     Ok(current_dir)
 }

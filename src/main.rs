@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod cmd;
+mod compat;
 mod persistence;
 mod pretty;
 mod reflex;
@@ -39,11 +40,11 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
-use tools::{ToolRunDecision, ToolRunDecisionKind};
-
+use compat::{LlmProvider, convert_anth_to_openai_format};
 use startup::{
     C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
 };
+use tools::{ToolRunDecision, ToolRunDecisionKind};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -81,19 +82,13 @@ struct FunctionCall {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ChatRequest {
+pub struct ChatRequest {
+    provider: LlmProvider,
     model: String,
-    max_tokens: usize,
+    max_output_tokens: usize,
     tools: Vec<serde_json::Value>,
     stream: bool,
     messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<StreamOptions>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct StreamOptions {
-    include_usage: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -115,7 +110,10 @@ struct PromptTokensDetails {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
-    let _current_dir = startup::print_startup_info(&config)?;
+    let provider: LlmProvider = config
+        .provider
+        .unwrap_or_else(|| compat::detect_provider(&config.llm_url));
+    let _current_dir = startup::print_startup_info(&config, &provider)?;
 
     let mut last_sent_count = 0;
     let mut last_llm_call: Option<std::time::Instant> = None;
@@ -303,6 +301,7 @@ async fn main() -> Result<()> {
             last_llm_call = Some(std::time::Instant::now());
 
             let llm_future = call_llm(
+                Some(provider),
                 &config.llm_url,
                 &llm_model,
                 config.llm_api_key.as_ref(),
@@ -387,14 +386,13 @@ async fn main() -> Result<()> {
 
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
-                    // Parse stringified JSON from OpenAI, or fallback to Null if it's already an object/null.
-                    // This handles both raw JSON objects (Ollama) and stringified JSON (OpenAI) safely.
-                    let args = call
-                        .function
-                        .arguments
-                        .as_str()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(serde_json::Value::Null);
+                    // Normalize tool arguments: parse OpenAI's JSON string or use Ollama's JSON object directly.
+                    let args = match &call.function.arguments {
+                        serde_json::Value::String(s) => {
+                            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+                        }
+                        value => value.clone(),
+                    };
 
                     let pretty = pretty_level > 0;
                     let mut user_denied = false;
@@ -543,6 +541,7 @@ async fn main() -> Result<()> {
 }
 
 async fn call_llm(
+    provider: Option<LlmProvider>,
     url: &str,
     model: &str,
     api_key: Option<&String>,
@@ -554,20 +553,16 @@ async fn call_llm(
     let tools = tools::get_tool_definitions();
     let messages_vec = messages.to_vec();
 
-    let stream_options = Some(StreamOptions {
-        include_usage: true,
-    });
-
     let req = ChatRequest {
+        provider: provider.unwrap(),
         model: model.to_string(),
-        max_tokens: MAX_OUTPUT_TOKENS,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
         messages: messages_vec,
         stream: true,
         tools,
-        stream_options,
     };
-
-    let req_json = serde_json::to_string(&req)?;
+    let req_value = req.to_provider_json()?;
+    let req_json = serde_json::to_string(&req_value)?;
 
     // Debug output based on verbose_level
     match verbose_level {
@@ -620,8 +615,13 @@ async fn call_llm(
         )
         .json(&req);
 
-    if let Some(api_key) = api_key {
-        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+    if let Some(api_key) = api_key.as_deref() {
+        request_builder = match provider {
+            Some(LlmProvider::Anthropic) => request_builder
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-11-01"),
+            _ => request_builder.header("Authorization", format!("Bearer {}", api_key)),
+        };
     }
 
     let res = request_builder.send().await?;
@@ -665,6 +665,8 @@ async fn call_llm(
     let mut is_thinking = false;
     let mut usage_captured: Option<Usage> = None;
     let mut has_started_content = false;
+    #[allow(unused_mut, unused_variables)]
+    let mut anth_tool_index = 0;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
@@ -677,6 +679,11 @@ async fn call_llm(
                 continue;
             }
 
+            // Skip Anthropic's SSE event-name
+            if line.starts_with("event:") {
+                continue;
+            }
+
             // Handle OpenAI-compatible SSE prefix
             if line.starts_with("data: ") {
                 line = &line[6..];
@@ -685,11 +692,31 @@ async fn call_llm(
                 break;
             }
 
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(line) {
+                // Convert Anthropic payload to OpenAI-compatible format
+                if provider == Some(LlmProvider::Anthropic) {
+                    json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                }
+
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
                 if let Some(usage_val) = json.get("usage") {
                     if let Ok(u) = serde_json::from_value::<Usage>(usage_val.clone()) {
-                        usage_captured = Some(u);
+                        if let Some(ref mut existing) = usage_captured {
+                            // Accumulate tokens to handle Anthropic split usage events
+                            existing.prompt_tokens += u.prompt_tokens;
+                            existing.completion_tokens += u.completion_tokens;
+                            // Preserve prompt_tokens_details from the first non-zero prompt_tokens_details
+                            if u.prompt_tokens_details
+                                .as_ref()
+                                .is_some_and(|d| d.cached_tokens > 0)
+                            {
+                                if existing.prompt_tokens_details.is_none() {
+                                    existing.prompt_tokens_details = u.prompt_tokens_details;
+                                }
+                            }
+                        } else {
+                            usage_captured = Some(u);
+                        }
                     }
                 } else if json.get("done") == Some(&serde_json::Value::Bool(true)) {
                     // Map Ollama native stats to Usage struct
