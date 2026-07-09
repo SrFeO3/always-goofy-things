@@ -12,19 +12,26 @@ Reference for extending existing OpenAI/Ollama implementations with Anthropic su
 | Main Endpoint | /v1/chat/completions | /api/chat | /v1/messages |
 | Base URL (Official Example) | https://api.openai.com/v1 | http://localhost:11434 | https://api.anthropic.com/v1 |
 | Root Request Fields | messages, model, stream, etc. | messages, model, stream, etc. | messages, model, max_tokens, etc. |
-| Token Limit Parameter | max_completion_tokens (legacy: max_tokens) can be specified | Not required | max_tokens is required |
+| Token Limit Parameter | `max_completion_tokens` (legacy: `max_tokens`) | Not required | max_tokens is required |
 | System Prompt | Set as role: "system" inside messages array | Set as role: "system" inside messages array | Set as root-level system: "..." string |
 | Streaming Response Format | SSE with data: {...} events | Line-delimited JSON (NDJSON) | Event-based SSE with events such as message_start and content_block_delta |
 | Tool Call Request Format | `assistant` message with `tool_calls`; `function.arguments` is a JSON string | `assistant` message with `tool_calls`; `function.arguments` is a JSON object | `assistant` message `content` array with a `type: "tool_use"` block; `input` is a JSON object |
-| Tool Result Format | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Return as a `role: "user"` message with a `type: "tool_result"` block containing `tool_use_id` and string `content` |
+| Tool Call Arguments Type | **JSON String** (escaped string) | **JSON Object** (raw JSON) | **JSON Object** (raw JSON) |
+| Tool Result Format | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Return as a `role: "tool"` message with string `content` | Return as a `role: "user"` message with a `type: "tool_result"` block containing `tool_use_id` and string `content` |
+| Tool Result Content Type | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) |
+| Structured Output Format | `response_format: { type: "json_schema", json_schema: {...} }`<br>Output `content` contains JSON text | `format: "json"` (or JSON Schema)<br>Output `content` contains JSON text | `output_config: { format: { type: "json_schema", json_schema: ... } }`<br>Output `content[].text` contains JSON text |
 | HTTP Headers | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json | Content-Type: application/json, x-api-key, anthropic-version |
 
-Note: `reasoning` / `thinking` content handling is model- and provider-dependent. It is increasingly supported by recent models but is not yet standardized across APIs.
+### Key Notes
+
+The following implementation details differ significantly across providers and deserve special attention:
+- Structured Outputs & JSON Parsing (See dedicated section below)
+- Reasoning & Thinking: Handling & Retention (See dedicated section below)
 
 ## Common Behaviors
+
 - Streaming is controlled by the root-level `"stream": true/false` flag.
 - HTTP requests and responses use `Content-Type: application/json`.
-- Store only the assistant's final `content` in the conversation history.
 
 ## 4 Key Implementation Considerations for Anthropic API (Messages API)
 
@@ -50,11 +57,11 @@ When adding Anthropic API (Claude-compatible) support to an existing OpenAI/Olla
     - OpenAI/Ollama: Message with `role: "tool"`
     - Anthropic: `user.content[]` with `type: "tool_result"`
 
-## LLM Request
+# LLM Request
 
 The headers are basically identical, such as Content-Type: application/json. Only Anthropic requires specific custom headers.
 
-### OpenAI
+## OpenAI
 
 ```request body
 {
@@ -70,7 +77,7 @@ The headers are basically identical, such as Content-Type: application/json. Onl
 
 Note: > Use max_completion_tokens to specify the maximum token count. Although max_tokens was used traditionally, only the newer field is implemented here.
 
-### Ollama
+## Ollama
 
 ```request body
 {
@@ -86,7 +93,7 @@ Note: > Use max_completion_tokens to specify the maximum token count. Although m
 }
 ```
 
-### Anthropic API
+## Anthropic API
 
 ```request body
 {
@@ -256,5 +263,112 @@ fn detect_provider(url: &str) -> LlmProvider {
     }
 
     LlmProvider::OpenAiCompatible
+}
+```
+
+# Structured Outputs & JSON Parsing
+
+## OpenAI API (Chat Completions)
+- Tool Call Arguments: When the model invokes a function, the `function.arguments` field returns an escaped **JSON String** (e.g., `"{ \"location\": \"Tokyo\" }"`). Your application must explicitly parse it (e.g., via `JSON.parse()`) before consumption.
+- Structured Outputs: Even when configuring `response_format` for JSON/JSON Schema, the resulting message `content` is returned as JSON text in the `content` string.
+
+## Ollama API (Chat API)
+- Tool Call Arguments: If using the OpenAI-compatible endpoint (`/v1/chat/completions`), it behaves like OpenAI (escaped JSON string). However, when using the native `/api/chat` endpoint, `tool_calls[].function.arguments` is delivered directly as a pre-parsed **JSON Object**.
+- Structured Outputs: When specifying `format: "json"` (or a JSON Schema) via `/api/chat`, the response `message.content` is returned as JSON text in the content string.
+
+## Anthropic API (Messages API)
+- Tool Call Arguments: The `input` field within the `tool_use` content block is provided directly as a structured, unescaped **JSON Object** (no manual parsing required).
+- Structured Outputs: Anthropic supports native structured outputs via the `output_config.format` parameter. Similar to OpenAI, when using this mode, the guaranteed-valid JSON is returned as JSON text in the content string inside the message's `content[].text` field.
+
+## Tool Result Submission (API-Specific Rules)
+- OpenAI & Anthropic: When returning execution results back to the model, the payload submitted within the content field must be formatted as a string containing JSON text (or plain text).
+- Ollama (Native `/api/chat`): `content` accepts a plain string, including JSON text. The model can reliably consume stringified JSON.
+
+## Implementation
+
+| API                      | Tool Call Arguments                   | Structured Outputs                                       | Tool Results                 |
+| ------------------------ | ------------------------------------- | -------------------------------------------------------- | ---------------------------- |
+| **OpenAI**               | JSON string -> `JSON.parse()` required | JSON text in `content` -> `JSON.parse()` required         | Return JSON text as a string |
+| **Ollama (`/api/chat`)** | JSON object -> no parsing required     | JSON text in `message.content` -> `JSON.parse()` required | Return JSON text as a string |
+| **Anthropic**            | JSON object -> no parsing required     | JSON text in `content[].text` -> `JSON.parse()` required  | Return JSON text as a string |
+
+# Reasoning & Thinking: Handling & Retention
+
+## OpenAI (o1, o3-mini, ...)
+- receive: `choices[].message.reasoning_content` on OpenAI-compatible reasoning models
+- send back: `reasoning_content` in `role: "assistant"`
+- on stream: `delta.reasoning_content`
+
+## Ollama (DeepSeek-R1, Qwen3.5 Reasoning, ...)
+- receive: `message.thinking` (`thinking` field completely separated with `content`)
+- send back: `thinking` in `role: "assistant"`
+
+## Anthropic(Claude 3.7 Sonnet, ...)
+- receive: `type: "thinking"` and `type: "text"` blocks in `content[]` array
+- send back: the entire `content[]` array (including both thinking and text objects) in `role: "assistant"`
+
+## reference
+
+### DeepSeek Official API (DeepSeek-R1, ...)
+- receive: `choices[].message.reasoning_content`
+- send back: do not send back, except in tool responses
+
+### DeepSeek via Third-party / Ollama Stream (DeepSeek-R1, ...)
+- receive: inside `<think>...</think>` tags in a single `content` string
+- send back: do not send back (strip `<think>` tags and the inner text from content), except in tool responses
+
+## Implementation
+
+```Rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentBlock {
+    Text { text: String },
+    Thinking {
+            thinking: String,
+            signature: Option<String>
+        },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum MessageContent {
+    String(String),
+    Array(Vec<ContentBlock>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct AssistantMessage {
+    // OpenAI / DeepSeek
+    reasoning_content: Option<String>,
+    // Ollama
+    thinking: Option<String>,
+    // Anthropic (string, or block array)
+    content: Option<MessageContent>,
+}
+
+fn extract_reasoning(message: &AssistantMessage) -> String {
+    // OpenAI / DeepSeek
+    if let Some(ref r) = message.reasoning_content {
+        return r.clone();
+    }
+
+    // Ollama
+    if let Some(ref t) = message.thinking {
+        return t.clone();
+    }
+
+    // 2. Anthropic
+    if let Some(MessageContent::Array(ref blocks)) = message.content {
+        for block in blocks {
+            if let ContentBlock::Thinking { ref thinking } = block {
+                return thinking.clone();
+            }
+        }
+    }
+
+    String::new()
 }
 ```

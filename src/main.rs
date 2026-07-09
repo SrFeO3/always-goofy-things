@@ -613,7 +613,7 @@ async fn call_llm(
             "User-Agent",
             format!("{}/{}", startup::APP_BIN_NAME, env!("CARGO_PKG_VERSION")),
         )
-        .json(&req);
+        .json(&req_value);
 
     if let Some(api_key) = api_key.as_deref() {
         request_builder = match provider {

@@ -62,6 +62,7 @@ struct OllamaRequestDto {
 #[derive(Serialize)]
 struct OllamaOptions {
     num_predict: usize,
+    num_ctx: usize,
 }
 
 #[derive(Serialize)]
@@ -105,10 +106,11 @@ impl ChatRequest {
 
         match self.provider {
             LlmProvider::OpenAi | LlmProvider::OpenAiCompatible => {
+                let openai_messages = convert_tool_messages_for_openai(&raw_messages);
                 let dto = OpenAiRequestDto {
                     model: self.model.clone(),
                     max_completion_tokens: self.max_output_tokens,
-                    messages: raw_messages,
+                    messages: openai_messages,
                     tools: self.tools.clone(),
                     stream: self.stream,
                     stream_options: if self.stream {
@@ -129,6 +131,7 @@ impl ChatRequest {
                     tools: self.tools.clone(),
                     options: OllamaOptions {
                         num_predict: self.max_output_tokens,
+                        num_ctx: self.max_output_tokens,
                     },
                     stream: self.stream,
                 };
@@ -162,6 +165,33 @@ impl ChatRequest {
             }
         }
     }
+}
+
+/// Convert tool messages for OpenAI-compatible API.
+/// OpenAI expects the `content` field of tool messages to be a plain string,
+/// not a JSON-encoded object. Our internal tool results are JSON objects with
+/// a `content` field, so we extract just the `content` value for OpenAI.
+fn convert_tool_messages_for_openai(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|msg| {
+            if msg.get("role") == Some(&json!("tool")) {
+                let mut new_msg = msg.clone();
+                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                    // Try to parse the content as JSON and extract the inner "content" field
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                        if let Some(inner_content) = parsed.get("content").and_then(|v| v.as_str())
+                        {
+                            new_msg["content"] = json!(inner_content);
+                        }
+                    }
+                }
+                new_msg
+            } else {
+                msg.clone()
+            }
+        })
+        .collect()
 }
 
 /// Convert OpenAI-style tool definitions to Anthropic-style.
