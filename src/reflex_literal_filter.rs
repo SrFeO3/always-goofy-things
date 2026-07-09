@@ -9,6 +9,87 @@
 //! This filter serves as a preliminary heuristic check and does not constitute a robust,
 //! standalone security boundary.
 
+/// Validates a safe url string
+pub fn is_safe_url(url: &str) -> bool {
+    const ALLOWED_PREFIXES: &[&str] = &[
+        // Core / Async / Error handling
+        "https://docs.rs/anyhow/",
+        "https://docs.rs/arc-swap/",
+        "https://docs.rs/async-trait/",
+        "https://docs.rs/chrono/",
+        "https://docs.rs/clap/",
+        "https://docs.rs/directories/",
+        "https://docs.rs/futures/",
+        "https://docs.rs/futures-util/",
+        "https://docs.rs/lazy_static/",
+        "https://docs.rs/log/",
+        "https://docs.rs/once_cell/",
+        "https://docs.rs/pollster/",
+        "https://docs.rs/regex/",
+        "https://docs.rs/thiserror/",
+        "https://docs.rs/tokio/",
+        "https://docs.rs/tracing/",
+        "https://docs.rs/tracing-subscriber/",
+        // Networking / Web / Serialization
+        "https://docs.rs/bytes/",
+        "https://docs.rs/http/",
+        "https://docs.rs/hyper/",
+        "https://docs.rs/postcard/",
+        "https://docs.rs/quinn/",
+        "https://docs.rs/reqwest/",
+        "https://docs.rs/serde/",
+        "https://docs.rs/serde_json/",
+        "https://docs.rs/serde_yaml/",
+        "https://docs.rs/url/",
+        // Security / TLS / Certificates
+        "https://docs.rs/rustls/",
+        "https://docs.rs/webpki-roots/",
+        "https://docs.rs/x509-parser/",
+        // Containers / Kubernetes
+        "https://docs.rs/bollard/",
+        "https://docs.rs/k8s-openapi/",
+        "https://docs.rs/kube/",
+        // GUI / Windowing / OS integration
+        "https://docs.rs/arboard/",
+        "https://docs.rs/cursor-icon/",
+        "https://docs.rs/eframe/",
+        "https://docs.rs/egui/",
+        "https://docs.rs/muda/",
+        "https://docs.rs/rfd/",
+        "https://docs.rs/rustyline/",
+        "https://docs.rs/winit/",
+        // Graphics / WGPU
+        "https://docs.rs/bytemuck/",
+        "https://docs.rs/glyphon/",
+        "https://docs.rs/wgpu/",
+        // Text rendering / Manipulation
+        "https://docs.rs/cosmic-text/",
+        "https://docs.rs/ropey/",
+        "https://docs.rs/unicode-segmentation/",
+        "https://docs.rs/unicode-width/",
+        // Data structures
+        "https://docs.rs/fixedbitset/",
+        "https://docs.rs/lru/",
+        "https://docs.rs/petgraph/",
+        "https://docs.rs/slotmap/",
+    ];
+
+    if url.contains("..") {
+        return false;
+    }
+
+    ALLOWED_PREFIXES.iter().any(|prefix| {
+        if url.starts_with(prefix) {
+            let remaining = &url[prefix.len()..];
+            remaining
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        } else {
+            false
+        }
+    })
+}
+
 /// Validates a safe grep query string by restricting input to ASCII alphanumerics, `_`, `-`, ` `
 pub fn is_safe_grep_query(query: &str) -> bool {
     if query.is_empty() {

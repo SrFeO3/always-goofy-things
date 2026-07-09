@@ -6,6 +6,7 @@
 use crate::reflex_literal_filter::is_exact_matched_command;
 use crate::reflex_literal_filter::is_safe_grep_query;
 use crate::reflex_literal_filter::is_safe_subpath;
+use crate::reflex_literal_filter::is_safe_url;
 use crate::reflex_literal_filter::is_shallow_matched_command;
 
 /// Automatically determines if a tool call can bypass manual confirmation.
@@ -133,7 +134,22 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                 (false, None)
             }
         }
-        "fetch_web" => (false, None),
+        "fetch_web" => {
+            let obj = match args.as_object() {
+                Some(o) => o,
+                None => return (false, None),
+            };
+            let url = match obj.get("url").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => return (false, None),
+            };
+
+            if is_safe_url(&url) {
+                (true, Some(format!("A reasonably pleasant url: {}", url)))
+            } else {
+                (false, None)
+            }
+        }
         _ => (false, None),
     }
 }
