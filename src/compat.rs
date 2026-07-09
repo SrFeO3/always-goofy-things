@@ -32,6 +32,29 @@ impl fmt::Display for LlmProvider {
     }
 }
 
+/// How tool execution results are sent back to the LLM.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ToolResultMode {
+    /// Send as a JSON-encoded string (e.g. `"{\"stdout\": \"...\"}"`)
+    #[default]
+    JsonString,
+    /// Extract only the inner "content" field, discarding metadata (legacy behavior)
+    ContentOnly,
+    /// Send as a proper JSON structure (un-escaped object)
+    JsonStructured,
+}
+
+impl fmt::Display for ToolResultMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ToolResultMode::JsonString => "json_string",
+            ToolResultMode::ContentOnly => "content_only",
+            ToolResultMode::JsonStructured => "json_structured",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Serialize)]
 struct OpenAiRequestDto {
     model: String,
@@ -106,7 +129,8 @@ impl ChatRequest {
 
         match self.provider {
             LlmProvider::OpenAi | LlmProvider::OpenAiCompatible => {
-                let openai_messages = convert_tool_messages_for_openai(&raw_messages);
+                let openai_messages =
+                    convert_tool_messages_for_openai(&raw_messages, self.tool_result_mode);
                 let dto = OpenAiRequestDto {
                     model: self.model.clone(),
                     max_completion_tokens: self.max_output_tokens,
@@ -167,31 +191,65 @@ impl ChatRequest {
     }
 }
 
-/// Convert tool messages for OpenAI-compatible API.
-/// OpenAI expects the `content` field of tool messages to be a plain string,
-/// not a JSON-encoded object. Our internal tool results are JSON objects with
-/// a `content` field, so we extract just the `content` value for OpenAI.
-fn convert_tool_messages_for_openai(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    messages
-        .iter()
-        .map(|msg| {
-            if msg.get("role") == Some(&json!("tool")) {
-                let mut new_msg = msg.clone();
-                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                    // Try to parse the content as JSON and extract the inner "content" field
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-                        if let Some(inner_content) = parsed.get("content").and_then(|v| v.as_str())
-                        {
-                            new_msg["content"] = json!(inner_content);
+/// Convert tool response messages according to the configured [ToolResultMode].
+///
+/// OpenAI-compatible APIs require tool message `content` to be a string.
+/// Depending on the mode:
+/// - `JsonString`: Keep as a JSON-encoded string (default).
+/// - `ContentOnly`: Parse the string as JSON and extract only the inner `content` field.
+/// - `JsonStructured`: Parse the string as JSON and embed the resulting object directly.
+fn convert_tool_messages_for_openai(
+    messages: &[serde_json::Value],
+    mode: ToolResultMode,
+) -> Vec<serde_json::Value> {
+    match mode {
+        // 1. ToolResultMode::JsonString
+        ToolResultMode::JsonString => messages.iter().cloned().collect(),
+        // 2. ToolResultMode::ContentOnly
+        ToolResultMode::ContentOnly => {
+            messages
+                .iter()
+                .map(|msg| {
+                    if msg.get("role") == Some(&json!("tool")) {
+                        let mut new_msg = msg.clone();
+                        if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                            // Try to parse the content as JSON and extract the inner "content" field
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                                if let Some(inner_content) =
+                                    parsed.get("content").and_then(|v| v.as_str())
+                                {
+                                    new_msg["content"] = json!(inner_content);
+                                }
+                            }
                         }
+                        new_msg
+                    } else {
+                        msg.clone()
                     }
-                }
-                new_msg
-            } else {
-                msg.clone()
-            }
-        })
-        .collect()
+                })
+                .collect()
+        }
+        // 3. ToolResultMode::JsonStructured
+        ToolResultMode::JsonStructured => {
+            messages
+                .iter()
+                .map(|msg| {
+                    if msg.get("role") == Some(&json!("tool")) {
+                        let mut new_msg = msg.clone();
+                        if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                            // Parse the JSON-encoded string and set it as a proper JSON structure
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+                                new_msg["content"] = parsed;
+                            }
+                        }
+                        new_msg
+                    } else {
+                        msg.clone()
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 /// Convert OpenAI-style tool definitions to Anthropic-style.

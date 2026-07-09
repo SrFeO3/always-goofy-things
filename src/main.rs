@@ -40,7 +40,7 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
-use compat::{LlmProvider, convert_anth_to_openai_format};
+use compat::{LlmProvider, ToolResultMode, convert_anth_to_openai_format};
 use startup::{
     C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
 };
@@ -89,6 +89,7 @@ pub struct ChatRequest {
     tools: Vec<serde_json::Value>,
     stream: bool,
     messages: Vec<Message>,
+    tool_result_mode: ToolResultMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -308,6 +309,7 @@ async fn main() -> Result<()> {
                 &messages,
                 verbose_level,
                 last_sent_count,
+                config.tool_result_mode,
             );
             let ctrl_c_future = tokio::signal::ctrl_c();
 
@@ -548,6 +550,7 @@ async fn call_llm(
     messages: &[Message],
     verbose_level: startup::Verbosity,
     last_msg_count: usize,
+    tool_result_mode: ToolResultMode,
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
     let tools = tools::get_tool_definitions();
@@ -560,6 +563,7 @@ async fn call_llm(
         messages: messages_vec,
         stream: true,
         tools,
+        tool_result_mode,
     };
     let req_value = req.to_provider_json()?;
     let req_json = serde_json::to_string(&req_value)?;

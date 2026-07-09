@@ -8,7 +8,7 @@ use std::env;
 use anyhow::{Result, anyhow};
 use clap::Parser;
 
-use crate::compat::LlmProvider;
+use crate::compat::{LlmProvider, ToolResultMode};
 
 /// Max retries when the LLM returns an empty response
 pub const MAX_EMPTY_RETRY: usize = 1;
@@ -124,6 +124,10 @@ pub struct Config {
     /// LLM API provider (auto-detected from URL if not specified)
     #[arg(short = 'P', long, env = "LLM_PROVIDER", value_enum)]
     pub provider: Option<LlmProvider>,
+
+    /// Tool result mode
+    #[arg(short = 'R', long, env = "TOOL_RESULT_MODE", value_enum, default_value_t = ToolResultMode::JsonString)]
+    pub tool_result_mode: ToolResultMode,
 }
 
 /// Print the startup banner and configuration summary.
@@ -139,19 +143,20 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         APP_DESCRIPTION
     );
     println!("CONFIGURATION:");
-    println!("  working-dir    : {}", current_dir.display());
-    println!("  unsafe-reflex  : {}", config.unsafe_reflex);
-    println!("  llm-url        : {}", config.llm_url);
-    println!("  llm-model      : {}", config.llm_model);
+    println!("  working-dir      : {}", current_dir.display());
+    println!("  unsafe-reflex    : {}", config.unsafe_reflex);
+    println!("  llm-url          : {}", config.llm_url);
+    println!("  llm-model        : {}", config.llm_model);
     println!(
-        "  llm-api-key    : {}",
+        "  llm-api-key      : {}",
         config.llm_api_key.as_ref().map_or("(none)", |_| "(set)")
     );
-    println!("  verbose-level  : {}", config.verbose_level);
-    println!("  pretty-level   : {}", config.pretty_level);
-    println!("  llm-rpm        : {}", config.llm_rpm);
-    println!("  session-label  : {}", config.session_label);
-    println!("  llm-provider   : {}", provider);
+    println!("  verbose-level    : {}", config.verbose_level);
+    println!("  pretty-level     : {}", config.pretty_level);
+    println!("  llm-rpm          : {}", config.llm_rpm);
+    println!("  session-label    : {}", config.session_label);
+    println!("  llm-provider     : {}", provider);
+    println!("  tool_result_mode : {}", config.tool_result_mode);
 
     Ok(current_dir)
 }
