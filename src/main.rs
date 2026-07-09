@@ -403,12 +403,7 @@ async fn main() -> Result<()> {
                     println!("--- [TOOL EXECUTION REQUESTED] ---");
                     println!("Tool: {}{}{}", C_YELLOW, call.function.name, RESET);
                     if pretty {
-                        println!(
-                            "Args (truncated): {}{}{}",
-                            C_YELLOW,
-                            pretty::truncate(&args),
-                            RESET
-                        );
+                        println!("Args (truncated): {}", pretty::truncate(&args),);
                     } else {
                         println!("Args: {}{}{}", C_YELLOW, &args, RESET);
                     }

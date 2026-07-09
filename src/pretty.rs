@@ -558,7 +558,7 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 Some(p) => p.to_string(),
                 None => return,
             };
-            println!("-- Read: {}", path);
+            println!("-- Read: {}{}{}", C_YELLOW, path, RESET);
         }
         "write_file" => {
             let obj = match args.as_object() {
@@ -589,7 +589,7 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 Some(c) => c,
                 None => return,
             };
-            println!("-- Command: {}", cmd);
+            println!("-- Command: {}{}{}", C_YELLOW, cmd, RESET);
         }
         "grep_search" => {
             let query = match args.get("query").and_then(|v| v.as_str()) {
@@ -597,9 +597,12 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 None => return,
             };
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                println!("-- Grep: {} (in {})", query, path);
+                println!(
+                    "-- Grep: {}{}{} (in {}{}{})",
+                    C_YELLOW, query, RESET, C_YELLOW, RESET, path
+                );
             } else {
-                println!("-- Grep: {}", query);
+                println!("-- Grep: {}{}{}", C_YELLOW, query, RESET);
             }
         }
         "list_directory" => {
@@ -607,14 +610,14 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 Some(p) => p.to_string(),
                 None => return,
             };
-            println!("-- List: {}", path);
+            println!("-- List: {}{}{}", C_YELLOW, path, RESET);
         }
         "fetch_web" => {
             let url = match args.get("url").and_then(|v| v.as_str()) {
                 Some(u) => u.to_string(),
                 None => return,
             };
-            println!("-- Fetch: {}", url);
+            println!("-- Fetch: {}{}{}", C_YELLOW, url, RESET);
         }
         _ => {}
     }
