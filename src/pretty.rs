@@ -32,7 +32,7 @@
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!      - Error: Error reason (multi-line)
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, C_YELLOW, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED,
@@ -551,6 +551,82 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
 }
 
 // Pretty-print command preview before execution.
+/// Displays a diagnostic warning when the LLM returns a malformed / broken tool call.
+///
+/// Detects these broken states:
+/// - Empty function name
+/// - Empty tool call ID
+/// - Unparseable or missing arguments (parsed to Null)
+///
+/// Shows raw argument strings, any LLM text content produced alongside,
+/// and a full JSON dump of the tool call for debugging.
+pub fn pretty_print_broken_tool_call(
+    tool_name: &str,
+    tool_id: &str,
+    tool_type: &str,
+    raw_arguments: &Value,
+    parsed_args: &Value,
+    thought_signature: Option<&str>,
+    llm_content: &str,
+) {
+    let name_empty = tool_name.trim().is_empty();
+    let id_empty = tool_id.trim().is_empty();
+    let args_is_null = parsed_args.is_null();
+    let has_content = !llm_content.trim().is_empty();
+    let is_broken = name_empty || id_empty || args_is_null;
+
+    if !is_broken {
+        return;
+    }
+
+    println!("\x1b[91m--- [BROKEN LLM TOOL CALL DETECTED] ---\x1b[0m");
+    if name_empty {
+        println!("  - Function name is \x1b[93mempty\x1b[0m (tool call has no name)");
+    }
+    if id_empty {
+        println!("  - Tool call ID is \x1b[93mempty\x1b[0m (cannot match results)");
+    }
+    if args_is_null {
+        println!("  - Arguments are \x1b[93mmalformed\x1b[0m (unparseable or missing)");
+        match raw_arguments {
+            Value::String(s) if !s.trim().is_empty() => {
+                println!("    Raw arguments string ({} chars):", s.len());
+                for line in s.lines() {
+                    println!("    \x1b[93m{}\x1b[0m", line);
+                }
+            }
+            Value::String(_) => {
+                println!("    Raw arguments string is \x1b[93mempty\x1b[0m");
+            }
+            other => {
+                println!("    Raw arguments value: \x1b[93m{}\x1b[0m", other);
+            }
+        }
+    }
+    if has_content {
+        println!("  - \x1b[90mLLM also produced text content alongside tool call:\x1b[0m");
+        for line in llm_content.lines() {
+            println!("    \x1b[90m{}\x1b[0m", line);
+        }
+    }
+    // Show full serialized tool call for debugging
+    if let Ok(full_json) = serde_json::to_string_pretty(&json!({
+        "id": tool_id,
+        "type": tool_type,
+        "function": {
+            "name": tool_name,
+            "arguments": raw_arguments,
+        },
+        "thought_signature": thought_signature,
+    })) {
+        println!("  - \x1b[90mFull tool call JSON:\x1b[0m");
+        for line in full_json.lines() {
+            println!("    \x1b[90m{}\x1b[0m", line);
+        }
+    }
+    println!("\x1b[91m----------------------------------------------\x1b[0m\n");
+}
+
 pub fn pretty_print_command(name: &str, args: &Value) {
     match name {
         "read_file" => {

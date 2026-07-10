@@ -399,6 +399,17 @@ async fn main() -> Result<()> {
                     let pretty = pretty_level > 0;
                     let mut user_denied = false;
 
+                    // 0. Broken tool call diagnostic
+                    pretty::pretty_print_broken_tool_call(
+                        &call.function.name,
+                        &call.id,
+                        &call.tool_type,
+                        &call.function.arguments,
+                        &args,
+                        call.thought_signature.as_deref(),
+                        &assistant_msg.content,
+                    );
+
                     // 1. Show tool call request (LLM to Application)
                     println!("--- [TOOL EXECUTION REQUESTED] ---");
                     println!("Tool: {}{}{}", C_YELLOW, call.function.name, RESET);
