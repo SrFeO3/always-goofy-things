@@ -566,6 +566,7 @@ pub fn pretty_print_broken_tool_call(
     tool_type: &str,
     raw_arguments: &Value,
     parsed_args: &Value,
+    args_parse_error: Option<&str>,
     thought_signature: Option<&str>,
     llm_content: &str,
 ) {
@@ -593,6 +594,9 @@ pub fn pretty_print_broken_tool_call(
                 println!("    Raw arguments string ({} chars):", s.len());
                 for line in s.lines() {
                     println!("    \x1b[93m{}\x1b[0m", line);
+                }
+                if let Some(err) = args_parse_error {
+                    println!("    \x1b[91mParse error: {}\x1b[0m", err);
                 }
             }
             Value::String(_) => {

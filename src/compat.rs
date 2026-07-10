@@ -7,6 +7,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serde_json::json;
 
 use crate::ChatRequest;
@@ -463,4 +464,79 @@ pub fn convert_anth_to_openai_format(
     }
 
     json!({})
+}
+
+/// Normalizes a single tool_calls array: lifts `name`/`arguments` from top level
+/// into a `function` wrapper where missing.
+fn normalize_tool_calls_array(tool_calls: &mut [Value]) -> bool {
+    let mut modified = false;
+    for call in tool_calls.iter_mut() {
+        if call.get("function").is_some() {
+            continue;
+        }
+        let Some(obj) = call.as_object_mut() else {
+            continue;
+        };
+
+        let name = obj.remove("name");
+        let arguments = obj.remove("arguments");
+        if name.is_none() && arguments.is_none() {
+            continue;
+        }
+
+        let mut func = serde_json::Map::new();
+        if let Some(n) = name {
+            func.insert("name".to_string(), n);
+        }
+        if let Some(a) = arguments {
+            func.insert("arguments".to_string(), a);
+        }
+        obj.insert("function".to_string(), Value::Object(func));
+        modified = true;
+    }
+    modified
+}
+
+/// Converts tool_call entries from non-OpenAI format (name/arguments at top level)
+/// to standard OpenAI format (name/arguments inside a `function` wrapper).
+///
+/// Handles both Ollama native (`{message:{tool_calls:[...]}}`) and
+/// OpenAI streaming (`{choices:[{delta:{tool_calls:[...]}}]}`) shapes.
+///
+/// Returns `true` if any tool_call was normalized.
+pub fn normalize_tool_call_format(json: &mut Value) -> bool {
+    // 1. Try message.tool_calls (Ollama native / non-streaming)
+    if let Some(msg) = json.get_mut("message") {
+        if let Some(arr) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            if normalize_tool_calls_array(arr) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Try choices[0].{delta,message}.tool_calls (OpenAI streaming)
+    if let Some(arr) = json.get_mut("choices").and_then(|c| c.as_array_mut()) {
+        if let Some(choice) = arr.first_mut() {
+            // 2a. delta.tool_calls
+            if let Some(arr) = choice
+                .get_mut("delta")
+                .and_then(|d| d.get_mut("tool_calls"))
+                .and_then(|tc| tc.as_array_mut())
+            {
+                if normalize_tool_calls_array(arr) {
+                    return true;
+                }
+            }
+            // 2b. message.tool_calls
+            if let Some(arr) = choice
+                .get_mut("message")
+                .and_then(|m| m.get_mut("tool_calls"))
+                .and_then(|tc| tc.as_array_mut())
+            {
+                return normalize_tool_calls_array(arr);
+            }
+        }
+    }
+
+    false
 }

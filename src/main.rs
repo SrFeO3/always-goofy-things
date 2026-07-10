@@ -389,11 +389,12 @@ async fn main() -> Result<()> {
             if let Some(tool_calls) = assistant_msg.tool_calls {
                 for call in tool_calls {
                     // Normalize tool arguments: parse OpenAI's JSON string or use Ollama's JSON object directly.
-                    let args = match &call.function.arguments {
-                        serde_json::Value::String(s) => {
-                            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
-                        }
-                        value => value.clone(),
+                    let (args, args_parse_error) = match &call.function.arguments {
+                        serde_json::Value::String(s) => match serde_json::from_str(s) {
+                            Ok(v) => (v, None),
+                            Err(e) => (serde_json::Value::Null, Some(e.to_string())),
+                        },
+                        value => (value.clone(), None),
                     };
 
                     let pretty = pretty_level > 0;
@@ -406,6 +407,7 @@ async fn main() -> Result<()> {
                         &call.tool_type,
                         &call.function.arguments,
                         &args,
+                        args_parse_error.as_deref(),
                         call.thought_signature.as_deref(),
                         &assistant_msg.content,
                     );
@@ -677,6 +679,7 @@ async fn call_llm(
     let mut has_started_content = false;
     #[allow(unused_mut, unused_variables)]
     let mut anth_tool_index = 0;
+    let mut used_nonstandard_format = false;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
@@ -707,6 +710,8 @@ async fn call_llm(
                 if provider == Some(LlmProvider::Anthropic) {
                     json = convert_anth_to_openai_format(json, &mut anth_tool_index);
                 }
+                // Normalize non-OpenAI tool call format (name/arguments at top level -> function wrapper)
+                used_nonstandard_format |= compat::normalize_tool_call_format(&mut json);
 
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
                 if let Some(usage_val) = json.get("usage") {
@@ -878,8 +883,15 @@ async fn call_llm(
                 }
             }
         }
-        println!();
+        if used_nonstandard_format {
+            println!(
+                "\x1b[93m(Warning: tool call fields (name/arguments) at top level, not inside 'function'. \
+                 Assuming non-OpenAI format)\x1b[0m"
+            );
+        }
     }
+
+    println!();
 
     Ok((full_message, usage_captured))
 }
