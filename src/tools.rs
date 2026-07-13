@@ -33,7 +33,8 @@ use tokio::process::Command as TokioCommand;
 use crate::reflex::auto_confirm;
 use crate::startup::{C_CYAN, RESET};
 use crate::tools_fuzzy::{
-    build_full_fuzzy_pattern, build_space_fuzzy_pattern, build_tab_fuzzy_pattern,
+    build_full_fuzzy_pattern, build_full_skip_blank_pattern, build_space_fuzzy_pattern,
+    build_tab_fuzzy_pattern, build_tab_skip_blank_pattern,
 };
 
 pub const ALLOW_COMMAND_LIST: &[&str] = &[
@@ -612,6 +613,25 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         }
     }
 
+    // --- Step 3.5: Tab-fuzzy + blank-line tolerant (space/tab-only blank lines ignored) ---
+    let tab_skip_blank_pattern = build_tab_skip_blank_pattern(old_str);
+    if !tab_skip_blank_pattern.is_empty() {
+        if let Ok(re) = Regex::new(&tab_skip_blank_pattern) {
+            match try_fuzzy_replace(
+                &content,
+                &re,
+                old_str,
+                new_str,
+                path,
+                "tab_skip_blank_match",
+            ) {
+                Ok(res) => return Ok(res),
+                Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+                _ => {}
+            }
+        }
+    }
+
     // --- Step 4: Full fuzzy match (all whitespace incl. line breaks + \r\n / \n differences) ---
     let full_pattern = build_full_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&full_pattern) {
@@ -622,9 +642,28 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         }
     }
 
-    // All fallbacks (exact / space-fuzzy / tab-fuzzy / full-fuzzy) were exhausted — old_string truly isn't in file.
+    // --- Step 4.5: Full-fuzzy + blank-line tolerant (space/tab-only blank lines ignored) ---
+    let full_skip_blank_pattern = build_full_skip_blank_pattern(old_str);
+    if !full_skip_blank_pattern.is_empty() {
+        if let Ok(re) = Regex::new(&full_skip_blank_pattern) {
+            match try_fuzzy_replace(
+                &content,
+                &re,
+                old_str,
+                new_str,
+                path,
+                "full_skip_blank_match",
+            ) {
+                Ok(res) => return Ok(res),
+                Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+                _ => {}
+            }
+        }
+    }
+
+    // All fallbacks were exhausted — old_string truly isn't in file.
     Err(anyhow!(
-        "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / full-fuzzy stages",
+        "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / tab-blank-skip / full-fuzzy / full-blank-skip stages",
         path,
     ))
 }
@@ -664,8 +703,14 @@ fn try_fuzzy_replace(
         "tab_fuzzy_match" => {
             "Tab/Space mismatch: matched by treating tabs and spaces as equivalent."
         }
+        "tab_skip_blank_match" => {
+            "Tab/Space mismatch (blank-line tolerant): blank lines ignored for matching."
+        }
         "full_fuzzy_match" => {
             "Line break/Structure mismatch: matched by ignoring all whitespace and newlines."
+        }
+        "full_skip_blank_match" => {
+            "Full fuzzy (blank-line tolerant): whitespace flexible, blank lines ignored."
         }
         _ => "Fuzzy match applied.",
     };
@@ -1348,5 +1393,218 @@ fn  foo() {}
 
         let complex = "<script>alert(1)</script>  <style>body{}</style>Text";
         assert_eq!(strip_html_tags(complex).trim(), "Text");
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage 3.5 / 4.5: skip_blank integration tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tab_skip_blank_replace_old_has_extra_blank() {
+        // bug01.md scenario: old_string has an extra blank line that file doesn't have
+        let path = get_temp_path("tab_skip_blank_extra");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn hello() {\n    foo();\n}\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn hello() {\n    foo();\n\n}",  // extra blank line
+            "new_string": "fn hello() {\n    bar();\n}"
+        }));
+        assert!(
+            res.is_ok(),
+            "Stage 3.5 should match despite extra blank: {:?}",
+            res.err()
+        );
+        let match_type = res.unwrap()["match_type"].as_str().unwrap().to_string();
+        assert!(
+            match_type.contains("blank-line tolerant"),
+            "match_type should indicate blank-line tolerance: {}",
+            match_type
+        );
+        let content = fs::read_to_string(path_str).unwrap();
+        assert!(
+            content.contains("bar();"),
+            "Replacement should have occurred"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_tab_skip_blank_replace_file_has_extra_blank() {
+        // Reverse: file has blank line, old_string doesn't
+        let path = get_temp_path("tab_skip_blank_file_extra");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn hello() {\n    foo();\n\n}\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn hello() {\n    foo();\n}",  // no blank line
+            "new_string": "fn hello() {\n    bar();\n}"
+        }));
+        assert!(
+            res.is_ok(),
+            "Stage 3.5 should match despite file having extra blank: {:?}",
+            res.err()
+        );
+        let match_type = res.unwrap()["match_type"].as_str().unwrap().to_string();
+        assert!(
+            match_type.contains("blank-line tolerant"),
+            "match_type should indicate blank-line tolerance: {}",
+            match_type
+        );
+        let content = fs::read_to_string(path_str).unwrap();
+        assert!(
+            content.contains("bar();"),
+            "Replacement should have occurred"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_tab_skip_blank_with_mixed_whitespace_indent() {
+        // Tab-indented file, spaces in old_string, plus extra blank line
+        let path = get_temp_path("tab_skip_blank_mixed");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn hello() {\n\tfoo();\n}\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn hello() {\n    foo();\n\n}",  // space indent + extra blank
+            "new_string": "fn hello() {\n\tbar();\n}"
+        }));
+        assert!(
+            res.is_ok(),
+            "Stage 3.5 should match with tab/space + blank: {:?}",
+            res.err()
+        );
+        let match_type = res.unwrap()["match_type"].as_str().unwrap().to_string();
+        assert!(
+            match_type.contains("blank-line tolerant"),
+            "match_type should indicate blank-line tolerance: {}",
+            match_type
+        );
+        let content = fs::read_to_string(path_str).unwrap();
+        assert!(
+            content.contains("bar();"),
+            "Replacement should have occurred"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_full_skip_blank_replace() {
+        // Scenario where blank line tolerance rescues a match that
+        // full_fuzzy (Stage 4) would fail on due to extra blank line.
+        let path = get_temp_path("full_skip_blank_replace");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn hello() {\n    foo();\n}\n").unwrap();
+        // old has extra blank line (file doesn't) — Stage 4 (full_fuzzy) fails
+        // because `\n\n` are literal in its pattern; Stage 3.5 or 4.5 should catch it.
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn hello() {\n    foo();\n\n}",
+            "new_string": "fn hello() {\n    bar();\n}"
+        }));
+        assert!(res.is_ok(), "Skip-blank should match: {:?}", res.err());
+        let match_type = res.as_ref().unwrap()["match_type"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            match_type.contains("blank-line tolerant"),
+            "match_type should indicate blank-line tolerance: {}",
+            match_type
+        );
+        let content = fs::read_to_string(path_str).unwrap();
+        assert!(
+            content.contains("bar();"),
+            "Replacement should have occurred"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_skip_blank_ambiguous_match() {
+        // Multiple matches with blank-line tolerance should still error
+        let path = get_temp_path("skip_blank_ambiguous");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn foo() {}\n\nfn foo() {}\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn foo() {}\n",
+            "new_string": "fixed();"
+        }));
+        assert!(res.is_err(), "Expected error for ambiguous match");
+        assert!(
+            res.unwrap_err().to_string().contains("AMBIGUOUS_MATCH"),
+            "Should report AMBIGUOUS_MATCH"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_skip_blank_no_match_on_different_content() {
+        // Safety: differing non-blank content must NOT match
+        let path = get_temp_path("skip_blank_no_match");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "fn hello() {\n    foo();\n}\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "fn goodbye() {\n    foo();\n}",
+            "new_string": "fn replaced() {}"
+        }));
+        assert!(res.is_err(), "Expected NO_MATCH for different content");
+        assert!(
+            res.unwrap_err().to_string().contains("NO_MATCH"),
+            "Should report NO_MATCH"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_skip_blank_stage_order() {
+        // Verify that skip_blank stages fire before/after parents correctly.
+        // Stage 3.5 should be attempted BEFORE Stage 4 (full_fuzzy).
+        // If Stage 3.5 is skipped (empty pattern), it should fall through.
+        //
+        // Case: no blank lines → tab_skip_blank pattern is non-empty
+        //       (just joins lines with the connector which tolerates blanks),
+        //       but Stage 3 (tab) should match first for simpler content.
+        let path = get_temp_path("skip_blank_order");
+        let path_str = path.to_str().unwrap();
+        // Simple content that Stage 3 (tab) should match perfectly
+        fs::write(&path, "let x = 1;\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "let x = 1;",
+            "new_string": "let y = 2;"
+        }));
+        assert!(res.is_ok());
+        // Should be exact match, not skip_blank
+        let match_type = res.unwrap()["match_type"].as_str().unwrap().to_string();
+        assert_eq!(
+            match_type, "Perfect match.",
+            "Simple content should be exact match: {}",
+            match_type
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_skip_blank_empty_old_string() {
+        // old_string with only blank lines → pattern is empty → not compiled
+        // Should fall through to NO_MATCH
+        let path = get_temp_path("skip_blank_empty");
+        let path_str = path.to_str().unwrap();
+        fs::write(&path, "some content\n").unwrap();
+        let res = execute_str_replace(&json!({
+            "path": path_str,
+            "old_string": "\n  \n\t\n",
+            "new_string": "replacement"
+        }));
+        assert!(res.is_err(), "Expected NO_MATCH for blank-only old_string");
+        assert!(
+            res.unwrap_err().to_string().contains("NO_MATCH"),
+            "Should report NO_MATCH"
+        );
+        fs::remove_file(path).ok();
     }
 }

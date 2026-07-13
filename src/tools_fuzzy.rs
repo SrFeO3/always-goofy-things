@@ -74,6 +74,46 @@ pub fn build_full_fuzzy_pattern(s: &str) -> String {
     pattern
 }
 
+/// Helper: join per-line patterns with a blank-line-tolerant connector.
+/// The connector `\n(?:[ \t]*\n)*` allows zero or more blank lines
+/// (empty or space/tab-only) between non-blank lines.
+fn join_non_blank_lines(parts: Vec<String>) -> String {
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.join(r"\n(?:[ \t]*\n)*")
+}
+
+/// Stage 3.5: Tab-fuzzy pattern with blank-line tolerance.
+///
+/// - Blank lines (empty or space/tab-only) in the source string are ignored,
+///   allowing the pattern to match files with or without those blank lines.
+/// - Non-blank lines are processed by [`build_tab_fuzzy_pattern`].
+/// - Does NOT cross non-blank line boundaries; only blank-line flexibility.
+pub fn build_tab_skip_blank_pattern(s: &str) -> String {
+    let parts: Vec<String> = s
+        .lines()
+        .filter(|line| !line.chars().all(|c| c == ' ' || c == '\t'))
+        .map(build_tab_fuzzy_pattern)
+        .collect();
+    join_non_blank_lines(parts)
+}
+
+/// Stage 4.5: Full-fuzzy pattern with blank-line tolerance.
+///
+/// - Blank lines (empty or space/tab-only) in the source string are ignored,
+///   allowing the pattern to match files with or without those blank lines.
+/// - Non-blank lines are processed by [`build_full_fuzzy_pattern`].
+/// - Does NOT cross non-blank line boundaries; only blank-line flexibility.
+pub fn build_full_skip_blank_pattern(s: &str) -> String {
+    let parts: Vec<String> = s
+        .lines()
+        .filter(|line| !line.chars().all(|c| c == ' ' || c == '\t'))
+        .map(build_full_fuzzy_pattern)
+        .collect();
+    join_non_blank_lines(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +199,251 @@ mod tests {
         assert!(
             re.is_match("\tprintln!(\"hi\");"),
             "Stage 3 should match tab-indent when old_string has spaces"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage 3.5: build_tab_skip_blank_pattern
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tab_skip_blank_old_has_blank_file_lacks() {
+        // old has an extra blank line, file doesn't → should match
+        let pattern = build_tab_skip_blank_pattern("foo\n\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 3.5: old blank, file no blank"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_old_lacks_blank_file_has() {
+        // old has no blank line, file has one → should match
+        let pattern = build_tab_skip_blank_pattern("foo\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 3.5: old no blank, file has blank"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_space_only_line() {
+        // old has space-only blank line, file has none → should match
+        let pattern = build_tab_skip_blank_pattern("foo\n  \nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 3.5: space-only blank line vs no blank line"
+        );
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 3.5: space-only blank line vs empty blank line"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_tab_only_line() {
+        // old has tab-only blank line, file has none → should match
+        let pattern = build_tab_skip_blank_pattern("foo\n\t\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 3.5: tab-only blank line vs no blank line"
+        );
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 3.5: tab-only blank line vs empty blank line"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_multiple_blank_lines() {
+        // old has multiple consecutive blank lines
+        let pattern = build_tab_skip_blank_pattern("foo\n\n\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 3.5: multiple blanks vs no blank"
+        );
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 3.5: multiple blanks vs single blank"
+        );
+        assert!(
+            re.is_match("foo\n\n\nbar"),
+            "Stage 3.5: multiple blanks vs multiple blanks"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_leading_trailing_blank_lines() {
+        // Leading and trailing blank lines should be ignored
+        let pattern = build_tab_skip_blank_pattern("\n\nfoo\nbar\n\n");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 3.5: leading/trailing blank lines ignored"
+        );
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 3.5: leading/trailing blanks + middle blank"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_single_line_no_effect() {
+        // Single non-blank line → should still match normally
+        let pattern = build_tab_skip_blank_pattern("foo");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(re.is_match("foo"), "Stage 3.5: single line should match");
+        assert!(
+            !re.is_match("bar"),
+            "Stage 3.5: single line should not match different content"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_only_blank_lines() {
+        // Only blank lines → empty pattern (regex will fail to compile)
+        let pattern = build_tab_skip_blank_pattern("\n  \n\t\n");
+        assert!(
+            pattern.is_empty(),
+            "Stage 3.5: all-blank input should produce empty pattern"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_does_not_cross_non_blank_boundary() {
+        // Safety: must NOT match when non-blank content differs
+        let pattern = build_tab_skip_blank_pattern("foo\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            !re.is_match("foo\nbaz"),
+            "Stage 3.5: must not match differing non-blank line"
+        );
+        assert!(
+            !re.is_match("baz\nbar"),
+            "Stage 3.5: must not match differing non-blank line"
+        );
+        assert!(
+            !re.is_match("foox\nbar"),
+            "Stage 3.5: must not match partial identifier"
+        );
+    }
+
+    #[test]
+    fn test_tab_skip_blank_tab_fuzzy_behavior_preserved() {
+        // Non-blank lines still benefit from tab-fuzzy flexibility
+        let pattern = build_tab_skip_blank_pattern("    foo\n\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("\tfoo\nbar"),
+            "Stage 3.5: tab-indent in non-blank line still matches"
+        );
+        assert!(
+            re.is_match("  foo\n\nbar"),
+            "Stage 3.5: space-indent in non-blank line still matches"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage 4.5: build_full_skip_blank_pattern
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_full_skip_blank_old_has_blank_file_lacks() {
+        let pattern = build_full_skip_blank_pattern("foo\n\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 4.5: old blank, file no blank"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_old_lacks_blank_file_has() {
+        let pattern = build_full_skip_blank_pattern("foo\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 4.5: old no blank, file has blank"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_space_tab_blank_lines() {
+        // Various blank line types
+        let pattern = build_full_skip_blank_pattern("foo\n  \n\t\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 4.5: mixed blank lines ignored"
+        );
+        assert!(
+            re.is_match("foo\n\nbar"),
+            "Stage 4.5: mixed blanks vs empty blank"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_intra_line_flexibility() {
+        // Full-fuzzy flexibility within non-blank lines still works
+        // (space becomes \s*)
+        let pattern = build_full_skip_blank_pattern("fn  foo(  )\n\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("fn foo()\nbar"),
+            "Stage 4.5: intra-line spacing differences absorbed"
+        );
+        assert!(
+            re.is_match("fn   foo( )\n\nbar"),
+            "Stage 4.5: varied intra-line spacing"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_does_not_cross_non_blank_boundary() {
+        let pattern = build_full_skip_blank_pattern("foo\nbar");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            !re.is_match("foo\nbaz"),
+            "Stage 4.5: must not match differing non-blank line"
+        );
+        assert!(
+            !re.is_match("foox\nbar"),
+            "Stage 4.5: must not match partial identifier"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_leading_trailing_blank_lines() {
+        let pattern = build_full_skip_blank_pattern("\n\nfoo\nbar\n\n");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(
+            re.is_match("foo\nbar"),
+            "Stage 4.5: leading/trailing blanks ignored"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_only_blank_lines() {
+        let pattern = build_full_skip_blank_pattern("\n  \n\t\n");
+        assert!(
+            pattern.is_empty(),
+            "Stage 4.5: all-blank input should produce empty pattern"
+        );
+    }
+
+    #[test]
+    fn test_full_skip_blank_single_line() {
+        let pattern = build_full_skip_blank_pattern("foo");
+        let re = regex::Regex::new(&pattern).unwrap();
+        assert!(re.is_match("foo"), "Stage 4.5: single line should match");
+        assert!(
+            !re.is_match("bar"),
+            "Stage 4.5: single line should not match different content"
         );
     }
 }
