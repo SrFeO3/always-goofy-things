@@ -761,6 +761,17 @@ async fn call_llm(
                     &serde_json::Value::Null
                 };
 
+                // 0.5 Verbose 3: Display raw SSE line for tool_call deltas
+                if verbose_level >= 3 {
+                    let has_tool_calls = msg_base
+                        .get("tool_calls")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|a| !a.is_empty());
+                    if has_tool_calls {
+                        println!("\x1b[90m[TOOL RAW] {}\x1b[0m", line);
+                    }
+                }
+
                 // 1. Process Reasoning (Thinking) - Supports both 'reasoning_content' and 'reasoning'
                 let reasoning_val = msg_base
                     .get("reasoning_content")
