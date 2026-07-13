@@ -98,7 +98,7 @@ pub struct Config {
       short = 'v',
       long,
       env = "VERBOSE_LEVEL",
-      value_parser = clap::value_parser!(u8).range(0..=3),
+      value_parser = clap::value_parser!(u8).range(0..=4),
       default_value_t = 1
     )]
     pub verbose_level: Verbosity,

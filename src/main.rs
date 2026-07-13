@@ -578,7 +578,7 @@ async fn call_llm(
 
     // Debug output based on verbose_level
     match verbose_level {
-        3 => println!(
+        3 | 4 => println!(
             "\x1b[90m--- [API REQUEST: {}] ---\n{}\x1b[0m",
             url, req_json
         ),
@@ -713,6 +713,11 @@ async fn call_llm(
                 // Normalize non-OpenAI tool call format (name/arguments at top level -> function wrapper)
                 used_nonstandard_format |= compat::normalize_tool_call_format(&mut json);
 
+                // 0. Verbose 4: Display all raw SSE lines
+                if verbose_level >= 4 {
+                    println!("\x1b[90m[SSE] {}\x1b[0m", line);
+                }
+
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
                 if let Some(usage_val) = json.get("usage") {
                     if let Ok(u) = serde_json::from_value::<Usage>(usage_val.clone()) {
@@ -762,7 +767,7 @@ async fn call_llm(
                 };
 
                 // 0.5 Verbose 3: Display raw SSE line for tool_call deltas
-                if verbose_level >= 3 {
+                if verbose_level == 3 {
                     let has_tool_calls = msg_base
                         .get("tool_calls")
                         .and_then(|v| v.as_array())

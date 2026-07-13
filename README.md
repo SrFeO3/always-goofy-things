@@ -27,7 +27,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-u, --llm-url <URL>` | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
-| `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`3`). | `1` |
+| `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
@@ -38,7 +38,8 @@ Controls how much of the LLM conversation is displayed on the terminal.
 - `0`: Silent - no conversation content is shown
 - `1`: Metadata - only summary information (content length) is displayed
 - `2`: Incremental - only newly appended messages are shown
-- `3`: Full - the entire conversation is printed in detail
+- `3`: Full - the entire conversation is printed in detail, including raw tool call delta SSE lines
+- `4`: Raw - same as Level 3, plus every raw SSE line from the response stream
 
 ### Pretty Levels (`PRETTY_LEVEL`)
 Controls the visual styling and decorations applied to the terminal output.
