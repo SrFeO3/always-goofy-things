@@ -628,11 +628,33 @@ async fn call_llm(
         .json(&req_value);
 
     if let Some(api_key) = api_key.as_deref() {
+        let masked_key = "****".to_string();
+
         request_builder = match provider {
-            Some(LlmProvider::Anthropic) => request_builder
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-11-01"),
-            _ => request_builder.header("Authorization", format!("Bearer {}", api_key)),
+            Some(LlmProvider::Anthropic) => {
+                if verbose_level >= 1 {
+                    println!(
+                        "{}[AUTH: x-api-key] masked: {}{}",
+                        startup::C_DIM_GRAY,
+                        masked_key,
+                        startup::RESET
+                    );
+                }
+                request_builder
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-11-01")
+            }
+            _ => {
+                if verbose_level >= 1 {
+                    println!(
+                        "{}[AUTH: Authorization/Bearer] masked: Bearer {}{}",
+                        startup::C_DIM_GRAY,
+                        masked_key,
+                        startup::RESET
+                    );
+                }
+                request_builder.header("Authorization", format!("Bearer {}", api_key))
+            }
         };
     }
 
