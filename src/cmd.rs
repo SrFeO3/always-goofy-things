@@ -187,9 +187,9 @@ fn handle_config(
     // `-s` or `--short`: show short aliases
     if arg_str == "-s" || arg_str == "--short" {
         println!("  \x1b[1mConfig aliases:\x1b[0m (use these with /config)");
-        println!("    \x1b[36mv\x1b[0m           — verbose-level (0-3)");
-        println!("    \x1b[36mp\x1b[0m           — pretty-level  (0-2)");
-        println!("    \x1b[36mr\x1b[0m           — llm-rpm       (0 = unlimited)");
+        println!("    \x1b[36mv\x1b[0m           - verbose-level (0-4)");
+        println!("    \x1b[36mp\x1b[0m           - pretty-level  (0-2)");
+        println!("    \x1b[36mr\x1b[0m           - llm-rpm       (0 = unlimited)");
         return Ok(ConfigSnapshot {
             verbose_level: *verbose_level,
             pretty_level: *pretty_level,
@@ -206,10 +206,10 @@ fn handle_config(
     match kv.0.as_str() {
         "v" | "verbose-level" | "verbose_level" | "verbose" => {
             let val: u8 = kv.1.parse().map_err(|_| {
-                anyhow!("Invalid value for verbose-level: '{}'. Must be 0-3.", kv.1)
+                anyhow!("Invalid value for verbose-level: '{}'. Must be 0-4.", kv.1)
             })?;
-            if val > 3 {
-                return Err(anyhow!("verbose-level must be 0-3, got {}", val));
+            if val > 4 {
+                return Err(anyhow!("verbose-level must be 0-4, got {}", val));
             }
             *verbose_level = val;
         }
