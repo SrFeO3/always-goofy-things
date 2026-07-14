@@ -1,8 +1,9 @@
-//! LLM provider compatibility layer.
+//! LLM provider compatibility & broken tool call recovery.
 //!
 //! Handles API-specific differences in request formats, authentication requirements,
 //! and protocol adaptations across supported LLM providers.
-//! Includes special handling for APIs with unconventional message and tool semantics.
+//! Also normalizes non-OpenAI tool call formats, recovers missing SSE fields
+//! from DeepSeek-style parallel tool calling, and validates tool call arguments.
 
 use std::fmt;
 
@@ -409,13 +410,19 @@ pub fn convert_anth_to_openai_format(
                 }
             }
             // 3. input_json_delta -> choices[0].delta.tool_calls
+            // Use the event's own index (Anthropic sends per-block index)
+            // to correctly route arguments to parallel tool calls.
             else if delta_type == Some("input_json_delta") {
                 if let Some(partial) = delta.get("partial_json") {
+                    let index = anth
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(*tool_index as u64) as usize;
                     return json!({
                         "choices": [{
                             "delta": {
                                 "tool_calls": [{
-                                    "index": *tool_index,
+                                    "index": index,
                                     "function": { "arguments": partial }
                                 }]
                             }
@@ -539,4 +546,137 @@ pub fn normalize_tool_call_format(json: &mut Value) -> bool {
     }
 
     false
+}
+
+// -----------------------------------------------
+// Tool Call Post-Processing (SSE Stream Assembly)
+// -----------------------------------------------
+
+/// Infer tool name from argument keys by matching against tool definitions.
+///
+/// Examines each tool's `parameters.properties` keys and returns the best
+/// matching tool name, or `None` if no tool's parameter set matches.
+///
+/// Scoring:
+/// - +3 for each arg key matching a required parameter
+/// - +1 for each arg key matching an optional parameter
+/// - -3 for each arg key that is not a known parameter of the tool
+/// - -1 for each required parameter missing from the args
+fn infer_tool_name_from_args(
+    tool_defs: &[serde_json::Value],
+    args: &serde_json::Value,
+) -> Option<String> {
+    let args_obj = args.as_object()?;
+    let arg_keys: Vec<&str> = args_obj.keys().map(|s| s.as_str()).collect();
+
+    let mut best: Option<(&str, i32)> = None;
+
+    for def in tool_defs {
+        let func = def.get("function")?;
+        let name = func.get("name")?.as_str()?;
+        let params = func.get("parameters")?;
+        let props = params.get("properties")?.as_object()?;
+        let required = params.get("required")?.as_array()?;
+
+        let required_set: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        let all_params: Vec<&str> = props.keys().map(|s| s.as_str()).collect();
+
+        let mut score = 0i32;
+
+        for key in &arg_keys {
+            if required_set.contains(key) {
+                score += 3;
+            } else if all_params.contains(key) {
+                score += 1;
+            } else {
+                score -= 3; // Unknown key → strongly penalize
+            }
+        }
+
+        // Penalize missing required params
+        for req in &required_set {
+            if !arg_keys.contains(req) {
+                score -= 1;
+            }
+        }
+
+        if score > 0 {
+            match best {
+                Some((_, s)) if score > s => best = Some((name, score)),
+                None => best = Some((name, score)),
+                _ => {}
+            }
+        }
+    }
+
+    best.map(|(n, _)| n.to_string())
+}
+
+/// Post-processes tool calls assembled from SSE streaming to handle
+/// DeepSeek-style missing fields (id, function.name) and validate
+/// arguments JSON in parallel tool calling scenarios.
+///
+/// `tool_defs` should be the tool definitions as sent to the LLM API
+/// (from e.g. `crate::tools::get_tool_definitions()`).
+///
+/// DeepSeek may omit id and function.name for index >= 1 when
+/// issuing parallel tool calls via SSE streaming. Additionally,
+/// the model may produce malformed arguments JSON that cannot
+/// be parsed.
+///
+/// Steps performed:
+/// 1. Fill in missing `id` with a placeholder (`"call_missing_{index}"`)
+/// 2. Fill in missing `function.name`:
+///    - For index >= 1: copy from the previous tool call
+///    - For index 0: infer from argument keys against tool definitions
+/// 3. Remove tool calls with empty `function.name` (unrecoverable)
+/// 4. Remove tool calls with unparseable arguments JSON (malformed)
+pub fn post_process_tool_calls(
+    tool_calls: &mut Vec<crate::ToolCall>,
+    tool_defs: &[serde_json::Value],
+) {
+    // First pass: fill in missing ids and function names
+    for i in 0..tool_calls.len() {
+        if tool_calls[i].id.is_empty() {
+            tool_calls[i].id = format!("call_missing_{}", i);
+        }
+        if tool_calls[i].function.name.is_empty() {
+            if i > 0 {
+                // Copy function.name from the previous tool call
+                // (assumes parallel calls use the same tool)
+                let prev_name = tool_calls[i - 1].function.name.clone();
+                if !prev_name.is_empty() {
+                    tool_calls[i].function.name = prev_name;
+                }
+            }
+            // Try to infer from argument keys against tool definitions
+            if tool_calls[i].function.name.is_empty() {
+                // Parse arguments JSON string if needed
+                let args = match &tool_calls[i].function.arguments {
+                    serde_json::Value::String(s) => {
+                        serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+                    }
+                    other => other.clone(),
+                };
+                if let Some(inferred) = infer_tool_name_from_args(tool_defs, &args) {
+                    tool_calls[i].function.name = inferred;
+                }
+            }
+        }
+    }
+    // Second pass: remove tool calls that still have empty function.name
+    // or have unparseable arguments JSON (completely broken tool calls)
+    tool_calls.retain(|tc| {
+        // Guard: empty function.name → unrecoverable
+        if tc.function.name.is_empty() {
+            return false;
+        }
+        // Guard: unparseable arguments JSON → also unrecoverable
+        if let serde_json::Value::String(s) = &tc.function.arguments {
+            if serde_json::from_str::<serde_json::Value>(s).is_err() {
+                return false;
+            }
+        }
+        true
+    });
 }

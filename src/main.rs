@@ -40,7 +40,7 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
-use compat::{LlmProvider, ToolResultMode, convert_anth_to_openai_format};
+use compat::{LlmProvider, ToolResultMode, convert_anth_to_openai_format, post_process_tool_calls};
 use startup::{
     C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
 };
@@ -890,6 +890,18 @@ async fn call_llm(
                     }
                 }
             }
+        }
+    }
+
+    // Post-process tool_calls assembled from SSE streaming:
+    // - Fill in missing id/function.name (infer from args for index 0)
+    // - Filter out unrecoverable calls (empty name or unparseable arguments)
+    if let Some(tool_calls) = &mut full_message.tool_calls {
+        post_process_tool_calls(tool_calls, &tools::get_tool_definitions());
+        // If all tool calls were filtered out, set back to None
+        // to avoid serializing an empty array which APIs reject.
+        if tool_calls.is_empty() {
+            full_message.tool_calls = None;
         }
     }
 

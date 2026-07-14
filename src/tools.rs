@@ -99,8 +99,25 @@ pub struct ToolRunDecision {
     pub reason: Option<String>,
 }
 
+/// Tool definitions sent to the LLM API.
+/// Order matters: `compat::infer_tool_name_from_args` picks the first
+/// highest-scoring match, so list more generic tools earlier.
 pub fn get_tool_definitions() -> Vec<serde_json::Value> {
     vec![
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "list_directory",
+                "description": "List files and directories in a given directory (non-recursive). Use this tool to explore the project structure before reading or editing files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
+                    },
+                    "required": ["path"]
+                }
+            }
+        }),
         serde_json::json!({
             "type": "function",
             "function": {
@@ -160,20 +177,6 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
                         "path": { "type": "string", "description": "Directory path relative to the workspace root. If omitted, searches the entire workspace." }
                     },
                     "required": ["query"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "list_directory",
-                "description": "List files and directories in a given directory (non-recursive). Use this tool to explore the project structure before reading or editing files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
-                    },
-                    "required": ["path"]
                 }
             }
         }),
