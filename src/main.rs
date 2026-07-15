@@ -31,7 +31,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod cmd;
-mod compat;
+mod compat_provider;
+mod compat_resilience;
 mod persistence;
 mod pretty;
 mod reflex;
@@ -40,7 +41,8 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
-use compat::{LlmProvider, ToolResultMode, convert_anth_to_openai_format, post_process_tool_calls};
+use compat_provider::{LlmProvider, convert_anth_to_openai_format};
+use compat_resilience::{ToolResultFormat, post_process_tool_calls};
 use startup::{
     C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
 };
@@ -56,6 +58,8 @@ struct Message {
     tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip)]
+    pub tool_name: Option<String>,
     #[serde(skip)]
     pub timestamp: chrono::DateTime<chrono::Utc>,
     #[serde(skip)]
@@ -89,7 +93,7 @@ pub struct ChatRequest {
     tools: Vec<serde_json::Value>,
     stream: bool,
     messages: Vec<Message>,
-    tool_result_mode: ToolResultMode,
+    tool_result_format: ToolResultFormat,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -113,7 +117,7 @@ async fn main() -> Result<()> {
     let config = startup::Config::parse();
     let provider: LlmProvider = config
         .provider
-        .unwrap_or_else(|| compat::detect_provider(&config.llm_url));
+        .unwrap_or_else(|| compat_provider::detect_provider(&config.llm_url));
     let _current_dir = startup::print_startup_info(&config, &provider)?;
 
     let mut last_sent_count = 0;
@@ -162,6 +166,7 @@ async fn main() -> Result<()> {
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
+        tool_name: None,
         timestamp: chrono::Utc::now(),
         model: None,
         tool_call_decision: None,
@@ -277,6 +282,7 @@ async fn main() -> Result<()> {
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
+                tool_name: None,
                 timestamp: chrono::Utc::now(),
                 model: None,
                 tool_call_decision: None,
@@ -309,7 +315,7 @@ async fn main() -> Result<()> {
                 &messages,
                 verbose_level,
                 last_sent_count,
-                config.tool_result_mode,
+                config.tool_result_format,
             );
             let ctrl_c_future = tokio::signal::ctrl_c();
 
@@ -530,7 +536,8 @@ async fn main() -> Result<()> {
                         content: tool_result_str,
                         reasoning_content: None,
                         tool_calls: None,
-                        tool_call_id: Some(call.id),
+                        tool_call_id: Some(call.id.clone()),
+                        tool_name: Some(call.function.name.clone()),
                         timestamp: chrono::Utc::now(),
                         model: None,
                         tool_call_decision: Some(tool_call_decision),
@@ -558,7 +565,7 @@ async fn call_llm(
     messages: &[Message],
     verbose_level: startup::Verbosity,
     last_msg_count: usize,
-    tool_result_mode: ToolResultMode,
+    tool_result_format: ToolResultFormat,
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
     let tools = tools::get_tool_definitions();
@@ -571,7 +578,7 @@ async fn call_llm(
         messages: messages_vec,
         stream: true,
         tools,
-        tool_result_mode,
+        tool_result_format,
     };
     let req_value = req.to_provider_json()?;
     let req_json = serde_json::to_string(&req_value)?;
@@ -689,6 +696,7 @@ async fn call_llm(
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
+        tool_name: None,
         timestamp: chrono::Utc::now(),
         model: Some(model.to_string()),
         tool_call_decision: None,
@@ -733,7 +741,7 @@ async fn call_llm(
                     json = convert_anth_to_openai_format(json, &mut anth_tool_index);
                 }
                 // Normalize non-OpenAI tool call format (name/arguments at top level -> function wrapper)
-                used_nonstandard_format |= compat::normalize_tool_call_format(&mut json);
+                used_nonstandard_format |= compat_resilience::normalize_tool_call_format(&mut json);
 
                 // 0. Verbose 4: Display all raw SSE lines
                 if verbose_level >= 4 {

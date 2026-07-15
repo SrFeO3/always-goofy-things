@@ -11,11 +11,11 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Tool-Augmented Iteration**: Automatically calls tools for file I/O, search, bash execution, and web fetching.
 - **Safety Guards & Unsafe Reflex**: Balances explicit user approval (y/N) and experimental deterministic "unsafe reflex" mode that automatically resolves safety checkpoints.
 - **Streaming "Thinking"**: Displays the model's reasoning process in a subtle reddish tint.
-- **Open Standards**: Supports Ollama and OpenAI-compatible APIs.
+- **Open Standards**: Supports Ollama, OpenAI-compatible, and Anthropic-compatible APIs.
 
 ## Requirements
 - **Rust**: Latest stable version (Cargo).
-- **Backend**: Ollama or any OpenAI-compatible API.
+- **Backend**: Ollama, any OpenAI-compatible API, or Anthropic-compatible API.
 - **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
 
 ## Configuration
@@ -27,13 +27,40 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-u, --llm-url <URL>` | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
+| `-P, --llm-provider <PROVIDER>` | `LLM_PROVIDER` | LLM API provider (auto-detected from URL if not specified). | (auto) |
+| `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
-| `--unsafe_reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
+| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
+
+> **Note:** Command-line options always take precedence over environment variables.
+
+### LLM Provider (`LLM_PROVIDER`)
+
+Controls which provider-specific API format is used. If not set, the provider is auto-detected from the URL.
+
+- `openai` - OpenAI API format. Also covers compatible backends (e.g., Google Gemini via OpenAI wrapper, or any OpenAI-proxy). Expects a standard `/v1/chat/completions` endpoint.
+- `ollama` - Ollama API format. Uses the `/api/chat` endpoint with Ollama-specific request structure.
+- `anthropic` - Anthropic-compatible API format. Uses `x-api-key` header and Anthropic-specific message format (content blocks, `tool_use`/`tool_result`).
+
+### Tool Result Format (`TOOL_RESULT_FORMAT`)
+
+Controls how tool execution results are structured when sent back to the LLM. This applies to all tools and all providers.
+
+- `json_string` (default) - The full result JSON is serialized to a string. The LLM receives an escaped JSON string like `"{\"path\":\"...\",\"content\":\"...\"}"`.
+- `text` - Each tool result is rendered as a concise plain-text string, discarding structured metadata. Examples:
+  - `read_file` / `fetch_web` -> the content itself
+  - `execute_bash` -> stdout (and stderr if exit_code != 0)
+  - `write_file` -> `Written 1423 bytes to src/new_module.rs`
+  - `str_replace_editor` -> `Replaced 1 occurrence in src/main.rs (Perfect match.)`
+  - `grep_search` -> grep-style `path:line:text` lines
+  - `list_directory` -> `name\ttype\tsize bytes` lines
+- `json_structured` - The full result JSON is embedded as a proper JSON object, not an escaped string. Note: some providers may require tool message `content` to be a string.
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
+
 Controls how much of the LLM conversation is displayed on the terminal.
 - `0`: Silent - no conversation content is shown
 - `1`: Metadata - only summary information (content length) is displayed
@@ -42,13 +69,13 @@ Controls how much of the LLM conversation is displayed on the terminal.
 - `4`: Raw - same as Level 3, plus every raw SSE line from the response stream
 
 ### Pretty Levels (`PRETTY_LEVEL`)
+
 Controls the visual styling and decorations applied to the terminal output.
 - `0`: Plain - no colors or visual decorations
 - `1`: Standard - colored text with structured sections and separators
 
-> **Note:** Command-line options always take precedence over environment variables.
-
 ## Usage
+
 ### Default Execution (Local Ollama + gemma4:12b)
 ```bash
 cargo run

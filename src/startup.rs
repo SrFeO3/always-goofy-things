@@ -8,7 +8,8 @@ use std::env;
 use anyhow::{Result, anyhow};
 use clap::Parser;
 
-use crate::compat::{LlmProvider, ToolResultMode};
+use crate::compat_provider::LlmProvider;
+use crate::compat_resilience::ToolResultFormat;
 
 /// Max retries when the LLM returns an empty response
 pub const MAX_EMPTY_RETRY: usize = 1;
@@ -125,9 +126,9 @@ pub struct Config {
     #[arg(short = 'P', long, env = "LLM_PROVIDER", value_enum)]
     pub provider: Option<LlmProvider>,
 
-    /// Tool result mode
-    #[arg(short = 'R', long, env = "TOOL_RESULT_MODE", value_enum, default_value_t = ToolResultMode::JsonString)]
-    pub tool_result_mode: ToolResultMode,
+    /// How tool results are formatted when sent to the LLM
+    #[arg(short = 'R', long, env = "TOOL_RESULT_FORMAT", value_enum, default_value_t = ToolResultFormat::JsonString)]
+    pub tool_result_format: ToolResultFormat,
 }
 
 /// Print the startup banner and configuration summary.
@@ -156,7 +157,7 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  llm-rpm          : {}", config.llm_rpm);
     println!("  session-label    : {}", config.session_label);
     println!("  llm-provider     : {}", provider);
-    println!("  tool_result_mode : {}", config.tool_result_mode);
+    println!("  tool-result-format : {}", config.tool_result_format);
 
     Ok(current_dir)
 }
