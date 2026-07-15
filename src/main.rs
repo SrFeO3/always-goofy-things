@@ -68,6 +68,22 @@ struct Message {
     pub tool_call_decision: Option<tools::ToolRunDecision>,
 }
 
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            role: String::new(),
+            content: String::new(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            timestamp: chrono::Utc::now(),
+            model: None,
+            tool_call_decision: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ToolCall {
     #[serde(default)]
@@ -163,13 +179,7 @@ async fn main() -> Result<()> {
             - Maintain system rules at the top of the context for inference efficiency.",
             tools::ALLOW_COMMAND_LIST.join(", ")
         ),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        tool_name: None,
-        timestamp: chrono::Utc::now(),
-        model: None,
-        tool_call_decision: None,
+        ..Default::default()
     }];
     // On startup: move meaningful last_session -> previous_session if it exists
     persistence::init_session(&session_label)?;
@@ -279,13 +289,7 @@ async fn main() -> Result<()> {
             messages.push(Message {
                 role: "user".to_string(),
                 content: input.to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                tool_name: None,
-                timestamp: chrono::Utc::now(),
-                model: None,
-                tool_call_decision: None,
+                ..Default::default()
             });
             persistence::save_message(&session_label, messages.last().unwrap())?;
         }
@@ -534,13 +538,10 @@ async fn main() -> Result<()> {
                     messages.push(Message {
                         role: "tool".to_string(),
                         content: tool_result_str,
-                        reasoning_content: None,
-                        tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
                         tool_name: Some(call.function.name.clone()),
-                        timestamp: chrono::Utc::now(),
-                        model: None,
                         tool_call_decision: Some(tool_call_decision),
+                        ..Default::default()
                     });
                     persistence::save_message(&session_label, messages.last().unwrap())?;
                 }
@@ -692,14 +693,8 @@ async fn call_llm(
     }
     let mut full_message = Message {
         role: "assistant".to_string(),
-        content: String::new(),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        tool_name: None,
-        timestamp: chrono::Utc::now(),
         model: Some(model.to_string()),
-        tool_call_decision: None,
+        ..Default::default()
     };
 
     let stream = res.bytes_stream();
