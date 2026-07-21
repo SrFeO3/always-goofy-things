@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::json;
 
+use crate::attach::AttachType;
 use crate::compat_resilience::ToolResultFormat;
 use crate::{ChatRequest, Message};
 
@@ -253,13 +254,35 @@ fn attach_file_contents(
 
             // Subsequent blocks: one per attached file
             for f in &orig.attached_files {
-                blocks.push(json!({
-                    "type": "text",
-                    "text": format!(
-                        "<attached_file path=\"{}\">\n{}\n</attached_file>",
-                        f.path, f.content
-                    )
-                }));
+                match &f.attach_type {
+                    AttachType::Text => {
+                        blocks.push(json!({
+                            "type": "text",
+                            "text": format!(
+                                "<attached_file path=\"{}\">\n{}\n</attached_file>",
+                                f.path, f.content
+                            )
+                        }));
+                    }
+                    AttachType::Image { .. } => {
+                        // f.content is already a data: URL
+                        blocks.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f.content
+                            }
+                        }));
+                    }
+                    AttachType::Audio { format } => {
+                        blocks.push(json!({
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": f.content,
+                                "format": format
+                            }
+                        }));
+                    }
+                }
             }
 
             json["content"] = json!(blocks);

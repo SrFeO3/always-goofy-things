@@ -2,6 +2,7 @@
 //!
 //! Parses `@path1, @path2, ...` prefixes from the beginning of user input,
 //! validates file existence, checks sizes, and reads file contents.
+//! Non-text files (PDF, image, audio) are automatically converted.
 
 use std::path::Path;
 
@@ -10,11 +11,23 @@ use regex::Regex;
 /// Size threshold for large-file confirmation (1 MiB).
 pub const OVERLOADED_BYTES: u64 = 1_048_576;
 
+/// How an attached file should be represented in the LLM request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AttachType {
+    /// Plain text content (includes PDF-to-text).
+    Text,
+    /// Image encoded as a data URL; carries the MIME type.
+    Image { mime: String },
+    /// Audio encoded as raw Base64; carries the format name.
+    Audio { format: String },
+}
+
 /// Information about an attached file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttachedFile {
     pub path: String,
     pub content: String,
+    pub attach_type: AttachType,
 }
 
 /// Format a file size in human-readable form, e.g. `"24.3 MB (25481220 bytes)"`.
@@ -102,23 +115,76 @@ pub fn check_oversized_files(paths: &[String], max_bytes: u64) -> Vec<(String, u
         .collect()
 }
 
-/// Read the full text content of every file in `paths`.
+/// Classify a file by extension.
+pub fn classify_file(path: &str) -> AttachType {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".pdf") {
+        return AttachType::Text;
+    }
+    if lower.ends_with(".png") {
+        return AttachType::Image {
+            mime: "image/png".to_string(),
+        };
+    }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        return AttachType::Image {
+            mime: "image/jpeg".to_string(),
+        };
+    }
+    if lower.ends_with(".gif") {
+        return AttachType::Image {
+            mime: "image/gif".to_string(),
+        };
+    }
+    if lower.ends_with(".webp") {
+        return AttachType::Image {
+            mime: "image/webp".to_string(),
+        };
+    }
+    if lower.ends_with(".wav") {
+        return AttachType::Audio {
+            format: "wav".to_string(),
+        };
+    }
+    if lower.ends_with(".mp3") {
+        return AttachType::Audio {
+            format: "mp3".to_string(),
+        };
+    }
+    AttachType::Text
+}
+
+/// Read all files, converting non-text formats as needed.
 ///
-/// Returns a list of `AttachedFile` entries.
-/// Files are read in the order they were specified.
+/// Returns `AttachedFile` entries in the order specified.
 pub fn read_attached_files(paths: &[String]) -> Result<Vec<AttachedFile>, String> {
     let mut files = Vec::with_capacity(paths.len());
     for p in paths {
-        let content =
-            std::fs::read_to_string(p).map_err(|e| format!("Failed to read '{}': {}", p, e))?;
+        let attach_type = classify_file(p);
+        let content = match &attach_type {
+            AttachType::Text => {
+                if p.to_lowercase().ends_with(".pdf") {
+                    crate::nontext::extract_text_from_pdf(p)?
+                } else {
+                    std::fs::read_to_string(p)
+                        .map_err(|e| format!("Failed to read '{}': {}", p, e))?
+                }
+            }
+            AttachType::Image { .. } => crate::nontext::convert_image_to_data_url(p)?,
+            AttachType::Audio { .. } => {
+                let (_format, b64) = crate::nontext::convert_audio_to_base64(p)?;
+                b64
+            }
+        };
         files.push(AttachedFile {
             path: p.clone(),
             content,
+            attach_type,
         });
     }
     Ok(files)
 }
 
 #[cfg(test)]
-#[path = "tests/attached_file_test.rs"]
+#[path = "tests/attach_test.rs"]
 mod tests;

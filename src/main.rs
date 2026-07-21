@@ -30,10 +30,11 @@ use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-mod attached_file;
+mod attach;
 mod cmd;
 mod compat_provider;
 mod compat_resilience;
+mod nontext;
 mod persistence;
 mod pretty;
 mod reflex;
@@ -42,7 +43,7 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
-use attached_file::AttachedFile;
+use attach::AttachedFile;
 use compat_provider::{LlmProvider, convert_anth_to_openai_format};
 use compat_resilience::{ToolResultFormat, post_process_tool_calls};
 use startup::{
@@ -286,18 +287,16 @@ async fn main() -> Result<()> {
         let query_text;
         let attached_files: Vec<AttachedFile>;
         {
-            let (clean, raw_paths) = attached_file::parse_attached_files(&input);
+            let (clean, raw_paths) = attach::parse_attached_files(&input);
             if !raw_paths.is_empty() {
-                match attached_file::validate_files(&raw_paths) {
+                match attach::validate_files(&raw_paths) {
                     Ok(()) => {
                         // Check for oversized files (> 1 MiB)
-                        let oversized = attached_file::check_oversized_files(
-                            &raw_paths,
-                            attached_file::OVERLOADED_BYTES,
-                        );
+                        let oversized =
+                            attach::check_oversized_files(&raw_paths, attach::OVERLOADED_BYTES);
                         if !oversized.is_empty() {
                             for (path, size) in &oversized {
-                                let size_str = attached_file::format_file_size(*size);
+                                let size_str = attach::format_file_size(*size);
                                 println!(
                                     "{}[Warning] {} exceeds 1 MiB: {}{}",
                                     startup::C_YELLOW,
@@ -318,11 +317,10 @@ async fn main() -> Result<()> {
                         }
 
                         // All files exist - read them
-                        match attached_file::read_attached_files(&raw_paths) {
+                        match attach::read_attached_files(&raw_paths) {
                             Ok(files) => {
                                 for f in &files {
-                                    let size_str =
-                                        attached_file::format_file_size(f.content.len() as u64);
+                                    let size_str = attach::format_file_size(f.content.len() as u64);
                                     println!(
                                         "{}[Attached] {}{} ({})",
                                         startup::C_DIM_GRAY,
