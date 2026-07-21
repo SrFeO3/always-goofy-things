@@ -107,6 +107,8 @@ impl ChatRequest {
 
         let messages =
             reformat_tool_results(&raw_messages, &self.messages, self.tool_result_format);
+        // Expand user messages with attached files into content-block arrays
+        let messages = attach_file_contents(messages, &self.messages);
 
         match self.provider {
             LlmProvider::OpenAi => {
@@ -226,6 +228,44 @@ fn reformat_tool_results(
             })
             .collect(),
     }
+}
+
+/// For user messages that have attached files, expand `content` from a plain string
+/// into an array of `{ type: "text", text: "..." }` blocks.
+///
+/// The first block carries the original query text (if any), followed by one block
+/// per attached file wrapped in `<attached_file path="...">...</attached_file>`.
+fn attach_file_contents(
+    mut messages_json: Vec<serde_json::Value>,
+    originals: &[Message],
+) -> Vec<serde_json::Value> {
+    for (json, orig) in messages_json.iter_mut().zip(originals) {
+        if orig.role == "user" && !orig.attached_files.is_empty() {
+            let mut blocks = Vec::new();
+
+            // First block: the user's own query text
+            if !orig.content.is_empty() {
+                blocks.push(json!({
+                    "type": "text",
+                    "text": orig.content
+                }));
+            }
+
+            // Subsequent blocks: one per attached file
+            for f in &orig.attached_files {
+                blocks.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "<attached_file path=\"{}\">\n{}\n</attached_file>",
+                        f.path, f.content
+                    )
+                }));
+            }
+
+            json["content"] = json!(blocks);
+        }
+    }
+    messages_json
 }
 
 /// Render a tool result as a concise text string.

@@ -30,6 +30,7 @@ use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod attached_file;
 mod cmd;
 mod compat_provider;
 mod compat_resilience;
@@ -41,6 +42,7 @@ mod startup;
 mod tools;
 mod tools_fuzzy;
 
+use attached_file::AttachedFile;
 use compat_provider::{LlmProvider, convert_anth_to_openai_format};
 use compat_resilience::{ToolResultFormat, post_process_tool_calls};
 use startup::{
@@ -66,6 +68,8 @@ struct Message {
     pub model: Option<String>,
     #[serde(skip)]
     pub tool_call_decision: Option<tools::ToolRunDecision>,
+    #[serde(skip)]
+    pub attached_files: Vec<AttachedFile>,
 }
 
 impl Default for Message {
@@ -80,6 +84,7 @@ impl Default for Message {
             timestamp: chrono::Utc::now(),
             model: None,
             tool_call_decision: None,
+            attached_files: Vec::new(),
         }
     }
 }
@@ -277,18 +282,97 @@ async fn main() -> Result<()> {
             }
         }
 
+        // --- Parse @file references from the beginning of input ---
+        let query_text;
+        let attached_files: Vec<AttachedFile>;
+        {
+            let (clean, raw_paths) = attached_file::parse_attached_files(&input);
+            if !raw_paths.is_empty() {
+                match attached_file::validate_files(&raw_paths) {
+                    Ok(()) => {
+                        // Check for oversized files (> 1 MiB)
+                        let oversized = attached_file::check_oversized_files(
+                            &raw_paths,
+                            attached_file::OVERLOADED_BYTES,
+                        );
+                        if !oversized.is_empty() {
+                            for (path, size) in &oversized {
+                                let size_str = attached_file::format_file_size(*size);
+                                println!(
+                                    "{}[Warning] {} exceeds 1 MiB: {}{}",
+                                    startup::C_YELLOW,
+                                    path,
+                                    size_str,
+                                    startup::RESET
+                                );
+                            }
+                            print!("Attach these files anyway? (y/N) ");
+                            let _ = io::stdout().flush();
+                            let mut confirm = String::new();
+                            if io::stdin().read_line(&mut confirm).is_err()
+                                || !confirm.trim().eq_ignore_ascii_case("y")
+                            {
+                                // User cancelled or error - do not advance
+                                continue;
+                            }
+                        }
+
+                        // All files exist - read them
+                        match attached_file::read_attached_files(&raw_paths) {
+                            Ok(files) => {
+                                for f in &files {
+                                    let size_str =
+                                        attached_file::format_file_size(f.content.len() as u64);
+                                    println!(
+                                        "{}[Attached] {}{} ({})",
+                                        startup::C_DIM_GRAY,
+                                        f.path,
+                                        startup::RESET,
+                                        size_str
+                                    );
+                                }
+                                attached_files = files;
+                                query_text = clean;
+                            }
+                            Err(e) => {
+                                println!("{}[Error] {}{}", startup::C_RED, e, startup::RESET);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(missing) => {
+                        for p in &missing {
+                            println!(
+                                "{}[File not found] {}{}",
+                                startup::C_YELLOW,
+                                p,
+                                startup::RESET
+                            );
+                        }
+                        // Do NOT advance turn / history
+                        continue;
+                    }
+                }
+            } else {
+                query_text = input.to_string();
+                attached_files = Vec::new();
+            }
+        }
+
         // If a user message already exists for this turn (e.g. previous LLM call failed
         // and tool responses may have been added), update the existing message instead of
         // pushing a new one to avoid inflating the history turn count.
         let user_msg_count = messages.iter().filter(|m| m.role == "user").count();
         if user_msg_count >= turn as usize {
             if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
-                m.content = input.to_string();
+                m.content = query_text.clone();
+                m.attached_files = attached_files.clone();
             }
         } else {
             messages.push(Message {
                 role: "user".to_string(),
-                content: input.to_string(),
+                content: query_text,
+                attached_files,
                 ..Default::default()
             });
             persistence::save_message(&session_label, messages.last().unwrap())?;

@@ -100,9 +100,19 @@ cargo run -- -v 0 --llm-model gemma-4-31b-it
 
 ## Example User Queries
 
+### Basic Queries
+
 - "Who are you and what tools can you use?"
 - "Create a Python script named `test.py` that prints 'Hello, World!'."
 - "Find the Python script in the workspace and translate its output messages into Japanese."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
 - "Analyze the hyper documentation (https://docs.rs/hyper/latest/hyper/) and create a minimal HTTP server project in Rust."
 - "Fix this broken http server."
+
+### Attaching Files (`@`)
+
+Prepend `@file` paths at the beginning of your query to attach file contents to the LLM context. Paths are relative to the working directory. Multiple files are separated by commas. Files larger than 1 MiB prompt for confirmation before being attached.
+
+- "@src/main.rs, @Cargo.toml Explain the structure of these files."
+- "@README.md Summarize this file."
+- "@docs/guide.md Translate this document into French."
