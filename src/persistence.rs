@@ -16,6 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 
 use crate::Message;
+use crate::attach::AttachedFile;
 
 /// Project directories singleton.
 fn project_dirs() -> Option<ProjectDirs> {
@@ -90,11 +91,27 @@ pub fn init_session(label: &str) -> Result<()> {
 }
 
 /// Append a single message as one JSON line to the current session file.
+///
+/// Note: `attached_files` is `#[serde(skip)]` on `Message`, so it is injected
+/// manually here to persist paths (content is excluded to keep JSONL lean).
 pub fn save_message(label: &str, message: &Message) -> Result<()> {
     let path =
         last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
 
-    let json = serde_json::to_string(message)
+    let mut json_val = serde_json::to_value(message)
+        .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
+
+    // Inject attached_files metadata (path + attach_type only; content is #[serde(skip)])
+    if !message.attached_files.is_empty() {
+        let files: Vec<serde_json::Value> = message
+            .attached_files
+            .iter()
+            .map(|f| serde_json::to_value(f).expect("AttachedFile is serializable"))
+            .collect();
+        json_val["attached_files"] = serde_json::Value::Array(files);
+    }
+
+    let json = serde_json::to_string(&json_val)
         .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
 
     let mut file = OpenOptions::new()
@@ -129,6 +146,9 @@ pub fn restore_previous_session(label: &str) -> Result<Vec<Message>> {
 }
 
 /// Read messages from any given jsonl file path.
+///
+/// Because `attached_files` is `#[serde(skip)]` on `Message`, the raw JSON is
+/// parsed first so that attached file paths can be extracted manually.
 fn read_messages_from(path: &std::path::Path) -> Result<Vec<Message>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open session file {:?}", path))?;
@@ -143,8 +163,24 @@ fn read_messages_from(path: &std::path::Path) -> Result<Vec<Message>> {
             continue;
         }
 
-        match serde_json::from_str::<Message>(&line) {
-            Ok(msg) => messages.push(msg),
+        // Parse as raw Value first to extract attached_files before serde strips them
+        match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(val) => {
+                let mut msg: Message = serde_json::from_value(val.clone())
+                    .with_context(|| format!("Failed to parse message at line {}", idx + 1))?;
+
+                // Manually restore attached_files (skipped by #[serde(skip)] on the field)
+                if let Some(files) = val.get("attached_files").and_then(|v| v.as_array()) {
+                    for f_val in files {
+                        if let Ok(attached) = serde_json::from_value::<AttachedFile>(f_val.clone())
+                        {
+                            msg.attached_files.push(attached);
+                        }
+                    }
+                }
+
+                messages.push(msg);
+            }
             Err(e) => {
                 eprintln!(
                     "\x1b[93mWarning: Skipping malformed line {}: {} \x1b[0m",

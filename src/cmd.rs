@@ -561,6 +561,77 @@ fn handle_restore(
     messages.clear();
     messages.extend(restored);
 
+    // --- Re-read attached file contents from disk (paths-only were persisted) ---
+    {
+        use crate::attach::{self, AttachType, AttachedFile};
+        use std::path::Path;
+
+        let mut restored_paths: Vec<String> = Vec::new();
+        let mut missing_paths: Vec<String> = Vec::new();
+
+        for msg in messages.iter_mut() {
+            if msg.role != "user" || msg.attached_files.is_empty() {
+                continue;
+            }
+
+            let mut reloaded: Vec<AttachedFile> = Vec::with_capacity(msg.attached_files.len());
+
+            for f in msg.attached_files.drain(..) {
+                let path_str = f.path;
+                if Path::new(&path_str).exists() {
+                    match attach::read_attached_files(&[path_str.clone()]) {
+                        Ok(mut entries) => {
+                            if let Some(entry) = entries.pop() {
+                                reloaded.push(entry);
+                                restored_paths.push(path_str);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  \x1b[93m  Skipped '{}' (re-read failed: {})\x1b[0m",
+                                path_str, e
+                            );
+                            reloaded.push(AttachedFile {
+                                path: path_str.clone(),
+                                content: String::new(),
+                                attach_type: AttachType::Text,
+                            });
+                            missing_paths.push(path_str);
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "  \x1b[93m  Skipped '{}' (no longer exists on disk)\x1b[0m",
+                        path_str
+                    );
+                    reloaded.push(AttachedFile {
+                        path: path_str.clone(),
+                        content: String::new(),
+                        attach_type: AttachType::Text,
+                    });
+                    missing_paths.push(path_str);
+                }
+            }
+
+            msg.attached_files = reloaded;
+        }
+
+        if !restored_paths.is_empty() || !missing_paths.is_empty() {
+            for p in &restored_paths {
+                println!("  \x1b[32m  Restored '{}'\x1b[0m", p);
+            }
+            if !restored_paths.is_empty() && !missing_paths.is_empty() {
+                // blank line between groups for clarity
+                println!();
+            }
+            println!(
+                "  \x1b[32m  Attached files: {} restored, {} missing\x1b[0m",
+                restored_paths.len(),
+                missing_paths.len()
+            );
+        }
+    }
+
     // Calculate restored turns (each turn = user + assistant/tool)
     let mut restored_turns = 0i32;
     let mut i = 0;

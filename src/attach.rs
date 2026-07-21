@@ -26,6 +26,7 @@ pub enum AttachType {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttachedFile {
     pub path: String,
+    #[serde(skip)]
     pub content: String,
     pub attach_type: AttachType,
 }
