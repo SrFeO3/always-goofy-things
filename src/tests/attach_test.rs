@@ -45,6 +45,13 @@ fn test_at_in_middle_ignored() {
 }
 
 #[test]
+fn test_single_file_multiline_query() {
+    let (query, paths) = parse_attached_files("@file.txt hello\nworld\nthird line");
+    assert_eq!(query, "hello\nworld\nthird line");
+    assert_eq!(paths, vec!["file.txt"]);
+}
+
+#[test]
 fn test_spaces_around_commas() {
     let (query, paths) = parse_attached_files("@a.txt , @b.txt  , @c.txt   query");
     assert_eq!(query, "query");

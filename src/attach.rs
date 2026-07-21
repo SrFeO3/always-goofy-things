@@ -61,8 +61,9 @@ pub fn parse_attached_files(input: &str) -> (String, Vec<String>) {
 
     // Pattern: `@path1, @path2` followed optionally by query text.
     // Group1 = the entire file-list segment, Group2 = the rest (query).
-    let re =
-        Regex::new(r"^((?:@[^,\s]+\s*,\s*)*@[^,\s]+)\s*(.*)").expect("invalid attached-file regex");
+    // Use [\\s\\S]* to match across newlines (multi-line query after @file).
+    let re = Regex::new(r"^((?:@[^,\s]+\s*,\s*)*@[^,\s]+)\s*([\s\S]*)")
+        .expect("invalid attached-file regex");
 
     if let Some(caps) = re.captures(trimmed) {
         let files_part = caps.get(1).unwrap().as_str();
@@ -75,7 +76,7 @@ pub fn parse_attached_files(input: &str) -> (String, Vec<String>) {
 
         (rest.to_string(), paths)
     } else {
-        // Input starts with '@' but doesn't match – treat as normal query.
+        // Input starts with '@' but doesn't match - treat as normal query.
         (input.to_string(), vec![])
     }
 }

@@ -13,8 +13,8 @@ use pdf_oxide::converters::ConversionOptions;
 
 /// Extract text content from a PDF file.
 ///
-/// Returns text page by page with `--- Page N ---` separators,
-/// preserving reading order, multi-column layouts, and CJK text.
+/// Returns Markdown per page with `--- converted-for-llm sheet N ---` separators,
+/// preserving reading order, multi-column layouts, table structures, and CJK text.
 pub fn extract_text_from_pdf(path: &str) -> Result<String, String> {
     let doc =
         PdfDocument::open(path).map_err(|e| format!("Failed to open PDF '{}': {}", path, e))?;
@@ -28,7 +28,7 @@ pub fn extract_text_from_pdf(path: &str) -> Result<String, String> {
         }
         let _ = result.push_str(&format!("--- converted-for-llm sheet {} ---\n", i + 1));
 
-        match doc.to_plain_text(i, &ConversionOptions::default()) {
+        match doc.to_markdown(i, &ConversionOptions::default()) {
             Ok(text) => {
                 if !text.is_empty() {
                     result.push_str(&text);

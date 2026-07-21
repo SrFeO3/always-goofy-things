@@ -288,8 +288,9 @@ fn print_help() {
 
 /// Handle `/rewind <turn>`.
 ///
-/// Returns the `target` turn number on success so the caller can reset
-/// the turn counter. Returns an error on invalid input or user cancellation.
+/// Finds the turn boundary by counting user messages (each user message
+/// starts a new turn), truncates messages from that point, and returns
+/// the `target` turn number so the caller can reset the turn counter.
 fn handle_rewind(
     arg: Option<&str>,
     messages: &mut Vec<crate::Message>,
@@ -302,8 +303,8 @@ fn handle_rewind(
         None => return Err(anyhow!("Usage: /rewind <turn>\nExample: /rewind 1")),
     };
 
-    if target < 0 {
-        return Err(anyhow!("Turn number must be >= 0"));
+    if target < 1 {
+        return Err(anyhow!("Turn number must be >= 1"));
     }
     if target >= current_turn {
         return Err(anyhow!(
@@ -312,44 +313,56 @@ fn handle_rewind(
         ));
     }
 
-    // Calculate how many messages to keep.
-    // Index 0 = system message.
-    // Each completed turn adds 2 messages (user + assistant).
-    // So messages up to end of turn `target` = 1 + 2 * target
-    let keep_count = 1 + (target as usize) * 2;
+    // Calculate truncation point by finding where turn `target+1` starts.
+    // Messages: [system(0), t1_user, t1_asst..., t2_user, t2_asst..., ...]
+    // system(0) is skipped. User messages delimit each turn.
+    // Find the (target+1)-th user message; everything from that index is discarded.
+    let truncate_at = {
+        let mut user_count = 0i32;
+        messages.iter().position(|msg| {
+            if msg.role == "user" {
+                user_count += 1;
+                user_count == target + 1
+            } else {
+                false
+            }
+        })
+    };
 
     let discarded_start = target + 1;
-    let discarded_end = current_turn;
+    let discarded_end = current_turn - 1;
 
-    // Warn the user (matches spec)
-    println!(
-        "\x1b[91m⚠️  ARNING: This will discard conversation turns {}-{}.\x1b[0m",
-        discarded_start, discarded_end
-    );
-    println!(
-        "\x1b[93m   Note that any local file changes made during these turns CANNOT be undone.\x1b[0m"
-    );
-    print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
-    io::stdout().flush().context("Failed to flush stdout")?;
+    // Warn the user only if there are actually turns to discard
+    if discarded_start <= discarded_end {
+        println!(
+            "\x1b[91m⚠️  ARNING: This will discard conversation turns {}-{}.\x1b[0m",
+            discarded_start, discarded_end
+        );
+        println!(
+            "\x1b[93m   Note that any local file changes made during these turns CANNOT be undone.\x1b[0m"
+        );
+        print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
+        io::stdout().flush().context("Failed to flush stdout")?;
 
-    let mut confirm = String::new();
-    io::stdin()
-        .read_line(&mut confirm)
-        .context("Failed to read confirmation")?;
-    if !confirm.trim().eq_ignore_ascii_case("y") {
-        println!("\x1b[93mCancelled.\x1b[0m");
-        return Err(anyhow!("User cancelled the rewind"));
+        let mut confirm = String::new();
+        io::stdin()
+            .read_line(&mut confirm)
+            .context("Failed to read confirmation")?;
+        if !confirm.trim().eq_ignore_ascii_case("y") {
+            println!("\x1b[93mCancelled.\x1b[0m");
+            return Err(anyhow!("User cancelled the rewind"));
+        }
     }
 
-    // Truncate messages to keep only up to the target turn
-    if keep_count < messages.len() {
-        messages.truncate(keep_count);
+    // Truncate at the start of turn `target+1` if it exists
+    if let Some(pos) = truncate_at {
+        messages.truncate(pos);
     }
 
     println!(
         "\x1b[32m⏮ Rewound to Turn {}. Ready for your next input (Turn {}).\x1b[0m",
         target,
-        (target + 1)
+        target + 1
     );
 
     Ok(target)

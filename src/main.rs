@@ -246,7 +246,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 cmd::SlashCmdResult::RewoundTo(target) => {
-                    // Reset turn counter to target + 1 (next turn after rewound point)
+                    // Reset turn counter to target + 1 (next turn after rewind point)
                     turn = target + 1;
                     // Reset last_sent_count to match the new message count
                     last_sent_count = messages.len();
@@ -482,14 +482,21 @@ async fn main() -> Result<()> {
                 total_in_cached += cached as u64;
                 total_out += usage.completion_tokens as u64;
 
+                fn fmt_tokens(n: u32) -> String {
+                    if n >= 1000 {
+                        format!("{:.1}K ({})", n as f64 / 1000.0, n)
+                    } else {
+                        n.to_string()
+                    }
+                }
                 println!(
                     "\x1b[90m[Tokens] Turn: In {}, Cache {}, Out {} | Total: In {}, Cache {}, Out {}\x1b[0m",
-                    normal,
-                    cached,
-                    usage.completion_tokens,
-                    total_in_normal + total_in_cached,
-                    total_in_cached,
-                    total_out
+                    fmt_tokens(normal),
+                    fmt_tokens(cached),
+                    fmt_tokens(usage.completion_tokens),
+                    fmt_tokens((total_in_normal + total_in_cached) as u32),
+                    fmt_tokens(total_in_cached as u32),
+                    fmt_tokens(total_out as u32)
                 );
                 println!();
             }
