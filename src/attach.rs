@@ -164,7 +164,9 @@ pub fn read_attached_files(paths: &[String]) -> Result<Vec<AttachedFile>, String
         let content = match &attach_type {
             AttachType::Text => {
                 if p.to_lowercase().ends_with(".pdf") {
-                    crate::nontext::extract_text_from_pdf(p)?
+                    let text = crate::nontext::extract_text_from_pdf(p)?;
+                    let _ = crate::nontext::save_converted_text(p, &text);
+                    text
                 } else {
                     std::fs::read_to_string(p)
                         .map_err(|e| format!("Failed to read '{}': {}", p, e))?

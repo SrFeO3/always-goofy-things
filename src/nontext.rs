@@ -3,6 +3,7 @@
 //! Converts PDF, image, and audio files into text or Base64
 //! representations suitable for LLM API content blocks.
 
+use std::path::Path;
 use std::sync::LazyLock;
 
 use base64::Engine as _;
@@ -125,4 +126,41 @@ fn detect_audio_format(path: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Saving converted text to disk (PDF only)
+// ---------------------------------------------------------------------------
+
+/// Save extracted PDF text alongside the original file.
+///
+/// The output file is named `{orig}_converted_for_llm.txt`.
+/// If that name is taken, appends `_1`, `_2`, etc.
+/// Save extracted PDF text alongside the original file.
+///
+/// The output file is named `{orig}_converted_for_llm.txt`.
+/// If that name is taken, appends `_1`, `_2`, etc. before `.txt`.
+pub fn save_converted_text(orig_path: &str, text: &str) -> Result<String, String> {
+    let base = format!("{}_converted_for_llm.txt", orig_path);
+
+    let path = if Path::new(&base).exists() {
+        let stem = format!("{}_converted_for_llm_", orig_path);
+        (1..)
+            .map(|n| format!("{}{}.txt", stem, n))
+            .find(|p| !Path::new(p).exists())
+            .unwrap()
+    } else {
+        base
+    };
+
+    std::fs::write(&path, text).map_err(|e| format!("Failed to write '{}': {}", path, e))?;
+
+    println!(
+        "{}[Saved] Converted text written to {}{}",
+        crate::startup::C_DIM_GRAY,
+        path,
+        crate::startup::RESET
+    );
+
+    Ok(path)
 }
