@@ -1,6 +1,6 @@
 [package]
 name = "always-goofy-things"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 
 [dependencies]
@@ -10,7 +10,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 directories = "6.0"
 futures-util = "0.3"
-pdfium-render = "0.9"
+pdf_oxide = "0.3"
 regex = "1.12"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 rustyline = "18.0"

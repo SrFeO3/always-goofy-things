@@ -3,53 +3,33 @@
 //! Converts PDF, image, and audio files into text or Base64
 //! representations suitable for LLM API content blocks.
 
-use std::path::Path;
-use std::sync::LazyLock;
-
 use base64::Engine as _;
-use pdfium_render::prelude::*;
+use pdf_oxide::PdfDocument;
+use pdf_oxide::converters::ConversionOptions;
 
 // ---------------------------------------------------------------------------
-// PDF → text (via Pdfium)
+// PDF -> text (via pdf_oxide)
 // ---------------------------------------------------------------------------
-
-static PDFIUM: LazyLock<Result<Pdfium, String>> = LazyLock::new(|| {
-    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            format!(
-                "Cannot load Pdfium library: {}. \
-                 Download libpdfium from https://github.com/bblanchon/pdfium-binaries/releases \
-                 and place it in the same directory as the executable, or install it system-wide.",
-                e
-            )
-        })?;
-    Ok(Pdfium::new(bindings))
-});
 
 /// Extract text content from a PDF file.
 ///
 /// Returns text page by page with `--- Page N ---` separators,
 /// preserving reading order, multi-column layouts, and CJK text.
 pub fn extract_text_from_pdf(path: &str) -> Result<String, String> {
-    let pdfium = PDFIUM
-        .as_ref()
-        .map_err(|e| format!("Pdfium error: {}", e))?;
+    let doc =
+        PdfDocument::open(path).map_err(|e| format!("Failed to open PDF '{}': {}", path, e))?;
 
-    let document = pdfium
-        .load_pdf_from_file(path, None)
-        .map_err(|e| format!("Failed to load PDF '{}': {}", path, e))?;
+    let page_count = doc.page_count().map_err(|e| format!("{}", e))?;
 
     let mut result = String::new();
-    for (i, page) in document.pages().iter().enumerate() {
+    for i in 0..page_count {
         if i > 0 {
             result.push('\n');
         }
-        let _ = result.push_str(&format!("--- Page {} ---\n", i + 1));
+        let _ = result.push_str(&format!("--- converted-for-llm sheet {} ---\n", i + 1));
 
-        match page.text() {
-            Ok(page_text) => {
-                let text = page_text.to_string();
+        match doc.to_plain_text(i, &ConversionOptions::default()) {
+            Ok(text) => {
                 if !text.is_empty() {
                     result.push_str(&text);
                     if !text.ends_with('\n') {
@@ -135,12 +115,10 @@ fn detect_audio_format(path: &str) -> Option<&'static str> {
 /// Save extracted PDF text alongside the original file.
 ///
 /// The output file is named `{orig}_converted_for_llm.txt`.
-/// If that name is taken, appends `_1`, `_2`, etc.
-/// Save extracted PDF text alongside the original file.
-///
-/// The output file is named `{orig}_converted_for_llm.txt`.
 /// If that name is taken, appends `_1`, `_2`, etc. before `.txt`.
 pub fn save_converted_text(orig_path: &str, text: &str) -> Result<String, String> {
+    use std::path::Path;
+
     let base = format!("{}_converted_for_llm.txt", orig_path);
 
     let path = if Path::new(&base).exists() {

@@ -392,6 +392,7 @@ async fn main() -> Result<()> {
                 }
             }
             last_llm_call = Some(std::time::Instant::now());
+            let llm_start = std::time::Instant::now();
 
             let llm_future = call_llm(
                 Some(provider),
@@ -453,6 +454,21 @@ async fn main() -> Result<()> {
             messages.push(assistant_msg.clone());
             let _ = persistence::save_message(&session_label, &assistant_msg);
             last_sent_count = messages.len();
+
+            // Display timing (not in silent mode)
+            let elapsed = llm_start.elapsed();
+            if verbose_level > 0 {
+                let secs = elapsed.as_secs_f64();
+                if secs >= 60.0 {
+                    println!(
+                        "\x1b[90m[Time] {:.0}m {:.1}s\x1b[0m",
+                        secs / 60.0,
+                        secs % 60.0
+                    );
+                } else {
+                    println!("\x1b[90m[Time] {:.1}s\x1b[0m", secs);
+                }
+            }
 
             // Accumulate and display statistics for each LLM call
             if let Some(usage) = usage_opt {

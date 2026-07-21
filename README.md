@@ -114,7 +114,7 @@ cargo run -- -v 0 --llm-model gemma-4-31b-it
 Prepend `@file` paths at the beginning of your query to attach file contents to the LLM context. Paths are relative to the working directory. Multiple files are separated by commas. Files larger than 1 MiB prompt for confirmation before being attached.
 
 Non-text files are automatically converted:
-- **PDF** (`.pdf`) - text extracted page by page via Pdfium; saved to `{file}_converted_for_llm.txt`
+- **PDF** (`.pdf`) - text extracted page by page via pdf_oxide; saved to `{file}_converted_for_llm.txt`
 - **Image** (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) - Base64 data URL
 - **Audio** (`.wav`, `.mp3`) - raw Base64
 
