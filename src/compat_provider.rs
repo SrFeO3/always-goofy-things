@@ -3,7 +3,7 @@
 //! Handles provider-specific request payload formatting and protocol translation.
 //! This module manages URL-based provider detection, request DTO definitions, wire-format conversions
 //! (including Anthropic's streaming SSE), and tool-definition translation. It also formats message contents,
-//! such as tool result rendering, to match each provider's expected request structure.
+//! such as tool result rendering, to match each provider's expected protocol format.
 
 use std::fmt;
 
@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::attach::AttachType;
 use crate::compat_resilience::ToolResultFormat;
-use crate::{ChatRequest, Message};
+use crate::{ChatRequest, Message, Usage};
 
 /// LLM API provider type
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, clap::ValueEnum)]
@@ -524,6 +524,64 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Parse and accumulate usage/token information from a single SSE stream event.
+///
+/// This is the central aggregation point for token accounting across all providers.
+/// It handles three wire formats transparently:
+///
+/// | Provider   | Wire format                                              |
+/// |-----------|----------------------------------------------------------|
+/// | OpenAI    | `{ usage: { prompt_tokens, completion_tokens, ... } }`   |
+/// | Anthropic | Pre-converted by [`convert_anth_to_openai_format`]       |
+/// | Ollama    | `{ done: true, prompt_eval_count, eval_count }`          |
+///
+/// Because Anthropic splits input and output tokens across separate SSE events
+/// (`message_start` and `message_delta`), this function **accumulates** into
+/// `current` rather than replacing it.
+pub(crate) fn accumulate_usage(json: &serde_json::Value, current: &mut Option<Usage>) {
+    if let Some(usage_val) = json.get("usage") {
+        if let Ok(u) = serde_json::from_value::<Usage>(usage_val.clone()) {
+            if let Some(existing) = current.as_mut() {
+                // Accumulate tokens to handle Anthropic split usage events
+                existing.prompt_tokens += u.prompt_tokens;
+                existing.completion_tokens += u.completion_tokens;
+                // Preserve prompt_tokens_details from the first non-empty details
+                if u.prompt_tokens_details.as_ref().is_some_and(|d| {
+                    d.cached_tokens > 0 || d.cache_creation_tokens > 0 || d.audio_tokens > 0
+                }) {
+                    if existing.prompt_tokens_details.is_none() {
+                        existing.prompt_tokens_details = u.prompt_tokens_details;
+                    }
+                }
+                // Accumulate completion_tokens_details (reasoning tokens from OpenAI o1/o3)
+                if let Some(ref details) = u.completion_tokens_details {
+                    if let Some(existing_details) = existing.completion_tokens_details.as_mut() {
+                        existing_details.reasoning_tokens += details.reasoning_tokens;
+                    } else {
+                        existing.completion_tokens_details = Some(details.clone());
+                    }
+                }
+            } else {
+                *current = Some(u);
+            }
+        }
+    } else if json.get("done") == Some(&serde_json::Value::Bool(true)) {
+        // Map Ollama native stats to Usage struct
+        let p = json
+            .get("prompt_eval_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let c = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if p > 0 || c > 0 {
+            *current = Some(Usage {
+                prompt_tokens: p,
+                completion_tokens: c,
+                ..Default::default()
+            });
+        }
+    }
+}
+
 /// Converts Anthropic stream events into an OpenAI-compatible JSON format
 /// for the existing agent pipeline.
 pub fn convert_anth_to_openai_format(
@@ -596,18 +654,37 @@ pub fn convert_anth_to_openai_format(
     }
     // 5. message_start / message_delta -> usage
     else if anth.get("type") == Some(&json!("message_start")) {
-        if let Some(input_tokens) = anth
-            .get("message")
-            .and_then(|m| m.get("usage"))
-            .and_then(|u| u.get("input_tokens"))
-        {
+        if let Some(usage) = anth.get("message").and_then(|m| m.get("usage")) {
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_create = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             return json!({
-                "usage": { "prompt_tokens": input_tokens, "completion_tokens": 0 }
+                "usage": {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": 0,
+                    "prompt_tokens_details": {
+                        "cached_tokens": cache_read,
+                        "cache_creation_tokens": cache_create
+                    }
+                }
             });
         }
     } else if anth.get("type") == Some(&json!("message_delta"))
-        && let Some(output_tokens) = anth.get("usage").and_then(|u| u.get("output_tokens"))
+        && let Some(usage) = anth.get("usage")
     {
+        let output_tokens = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         return json!({
             "usage": { "prompt_tokens": 0, "completion_tokens": output_tokens }
         });

@@ -126,12 +126,28 @@ struct Usage {
     completion_tokens: u32,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
+    /// Anthropic: tokens written to cache this request (billed at full price, cached for future reads)
+    #[serde(default)]
+    cache_creation_tokens: u32,
+    /// OpenAI: audio input tokens (GPT-4o-audio-preview, billed differently)
+    #[serde(default)]
+    audio_tokens: u32,
+}
+
+/// Breakdown of completion/output tokens (OpenAI reasoning models, Anthropic extended thinking).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct CompletionTokensDetails {
+    /// OpenAI o1/o3/o4-mini: internal reasoning tokens (billed at a higher rate)
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[tokio::main]
@@ -147,6 +163,8 @@ async fn main() -> Result<()> {
     let mut total_in_normal = 0u64;
     let mut total_in_cached = 0u64;
     let mut total_out = 0u64;
+    let mut total_reasoning = 0u64;
+    let mut cache_ever_reported = false;
 
     let mut query_reader = DefaultEditor::new()?;
 
@@ -471,33 +489,71 @@ async fn main() -> Result<()> {
             }
 
             // Accumulate and display statistics for each LLM call
-            if let Some(usage) = usage_opt {
-                let cached = usage
-                    .prompt_tokens_details
-                    .as_ref()
-                    .map(|d| d.cached_tokens)
-                    .unwrap_or(0);
-                let normal = usage.prompt_tokens.saturating_sub(cached);
+            fn fmt_tokens(n: u32) -> String {
+                format!("{:.1}K ({})", n as f64 / 1000.0, n)
+            }
+
+            if let Some(usage) = &usage_opt {
+                // --- Input tokens: normal + cached ---
+                let (normal, cache_turn_str) = if let Some(details) = &usage.prompt_tokens_details {
+                    cache_ever_reported = true;
+                    let c = details.cached_tokens;
+                    total_in_cached += c as u64;
+                    (usage.prompt_tokens.saturating_sub(c), fmt_tokens(c))
+                } else {
+                    (usage.prompt_tokens, "---".to_string())
+                };
                 total_in_normal += normal as u64;
-                total_in_cached += cached as u64;
                 total_out += usage.completion_tokens as u64;
 
-                fn fmt_tokens(n: u32) -> String {
-                    if n >= 1000 {
-                        format!("{:.1}K ({})", n as f64 / 1000.0, n)
-                    } else {
-                        n.to_string()
-                    }
-                }
-                println!(
-                    "\x1b[90m[Tokens] Turn: In {}, Cache {}, Out {} | Total: In {}, Cache {}, Out {}\x1b[0m",
+                // --- Output tokens: reasoning breakdown (OpenAI o1/o3/o4-mini) ---
+                let reasoning = usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .map(|d| d.reasoning_tokens)
+                    .unwrap_or(0);
+                total_reasoning += reasoning as u64;
+
+                // Build display line
+                let cache_total_str = if cache_ever_reported {
+                    fmt_tokens(total_in_cached as u32)
+                } else {
+                    "---".to_string()
+                };
+
+                // Turn portion
+                let mut turn_part = format!(
+                    "In {}, Cache {}, Out {}",
                     fmt_tokens(normal),
-                    fmt_tokens(cached),
+                    cache_turn_str,
                     fmt_tokens(usage.completion_tokens),
-                    fmt_tokens((total_in_normal + total_in_cached) as u32),
-                    fmt_tokens(total_in_cached as u32),
-                    fmt_tokens(total_out as u32)
                 );
+                if reasoning > 0 {
+                    turn_part.push_str(&format!(" (Reasoning {})", fmt_tokens(reasoning)));
+                }
+
+                // Total portion
+                let mut total_part = format!(
+                    "In {}, Cache {}, Out {}",
+                    fmt_tokens((total_in_normal + total_in_cached) as u32),
+                    cache_total_str,
+                    fmt_tokens(total_out as u32),
+                );
+                if total_reasoning > 0 {
+                    total_part.push_str(&format!(
+                        " (Reasoning {})",
+                        fmt_tokens(total_reasoning as u32)
+                    ));
+                }
+
+                println!(
+                    "\x1b[90m[Tokens] Turn: {} | Total: {}\x1b[0m",
+                    turn_part, total_part
+                );
+                println!();
+            } else {
+                // No usage info captured - notify user
+                println!("\x1b[90m[Tokens] (token info not available for this response)\x1b[0m");
                 println!();
             }
 
@@ -849,40 +905,7 @@ async fn call_llm(
                 }
 
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
-                if let Some(usage_val) = json.get("usage") {
-                    if let Ok(u) = serde_json::from_value::<Usage>(usage_val.clone()) {
-                        if let Some(ref mut existing) = usage_captured {
-                            // Accumulate tokens to handle Anthropic split usage events
-                            existing.prompt_tokens += u.prompt_tokens;
-                            existing.completion_tokens += u.completion_tokens;
-                            // Preserve prompt_tokens_details from the first non-zero prompt_tokens_details
-                            if u.prompt_tokens_details
-                                .as_ref()
-                                .is_some_and(|d| d.cached_tokens > 0)
-                            {
-                                if existing.prompt_tokens_details.is_none() {
-                                    existing.prompt_tokens_details = u.prompt_tokens_details;
-                                }
-                            }
-                        } else {
-                            usage_captured = Some(u);
-                        }
-                    }
-                } else if json.get("done") == Some(&serde_json::Value::Bool(true)) {
-                    // Map Ollama native stats to Usage struct
-                    let p = json
-                        .get("prompt_eval_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
-                    let c = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    if p > 0 || c > 0 {
-                        usage_captured = Some(Usage {
-                            prompt_tokens: p,
-                            completion_tokens: c,
-                            prompt_tokens_details: None,
-                        });
-                    }
-                }
+                compat_provider::accumulate_usage(&json, &mut usage_captured);
 
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
                 let msg_base = if let Some(message) = json.get("message") {
