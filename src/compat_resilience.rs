@@ -220,3 +220,81 @@ pub fn post_process_tool_calls(
         true
     });
 }
+
+/// Extract the per-event message base from a parsed SSE payload,
+/// supporting OpenAI (`choices[0].delta`) and Ollama native (`message`)
+/// shapes. Anthropic events are pre-converted to OpenAI format by the
+/// caller.
+pub fn extract_msg_base(json: &Value) -> &Value {
+    if let Some(message) = json.get("message") {
+        message // Ollama native
+    } else if let Some(choices) = json.get("choices") {
+        choices
+            .get(0)
+            .and_then(|c| c.get("delta"))
+            .unwrap_or(&Value::Null) // OpenAI delta
+    } else {
+        &Value::Null
+    }
+}
+
+/// Merge an array of streaming `tool_calls` deltas into the assembled vector.
+///
+/// `default_index` is used when a delta lacks an explicit `index` field.
+/// `with_thought_signature=false` skips the `thought_signature` field
+/// (preserving the trailing-buffer drain's historical behavior).
+pub fn merge_tool_call_delta(
+    tool_calls: &mut Vec<crate::ToolCall>,
+    calls: &[Value],
+    default_index: usize,
+    with_thought_signature: bool,
+) {
+    for call_json in calls {
+        let index = call_json
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_index as u64) as usize;
+
+        while tool_calls.len() <= index {
+            tool_calls.push(crate::ToolCall {
+                id: String::new(),
+                tool_type: "function".to_string(),
+                function: crate::FunctionCall {
+                    name: String::new(),
+                    arguments: serde_json::Value::String(String::new()),
+                },
+                thought_signature: None,
+            });
+        }
+
+        let target = &mut tool_calls[index];
+        if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
+            target.id.push_str(id);
+        }
+        if with_thought_signature
+            && let Some(sig) = call_json.get("thought_signature").and_then(|v| v.as_str())
+        {
+            target.thought_signature = Some(sig.to_string());
+        }
+        if let Some(func) = call_json.get("function") {
+            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                target.function.name.push_str(name);
+            }
+            if let Some(args) = func.get("arguments") {
+                match args {
+                    serde_json::Value::String(s) => {
+                        // Stream delta: append to existing string
+                        if let Some(existing) = target.function.arguments.as_str() {
+                            target.function.arguments =
+                                serde_json::Value::String(format!("{}{}", existing, s));
+                        }
+                    }
+                    _ => {
+                        // Full object: replace (common in some local providers)
+                        target.function.arguments = args.clone();
+                    }
+                }
+            }
+        }
+    }
+}

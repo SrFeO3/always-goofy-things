@@ -45,7 +45,9 @@ mod tools_fuzzy;
 
 use attach::AttachedFile;
 use compat_provider::{LlmProvider, convert_anth_to_openai_format};
-use compat_resilience::{ToolResultFormat, post_process_tool_calls};
+use compat_resilience::{
+    ToolResultFormat, extract_msg_base, merge_tool_call_delta, post_process_tool_calls,
+};
 use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 
@@ -784,7 +786,7 @@ async fn call_llm(
                 req_json.len()
             );
         }
-    }
+    };
 
     println!(
         "... Waiting for response from {} (Ctrl+C to interrupt) ...",
@@ -930,16 +932,7 @@ async fn call_llm(
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
 
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
-                let msg_base = if let Some(message) = json.get("message") {
-                    message // Ollama native
-                } else if let Some(choices) = json.get("choices") {
-                    choices
-                        .get(0)
-                        .and_then(|c| c.get("delta"))
-                        .unwrap_or(&serde_json::Value::Null) // OpenAI delta
-                } else {
-                    &serde_json::Value::Null
-                };
+                let msg_base = extract_msg_base(&json);
 
                 // 0.5 Verbose 3: Display raw SSE line for tool_call deltas
                 if verbose_level == 3 {
@@ -993,54 +986,8 @@ async fn call_llm(
 
                 // 3. Process Tool Calls
                 if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
-                    for call_json in calls {
-                        let index =
-                            call_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-                        let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
-                        while tool_calls.len() <= index {
-                            tool_calls.push(ToolCall {
-                                id: String::new(),
-                                tool_type: "function".to_string(),
-                                function: FunctionCall {
-                                    name: String::new(),
-                                    arguments: serde_json::Value::String(String::new()),
-                                },
-                                thought_signature: None,
-                            });
-                        }
-
-                        let target = &mut tool_calls[index];
-                        if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
-                            target.id.push_str(id);
-                        }
-                        if let Some(sig) =
-                            call_json.get("thought_signature").and_then(|v| v.as_str())
-                        {
-                            target.thought_signature = Some(sig.to_string());
-                        }
-                        if let Some(func) = call_json.get("function") {
-                            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                target.function.name.push_str(name);
-                            }
-                            if let Some(args) = func.get("arguments") {
-                                match args {
-                                    serde_json::Value::String(s) => {
-                                        // Stream delta: append to existing string
-                                        if let Some(existing) = target.function.arguments.as_str() {
-                                            target.function.arguments = serde_json::Value::String(
-                                                format!("{}{}", existing, s),
-                                            );
-                                        }
-                                    }
-                                    _ => {
-                                        // Full object: replace (common in some local providers)
-                                        target.function.arguments = args.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
+                    merge_tool_call_delta(tool_calls, calls, 0, true);
                 }
             } else if verbose_level >= 2 {
                 match serde_json::from_str::<serde_json::Value>(payload) {
@@ -1074,16 +1021,7 @@ async fn call_llm(
                         compat_resilience::normalize_tool_call_format(&mut json);
                     compat_provider::accumulate_usage(&json, &mut usage_captured);
 
-                    let msg_base = if let Some(message) = json.get("message") {
-                        message
-                    } else if let Some(choices) = json.get("choices") {
-                        choices
-                            .get(0)
-                            .and_then(|c| c.get("delta"))
-                            .unwrap_or(&serde_json::Value::Null)
-                    } else {
-                        &serde_json::Value::Null
-                    };
+                    let msg_base = extract_msg_base(&json);
 
                     if let Some(reasoning) = msg_base
                         .get("reasoning_content")
@@ -1100,49 +1038,8 @@ async fn call_llm(
                     }
                     if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
                         let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
-                        for call_json in calls {
-                            let index = call_json
-                                .get("index")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(tool_calls.len() as u64)
-                                as usize;
-                            while tool_calls.len() <= index {
-                                tool_calls.push(ToolCall {
-                                    id: String::new(),
-                                    tool_type: "function".to_string(),
-                                    function: FunctionCall {
-                                        name: String::new(),
-                                        arguments: serde_json::Value::String(String::new()),
-                                    },
-                                    thought_signature: None,
-                                });
-                            }
-                            let target = &mut tool_calls[index];
-                            if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
-                                target.id.push_str(id);
-                            }
-                            if let Some(func) = call_json.get("function") {
-                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                    target.function.name.push_str(name);
-                                }
-                                if let Some(args) = func.get("arguments") {
-                                    match args {
-                                        serde_json::Value::String(s) => {
-                                            if let Some(existing) =
-                                                target.function.arguments.as_str()
-                                            {
-                                                target.function.arguments =
-                                                    serde_json::Value::String(format!(
-                                                        "{}{}",
-                                                        existing, s
-                                                    ));
-                                            }
-                                        }
-                                        _ => target.function.arguments = args.clone(),
-                                    }
-                                }
-                            }
-                        }
+                        let default_index = tool_calls.len();
+                        merge_tool_call_delta(tool_calls, calls, default_index, false);
                     }
                 }
             }
