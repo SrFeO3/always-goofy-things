@@ -25,13 +25,15 @@ Configuration can be set via environment variables or command-line flags (flags 
 | :--- | :--- | :--- | :--- |
 | `-w, --working-dir <DIR>` | `WORKING_DIR` | Directory where AI tools operate. | `.` |
 | `-u, --llm-url <URL>` | `LLM_URL` | Endpoint for the Chat API. | `http://localhost:11434/api/chat` |
+| `-P, --llm-provider <PROVIDER>` | `LLM_PROVIDER` | LLM API provider (auto-detected from URL if not specified). | (auto) |
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | The LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
-| `-P, --llm-provider <PROVIDER>` | `LLM_PROVIDER` | LLM API provider (auto-detected from URL if not specified). | (auto) |
+| `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
+| `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
+| `-E, --max-empty-retry <NUM>` | `MAX_EMPTY_RETRY` | Max retries when the LLM returns an empty response. | `1` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
-| `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
 
@@ -88,7 +90,9 @@ cargo run -- \
     --llm-url "http://localhost:11434/v1/chat/completions" \
     --llm-model "gemma4:12b" \
     --verbose-level 2 \
-    --pretty-level 1
+    --pretty-level 1 \
+    --max-output-tokens 4096 \
+    --max-empty-retry 3
 ```
 
 ### Mixed Usage (Environment variables + short CLI flags, caution with cloud AI billing)

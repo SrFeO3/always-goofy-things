@@ -33,6 +33,8 @@ pub enum SlashCmdResult {
         verbose_level: u8,
         pretty_level: u8,
         llm_rpm: u32,
+        max_output_tokens: u32,
+        max_empty_retry: u32,
     },
     /// Session was restored. Reset turn counter to this value.
     RestoredTo { turn: i32, label: String },
@@ -52,6 +54,8 @@ pub fn try_handle_slash_command(
     verbose_level: &mut u8,
     pretty_level: &mut u8,
     llm_rpm: &mut u32,
+    max_output_tokens: &mut u32,
+    max_empty_retry: &mut u32,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -81,11 +85,20 @@ pub fn try_handle_slash_command(
             let new_model = handle_model(arg, current_model);
             Some(SlashCmdResult::ModelChanged(new_model))
         }
-        "/config" => match handle_config(arg, verbose_level, pretty_level, llm_rpm) {
+        "/config" => match handle_config(
+            arg,
+            verbose_level,
+            pretty_level,
+            llm_rpm,
+            max_output_tokens,
+            max_empty_retry,
+        ) {
             Ok(changed) => Some(SlashCmdResult::ConfigChanged {
                 verbose_level: changed.verbose_level,
                 pretty_level: changed.pretty_level,
                 llm_rpm: changed.llm_rpm,
+                max_output_tokens: changed.max_output_tokens,
+                max_empty_retry: changed.max_empty_retry,
             }),
             Err(e) => {
                 eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
@@ -145,6 +158,8 @@ pub struct ConfigSnapshot {
     pub verbose_level: u8,
     pub pretty_level: u8,
     pub llm_rpm: u32,
+    pub max_output_tokens: u32,
+    pub max_empty_retry: u32,
 }
 
 /// Parse `key value` from arg. E.g. "v 2" -> Some(("v", "2")).
@@ -168,32 +183,42 @@ fn handle_config(
     verbose_level: &mut u8,
     pretty_level: &mut u8,
     llm_rpm: &mut u32,
+    max_output_tokens: &mut u32,
+    max_empty_retry: &mut u32,
 ) -> Result<ConfigSnapshot> {
     let arg_str = arg.unwrap_or("").trim();
 
     // No argument — list all config values
     if arg_str.is_empty() {
         println!("  \x1b[1mCurrent configuration:\x1b[0m");
-        println!("    verbose-level   : {}", verbose_level);
-        println!("    pretty-level    : {}", pretty_level);
-        println!("    llm-rpm         : {}", llm_rpm);
+        println!("    verbose-level     : {}", verbose_level);
+        println!("    pretty-level      : {}", pretty_level);
+        println!("    llm-rpm           : {}", llm_rpm);
+        println!("    max-output-tokens : {}", max_output_tokens);
+        println!("    max-empty-retry   : {}", max_empty_retry);
         return Ok(ConfigSnapshot {
             verbose_level: *verbose_level,
             pretty_level: *pretty_level,
             llm_rpm: *llm_rpm,
+            max_output_tokens: *max_output_tokens,
+            max_empty_retry: *max_empty_retry,
         });
     }
 
     // `-s` or `--short`: show short aliases
     if arg_str == "-s" || arg_str == "--short" {
         println!("  \x1b[1mConfig aliases:\x1b[0m (use these with /config)");
-        println!("    \x1b[36mv\x1b[0m           - verbose-level (0-4)");
-        println!("    \x1b[36mp\x1b[0m           - pretty-level  (0-2)");
-        println!("    \x1b[36mr\x1b[0m           - llm-rpm       (0 = unlimited)");
+        println!("    \x1b[36mv\x1b[0m   - verbose-level     (0-4)");
+        println!("    \x1b[36mp\x1b[0m   - pretty-level       (0-2)");
+        println!("    \x1b[36mr\x1b[0m   - llm-rpm            (0 = unlimited)");
+        println!("    \x1b[36mt\x1b[0m   - max-output-tokens  (default: 16384)");
+        println!("    \x1b[36me\x1b[0m   - max-empty-retry    (default: 1)");
         return Ok(ConfigSnapshot {
             verbose_level: *verbose_level,
             pretty_level: *pretty_level,
             llm_rpm: *llm_rpm,
+            max_output_tokens: *max_output_tokens,
+            max_empty_retry: *max_empty_retry,
         });
     }
 
@@ -232,6 +257,27 @@ fn handle_config(
             })?;
             *llm_rpm = val;
         }
+        "t" | "max-output-tokens" | "max_output_tokens" | "output-tokens" => {
+            let val: u32 = kv.1.parse().map_err(|_| {
+                anyhow!(
+                    "Invalid value for max-output-tokens: '{}'. Must be a positive integer.",
+                    kv.1
+                )
+            })?;
+            if val == 0 {
+                return Err(anyhow!("max-output-tokens must be > 0, got {}", val));
+            }
+            *max_output_tokens = val;
+        }
+        "e" | "max-empty-retry" | "max_empty_retry" | "empty-retry" => {
+            let val: u32 = kv.1.parse().map_err(|_| {
+                anyhow!(
+                    "Invalid value for max-empty-retry: '{}'. Must be a non-negative integer.",
+                    kv.1
+                )
+            })?;
+            *max_empty_retry = val;
+        }
         _ => {
             return Err(anyhow!(
                 "Unknown config key '{}'. Use /config -s for a list of keys.",
@@ -246,6 +292,8 @@ fn handle_config(
         verbose_level: *verbose_level,
         pretty_level: *pretty_level,
         llm_rpm: *llm_rpm,
+        max_output_tokens: *max_output_tokens,
+        max_empty_retry: *max_empty_retry,
     })
 }
 
@@ -275,6 +323,8 @@ fn print_help() {
    \x1b[90m/config v 3   - Set verbose-level to 3\x1b[0m
    \x1b[90m/config p 2   - Set pretty-level to 2\x1b[0m
    \x1b[90m/config r 30  - Set llm-rpm to 30\x1b[0m
+   \x1b[90m/config t 4096 - Set max-output-tokens to 4096\x1b[0m
+   \x1b[90m/config e 3   - Set max-empty-retry to 3\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
    \x1b[90m/restore      - Restore the latest session for current label\x1b[0m

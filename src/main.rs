@@ -46,9 +46,7 @@ mod tools_fuzzy;
 use attach::AttachedFile;
 use compat_provider::{LlmProvider, convert_anth_to_openai_format};
 use compat_resilience::{ToolResultFormat, post_process_tool_calls};
-use startup::{
-    C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, MAX_OUTPUT_TOKENS, RESET,
-};
+use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -176,6 +174,8 @@ async fn main() -> Result<()> {
     let mut verbose_level = config.verbose_level;
     let mut pretty_level = config.pretty_level;
     let mut llm_rpm = config.llm_rpm;
+    let mut max_output_tokens = config.max_output_tokens;
+    let mut max_empty_retry = config.max_empty_retry;
 
     println!(
         "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
@@ -257,6 +257,8 @@ async fn main() -> Result<()> {
             &mut verbose_level,
             &mut pretty_level,
             &mut llm_rpm,
+            &mut max_output_tokens,
+            &mut max_empty_retry,
         ) {
             match result {
                 cmd::SlashCmdResult::NoAdvance => {
@@ -279,11 +281,15 @@ async fn main() -> Result<()> {
                     verbose_level: vl,
                     pretty_level: pl,
                     llm_rpm: rpm,
+                    max_output_tokens: mot,
+                    max_empty_retry: mer,
                 } => {
                     // Switch config values for subsequent LLM calls
                     verbose_level = vl;
                     pretty_level = pl;
                     llm_rpm = rpm;
+                    max_output_tokens = mot;
+                    max_empty_retry = mer;
                     continue;
                 }
                 cmd::SlashCmdResult::RestoredTo {
@@ -421,6 +427,7 @@ async fn main() -> Result<()> {
                 verbose_level,
                 last_sent_count,
                 config.tool_result_format,
+                max_output_tokens,
             );
             let ctrl_c_future = tokio::signal::ctrl_c();
 
@@ -450,7 +457,7 @@ async fn main() -> Result<()> {
             let has_tools = assistant_msg.tool_calls.is_some();
             if !has_content && !has_tools {
                 empty_retry_count += 1;
-                if empty_retry_count > startup::MAX_EMPTY_RETRY {
+                if empty_retry_count > max_empty_retry as usize {
                     println!(
                         "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
                         llm_model, empty_retry_count
@@ -724,6 +731,7 @@ async fn call_llm(
     verbose_level: startup::Verbosity,
     last_msg_count: usize,
     tool_result_format: ToolResultFormat,
+    max_output_tokens: u32,
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
     let tools = tools::get_tool_definitions();
@@ -732,7 +740,7 @@ async fn call_llm(
     let req = ChatRequest {
         provider: provider.unwrap(),
         model: model.to_string(),
-        max_output_tokens: MAX_OUTPUT_TOKENS,
+        max_output_tokens: max_output_tokens as usize,
         messages: messages_vec,
         stream: true,
         tools,

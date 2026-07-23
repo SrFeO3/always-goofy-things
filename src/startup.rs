@@ -11,12 +11,6 @@ use clap::Parser;
 use crate::compat_provider::LlmProvider;
 use crate::compat_resilience::ToolResultFormat;
 
-/// Max retries when the LLM returns an empty response
-pub const MAX_EMPTY_RETRY: usize = 1;
-
-/// Maximum output tokens
-pub const MAX_OUTPUT_TOKENS: usize = 2048;
-
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
 pub const APP_BIN_NAME: &str = "always-goofy-things";
@@ -118,6 +112,14 @@ pub struct Config {
     #[arg(short = 'r', long, env = "LLM_RPM", default_value_t = 0)]
     pub llm_rpm: u32,
 
+    /// Maximum output tokens per LLM request
+    #[arg(short = 'T', long, env = "MAX_OUTPUT_TOKENS", default_value_t = 16384)]
+    pub max_output_tokens: u32,
+
+    /// Max retries when the LLM returns an empty response
+    #[arg(short = 'E', long, env = "MAX_EMPTY_RETRY", default_value_t = 1)]
+    pub max_empty_retry: u32,
+
     /// Session label for persistence (suffix for session files)
     #[arg(short = 's', long, env = "SESSION_LABEL", default_value = "default")]
     pub session_label: String,
@@ -144,20 +146,22 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         APP_DESCRIPTION
     );
     println!("CONFIGURATION:");
-    println!("  working-dir      : {}", current_dir.display());
-    println!("  unsafe-reflex    : {}", config.unsafe_reflex);
-    println!("  llm-url          : {}", config.llm_url);
-    println!("  llm-model        : {}", config.llm_model);
+    println!("  working-dir        : {}", current_dir.display());
+    println!("  unsafe-reflex      : {}", config.unsafe_reflex);
+    println!("  llm-url            : {}", config.llm_url);
+    println!("  llm-provider       : {}", provider);
+    println!("  llm-model          : {}", config.llm_model);
     println!(
-        "  llm-api-key      : {}",
+        "  llm-api-key        : {}",
         config.llm_api_key.as_ref().map_or("(none)", |_| "(set)")
     );
-    println!("  verbose-level    : {}", config.verbose_level);
-    println!("  pretty-level     : {}", config.pretty_level);
-    println!("  llm-rpm          : {}", config.llm_rpm);
-    println!("  session-label    : {}", config.session_label);
-    println!("  llm-provider     : {}", provider);
     println!("  tool-result-format : {}", config.tool_result_format);
+    println!("  llm-rpm            : {}", config.llm_rpm);
+    println!("  verbose-level      : {}", config.verbose_level);
+    println!("  pretty-level       : {}", config.pretty_level);
+    println!("  max-output-tokens  : {}", config.max_output_tokens);
+    println!("  max-empty-retry    : {}", config.max_empty_retry);
+    println!("  session-label      : {}", config.session_label);
 
     Ok(current_dir)
 }
