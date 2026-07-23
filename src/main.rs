@@ -871,13 +871,30 @@ async fn call_llm(
     let mut anth_tool_index = 0;
     let mut used_nonstandard_format = false;
 
+    // Buffer raw bytes because chunk boundaries may split multi-byte
+    // UTF-8 characters. We only decode to str once a complete line
+    // (terminated by \n, which is always a safe UTF-8 boundary) is available.
+    let mut line_buf: Vec<u8> = Vec::new();
+
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
-        let text = std::str::from_utf8(&chunk)?;
+        line_buf.extend_from_slice(&chunk);
 
-        // Ollama/OpenAI stream can send multiple JSON objects in one chunk separated by newlines
-        for line in text.lines() {
-            let mut line = line.trim();
+        // Drain complete lines (ending with \n) from the buffer.
+        // Partial lines are kept in line_buf for the next chunk.
+        while let Some(nl) = line_buf.iter().position(|&b| b == b'\n') {
+            let line_bytes = &line_buf[..nl];
+            let line = match std::str::from_utf8(line_bytes) {
+                Ok(s) => s.trim().to_string(),
+                Err(e) => {
+                    if verbose_level >= 2 {
+                        println!("\x1b[93m[SSE UTF-8 Error] Skipping line: {}\x1b[0m", e);
+                    }
+                    line_buf.drain(..=nl);
+                    continue;
+                }
+            };
+            line_buf.drain(..=nl);
             if line.is_empty() {
                 continue;
             }
@@ -887,15 +904,16 @@ async fn call_llm(
                 continue;
             }
 
-            // Handle OpenAI-compatible SSE prefix
-            if line.starts_with("data: ") {
-                line = &line[6..];
+            let mut payload = line.as_str();
+            // Handle OpenAI-compatible SSE prefix (with or without space after colon)
+            if let Some(rest) = payload.strip_prefix("data:") {
+                payload = rest.trim_start();
             }
-            if line == "[DONE]" {
+            if payload == "[DONE]" {
                 break;
             }
 
-            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload) {
                 // Convert Anthropic payload to OpenAI-compatible format
                 if provider == Some(LlmProvider::Anthropic) {
                     json = convert_anth_to_openai_format(json, &mut anth_tool_index);
@@ -905,7 +923,7 @@ async fn call_llm(
 
                 // 0. Verbose 4: Display all raw SSE lines
                 if verbose_level >= 4 {
-                    println!("\x1b[90m[SSE] {}\x1b[0m", line);
+                    println!("\x1b[90m[SSE] {}\x1b[0m", payload);
                 }
 
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
@@ -930,7 +948,7 @@ async fn call_llm(
                         .and_then(|v| v.as_array())
                         .is_some_and(|a| !a.is_empty());
                     if has_tool_calls {
-                        println!("\x1b[90m[TOOL RAW] {}\x1b[0m", line);
+                        println!("\x1b[90m[TOOL RAW] {}\x1b[0m", payload);
                     }
                 }
 
@@ -1025,13 +1043,107 @@ async fn call_llm(
                     }
                 }
             } else if verbose_level >= 2 {
-                match serde_json::from_str::<serde_json::Value>(line) {
+                match serde_json::from_str::<serde_json::Value>(payload) {
                     Err(e) => println!(
                         "\x1b[93m[SSE Parse Warning] Skipping unparseable line: {} ({})\x1b[0m",
-                        line.chars().take(120).collect::<String>(),
+                        payload.chars().take(120).collect::<String>(),
                         e
                     ),
                     _ => {}
+                }
+            }
+        }
+    }
+
+    // Drain any remaining data in the buffer (the final line may lack a trailing \n).
+    // This is a defensive edge case: standard SSE always terminates lines with \n,
+    // but non-conforming servers or truncated streams could leave trailing data.
+    let remainder = std::str::from_utf8(&line_buf).unwrap_or("").trim();
+    if !remainder.is_empty() {
+        let mut payload = remainder;
+        if !payload.starts_with("event:") {
+            if let Some(rest) = payload.strip_prefix("data:") {
+                payload = rest.trim_start();
+            }
+            if payload != "[DONE]" {
+                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    if provider == Some(LlmProvider::Anthropic) {
+                        json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                    }
+                    used_nonstandard_format |=
+                        compat_resilience::normalize_tool_call_format(&mut json);
+                    compat_provider::accumulate_usage(&json, &mut usage_captured);
+
+                    let msg_base = if let Some(message) = json.get("message") {
+                        message
+                    } else if let Some(choices) = json.get("choices") {
+                        choices
+                            .get(0)
+                            .and_then(|c| c.get("delta"))
+                            .unwrap_or(&serde_json::Value::Null)
+                    } else {
+                        &serde_json::Value::Null
+                    };
+
+                    if let Some(reasoning) = msg_base
+                        .get("reasoning_content")
+                        .or_else(|| msg_base.get("reasoning"))
+                        .and_then(|v| v.as_str())
+                    {
+                        full_message
+                            .reasoning_content
+                            .get_or_insert_with(String::new)
+                            .push_str(reasoning);
+                    }
+                    if let Some(content) = msg_base.get("content").and_then(|v| v.as_str()) {
+                        full_message.content.push_str(content);
+                    }
+                    if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {
+                        let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
+                        for call_json in calls {
+                            let index = call_json
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(tool_calls.len() as u64)
+                                as usize;
+                            while tool_calls.len() <= index {
+                                tool_calls.push(ToolCall {
+                                    id: String::new(),
+                                    tool_type: "function".to_string(),
+                                    function: FunctionCall {
+                                        name: String::new(),
+                                        arguments: serde_json::Value::String(String::new()),
+                                    },
+                                    thought_signature: None,
+                                });
+                            }
+                            let target = &mut tool_calls[index];
+                            if let Some(id) = call_json.get("id").and_then(|v| v.as_str()) {
+                                target.id.push_str(id);
+                            }
+                            if let Some(func) = call_json.get("function") {
+                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                    target.function.name.push_str(name);
+                                }
+                                if let Some(args) = func.get("arguments") {
+                                    match args {
+                                        serde_json::Value::String(s) => {
+                                            if let Some(existing) =
+                                                target.function.arguments.as_str()
+                                            {
+                                                target.function.arguments =
+                                                    serde_json::Value::String(format!(
+                                                        "{}{}",
+                                                        existing, s
+                                                    ));
+                                            }
+                                        }
+                                        _ => target.function.arguments = args.clone(),
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
