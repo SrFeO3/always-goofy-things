@@ -444,15 +444,11 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Guard: retry if the assistant returned an empty response (no content, no tools, no reasoning)
+            // Guard: retry if the assistant returned no content and no tool calls
+            // (even if it produced reasoning/thinking without follow-through)
             let has_content = !assistant_msg.content.trim().is_empty();
             let has_tools = assistant_msg.tool_calls.is_some();
-            let has_reasoning = assistant_msg
-                .reasoning_content
-                .as_ref()
-                .map(|r| !r.trim().is_empty())
-                .unwrap_or(false);
-            if !has_content && !has_tools && !has_reasoning {
+            if !has_content && !has_tools {
                 empty_retry_count += 1;
                 if empty_retry_count > startup::MAX_EMPTY_RETRY {
                     println!(
@@ -1019,6 +1015,15 @@ async fn call_llm(
                             }
                         }
                     }
+                }
+            } else if verbose_level >= 2 {
+                match serde_json::from_str::<serde_json::Value>(line) {
+                    Err(e) => println!(
+                        "\x1b[93m[SSE Parse Warning] Skipping unparseable line: {} ({})\x1b[0m",
+                        line.chars().take(120).collect::<String>(),
+                        e
+                    ),
+                    _ => {}
                 }
             }
         }
