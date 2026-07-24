@@ -113,15 +113,24 @@ cargo run -- -v 0 --llm-model gemma-4-31b-it
 - "Analyze the hyper documentation (https://docs.rs/hyper/latest/hyper/) and create a minimal HTTP server project in Rust."
 - "Fix this broken http server."
 
-### Attaching Files (`@`)
+### Attaching Files (`@`) and Text Extraction (`@@`)
 
-Prepend `@file` paths at the beginning of your query to attach file contents to the LLM context. Paths are relative to the working directory. Multiple files are separated by commas. Files larger than 1 MiB prompt for confirmation before being attached.
+Prepend `@file` paths to send files as-is, or `@@file` to force text extraction (useful for PDFs on providers without native document support). Paths are relative to the working directory. Multiple files are separated by commas. Files larger than 1 MiB prompt for confirmation.
 
-Non-text files are automatically converted:
-- **PDF** (`.pdf`) - text extracted page by page via pdf_oxide; saved to `{file}_converted_for_llm.txt`
-- **Image** (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) - Base64 data URL
-- **Audio** (`.wav`, `.mp3`) - raw Base64
+| Prefix | Behaviour |
+|--------|-----------|
+| `@` | Send as-is: text -> UTF-8, images -> data URL, audio -> base64, **PDF -> base64 (native document)** |
+| `@@` | Force text extraction: **PDF -> Markdown** via pdf_oxide; saved to `{file}_converted_for_llm.txt`. Other files read as UTF-8. |
+
+PDF raw (`@`) support by provider:
+- Anthropic only.
+- OpenAI, Ollama: not supported (stripped with warning).
+
+Images (`@`): supported on all providers.
+
+Use `@@` for PDF text extraction on any provider.
 
 - "@src/main.rs, @Cargo.toml Explain the structure of these files."
 - "@README.md Summarize this file."
-- "@guide.pdf Verify the integrity and consistency of this document." (creates `guide.pdf_converted_for_llm.txt`)
+- "@diagram.png Describe this image."
+- "@@spec.pdf Verify the integrity of this document." (extracts text via pdf_oxide)

@@ -504,7 +504,7 @@ fn test_full_skip_blank_replace() {
     let path = get_temp_path("full_skip_blank_replace");
     let path_str = path.to_str().unwrap();
     fs::write(&path, "fn hello() {\n    foo();\n}\n").unwrap();
-    // old has extra blank line (file doesn't) — Stage 4 (full_fuzzy) fails
+    // old has extra blank line (file doesn't) - Stage 4 (full_fuzzy) fails
     // because `\n\n` are literal in its pattern; Stage 3.5 or 4.5 should catch it.
     let res = execute_str_replace(&json!({
         "path": path_str,
@@ -573,7 +573,7 @@ fn test_skip_blank_stage_order() {
     // Stage 3.5 should be attempted BEFORE Stage 4 (full_fuzzy).
     // If Stage 3.5 is skipped (empty pattern), it should fall through.
     //
-    // Case: no blank lines → tab_skip_blank pattern is non-empty
+    // Case: no blank lines -> tab_skip_blank pattern is non-empty
     //       (just joins lines with the connector which tolerates blanks),
     //       but Stage 3 (tab) should match first for simpler content.
     let path = get_temp_path("skip_blank_order");
@@ -598,7 +598,7 @@ fn test_skip_blank_stage_order() {
 
 #[test]
 fn test_skip_blank_empty_old_string() {
-    // old_string with only blank lines → pattern is empty → not compiled
+    // old_string with only blank lines -> pattern is empty -> not compiled
     // Should fall through to NO_MATCH
     let path = get_temp_path("skip_blank_empty");
     let path_str = path.to_str().unwrap();

@@ -90,7 +90,7 @@ fn test_tab_fuzzy_tab_vs_spaces_in_indent() {
 
 #[test]
 fn test_tab_skip_blank_old_has_blank_file_lacks() {
-    // old has an extra blank line, file doesn't → should match
+    // old has an extra blank line, file doesn't -> should match
     let pattern = build_tab_skip_blank_pattern("foo\n\nbar");
     let re = regex::Regex::new(&pattern).unwrap();
     assert!(
@@ -101,7 +101,7 @@ fn test_tab_skip_blank_old_has_blank_file_lacks() {
 
 #[test]
 fn test_tab_skip_blank_old_lacks_blank_file_has() {
-    // old has no blank line, file has one → should match
+    // old has no blank line, file has one -> should match
     let pattern = build_tab_skip_blank_pattern("foo\nbar");
     let re = regex::Regex::new(&pattern).unwrap();
     assert!(
@@ -112,7 +112,7 @@ fn test_tab_skip_blank_old_lacks_blank_file_has() {
 
 #[test]
 fn test_tab_skip_blank_space_only_line() {
-    // old has space-only blank line, file has none → should match
+    // old has space-only blank line, file has none -> should match
     let pattern = build_tab_skip_blank_pattern("foo\n  \nbar");
     let re = regex::Regex::new(&pattern).unwrap();
     assert!(
@@ -127,7 +127,7 @@ fn test_tab_skip_blank_space_only_line() {
 
 #[test]
 fn test_tab_skip_blank_tab_only_line() {
-    // old has tab-only blank line, file has none → should match
+    // old has tab-only blank line, file has none -> should match
     let pattern = build_tab_skip_blank_pattern("foo\n\t\nbar");
     let re = regex::Regex::new(&pattern).unwrap();
     assert!(
@@ -176,7 +176,7 @@ fn test_tab_skip_blank_leading_trailing_blank_lines() {
 
 #[test]
 fn test_tab_skip_blank_single_line_no_effect() {
-    // Single non-blank line → should still match normally
+    // Single non-blank line -> should still match normally
     let pattern = build_tab_skip_blank_pattern("foo");
     let re = regex::Regex::new(&pattern).unwrap();
     assert!(re.is_match("foo"), "Stage 3.5: single line should match");
@@ -188,7 +188,7 @@ fn test_tab_skip_blank_single_line_no_effect() {
 
 #[test]
 fn test_tab_skip_blank_only_blank_lines() {
-    // Only blank lines → empty pattern (regex will fail to compile)
+    // Only blank lines -> empty pattern (regex will fail to compile)
     let pattern = build_tab_skip_blank_pattern("\n  \n\t\n");
     assert!(
         pattern.is_empty(),

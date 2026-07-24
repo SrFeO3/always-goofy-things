@@ -664,7 +664,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         }
     }
 
-    // All fallbacks were exhausted — old_string truly isn't in file.
+    // All fallbacks were exhausted - old_string truly isn't in file.
     Err(anyhow!(
         "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / tab-blank-skip / full-fuzzy / full-blank-skip stages",
         path,

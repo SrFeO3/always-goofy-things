@@ -83,7 +83,7 @@ pub fn init_session(label: &str) -> Result<()> {
         // Create fresh empty last_session
         std::fs::File::create(&last_path)?;
     } else {
-        // Just truncate — only system message or empty
+        // Just truncate - only system message or empty
         std::fs::write(&last_path, "")?;
     }
 

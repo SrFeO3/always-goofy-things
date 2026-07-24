@@ -113,6 +113,7 @@ impl ChatRequest {
 
         match self.provider {
             LlmProvider::OpenAi => {
+                let messages = strip_unsupported_documents(messages, "OpenAI");
                 let dto = OpenAiRequestDto {
                     model: self.model.clone(),
                     max_completion_tokens: self.max_output_tokens,
@@ -131,6 +132,7 @@ impl ChatRequest {
             }
 
             LlmProvider::Ollama => {
+                let messages = extract_images_for_ollama(messages);
                 let dto = OllamaRequestDto {
                     model: self.model.clone(),
                     messages,
@@ -282,11 +284,119 @@ fn attach_file_contents(
                             }
                         }));
                     }
+                    AttachType::Document { mime } => {
+                        // f.content is already raw Base64
+                        blocks.push(json!({
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": f.content
+                            }
+                        }));
+                    }
                 }
             }
 
             json["content"] = json!(blocks);
         }
+    }
+    messages_json
+}
+
+/// Convert OpenAI-format content blocks into Ollama's native `/api/chat` format.
+///
+/// Extracts Base64 data from `image_url` blocks into a top-level `images` array
+/// and collapses all text blocks into a plain content string. `document` blocks
+/// are skipped with a warning (Ollama does not support PDF natively).
+fn extract_images_for_ollama(mut messages_json: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    for msg in &mut messages_json {
+        if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        let mut images: Vec<String> = Vec::new();
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut has_unsupported = false;
+
+        for block in blocks {
+            if block.get("type").and_then(|v| v.as_str()) == Some("image_url")
+                && let Some(url) = block
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                && let Some((_media_type, data)) = crate::nontext::parse_data_url(url)
+            {
+                images.push(data.to_string());
+            } else if block.get("type").and_then(|v| v.as_str()) == Some("document") {
+                // Ollama does not support document blocks; skip with warning
+                has_unsupported = true;
+            } else if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                text_parts.push(text.to_string());
+            }
+        }
+
+        if has_unsupported {
+            eprintln!(
+                "{}[Warning] Ollama does not support PDF/document attachments. \
+                 Use @@file for text extraction instead.{} ",
+                crate::startup::C_YELLOW,
+                crate::startup::RESET
+            );
+        }
+
+        if !images.is_empty() {
+            msg["images"] = json!(images);
+        }
+        // Collapse text blocks to a plain string for Ollama's native API.
+        msg["content"] = json!(text_parts.join("\n"));
+    }
+    messages_json
+}
+
+/// Strip `document` content blocks from user messages for providers that
+/// lack native PDF support. Prints a warning for each document block removed.
+fn strip_unsupported_documents(
+    mut messages_json: Vec<serde_json::Value>,
+    provider_name: &str,
+) -> Vec<serde_json::Value> {
+    for msg in &mut messages_json {
+        if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        let mut filtered: Vec<serde_json::Value> = blocks
+            .iter()
+            .filter(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("document") {
+                    eprintln!(
+                        "{}[Warning] {} does not support PDF/document attachments. \
+                         Use @@file for text extraction instead.{} ",
+                        crate::startup::C_YELLOW,
+                        provider_name,
+                        crate::startup::RESET
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        // If all blocks were stripped, insert a fallback text block so the
+        // API doesn't receive an empty content array (which it may reject).
+        if filtered.is_empty() {
+            filtered.push(json!({"type": "text", "text": ""}));
+        }
+
+        msg["content"] = json!(filtered);
     }
     messages_json
 }
@@ -429,7 +539,7 @@ fn convert_tools_to_anthropic(tools: &[serde_json::Value]) -> Vec<serde_json::Va
 fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-    // 1. role: "tool" messages (Tool result: Application → LLM)
+    // 1. role: "tool" messages (Tool result: Application -> LLM)
     //    OpenAI/Ollama: { role: "tool", tool_call_id: "...", content: "..." }
     //    Anthropic:     { role: "user", content: [{ type: "tool_result", tool_use_id: "...", content: "..." }] }
     if role == "tool" {
@@ -449,7 +559,7 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
             ]
         })
     }
-    // 2. role: "assistant" messages that contain tool_calls or reasoning_content (Assistant response: LLM → Application → LLM)
+    // 2. role: "assistant" messages that contain tool_calls or reasoning_content (Assistant response: LLM -> Application -> LLM)
     //    OpenAI/Ollama: { role: "assistant", content: "...", tool_calls: [...], reasoning_content: "..." }
     //    Anthropic:     { role: "assistant", content: [
     //        { type: "thinking", thinking: "..." },
@@ -515,6 +625,39 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
             json!({
                 "role": "assistant",
                 "content": content_blocks
+            })
+        } else {
+            msg.clone()
+        }
+    } else if role == "user" {
+        // User messages may have content as an array (when attachments are present).
+        // Convert OpenAI-format image_url blocks to Anthropic image source blocks.
+        if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
+            let converted: Vec<serde_json::Value> = blocks
+                .iter()
+                .map(|block| {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("image_url")
+                        && let Some(url) = block
+                            .get("image_url")
+                            .and_then(|v| v.get("url"))
+                            .and_then(|v| v.as_str())
+                        && let Some((media_type, data)) = crate::nontext::parse_data_url(url)
+                    {
+                        return json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data
+                            }
+                        });
+                    }
+                    block.clone()
+                })
+                .collect();
+            json!({
+                "role": "user",
+                "content": converted
             })
         } else {
             msg.clone()
@@ -692,3 +835,7 @@ pub fn convert_anth_to_openai_format(
 
     json!({})
 }
+
+#[cfg(test)]
+#[path = "tests/compat_provider_test.rs"]
+mod tests;

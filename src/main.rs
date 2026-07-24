@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
         let query_text;
         let attached_files: Vec<AttachedFile>;
         {
-            let (clean, raw_paths) = attach::parse_attached_files(&input);
+            let (clean, raw_paths, parse_mode) = attach::parse_attached_files(&input);
             if !raw_paths.is_empty() {
                 match attach::validate_files(&raw_paths) {
                     Ok(()) => {
@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
                         }
 
                         // All files exist - read them
-                        match attach::read_attached_files(&raw_paths) {
+                        match attach::read_attached_files(&raw_paths, parse_mode) {
                             Ok(files) => {
                                 for f in &files {
                                     let size_str = attach::format_file_size(f.content.len() as u64);

@@ -46,7 +46,7 @@ pub fn extract_text_from_pdf(path: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Image → data URL (Base64)
+// Image -> data URL (Base64)
 // ---------------------------------------------------------------------------
 
 /// Convert an image file to a `data:` URL string.
@@ -80,7 +80,7 @@ fn detect_image_mime(path: &str) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Audio → raw Base64
+// Audio -> raw Base64
 // ---------------------------------------------------------------------------
 
 /// Convert an audio file to a raw Base64 string (no prefix).
@@ -106,6 +106,18 @@ fn detect_audio_format(path: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Data URL parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a `data:<mime>;base64,<data>` URL into its media-type and Base64 payload.
+pub fn parse_data_url(url: &str) -> Option<(&str, &str)> {
+    let stripped = url.strip_prefix("data:")?;
+    let (mime_and_enc, data) = stripped.split_once(',')?;
+    let mime = mime_and_enc.strip_suffix(";base64")?;
+    Some((mime, data))
 }
 
 // ---------------------------------------------------------------------------
@@ -142,3 +154,7 @@ pub fn save_converted_text(orig_path: &str, text: &str) -> Result<String, String
 
     Ok(path)
 }
+
+#[cfg(test)]
+#[path = "tests/nontext_test.rs"]
+mod tests;

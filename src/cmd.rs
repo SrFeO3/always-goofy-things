@@ -24,7 +24,7 @@ use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLO
 pub enum SlashCmdResult {
     /// Command requires no turn change (e.g. /help), just re-prompt.
     NoAdvance,
-    /// Rewind succeeded — reset the turn counter to this value.
+    /// Rewind succeeded - reset the turn counter to this value.
     RewoundTo(i32),
     /// Model was switched to the new name.
     ModelChanged(String),
@@ -43,8 +43,8 @@ pub enum SlashCmdResult {
 /// Check if the input starts with a slash command, and handle it if so.
 ///
 /// Returns:
-/// - `Some(SlashCmdResult)` — slash command was found and handled.
-/// - `None` — NOT a slash command; let the caller process it as a normal message.
+/// - `Some(SlashCmdResult)` - slash command was found and handled.
+/// - `None` - NOT a slash command; let the caller process it as a normal message.
 pub fn try_handle_slash_command(
     input: &str,
     messages: &mut Vec<crate::Message>,
@@ -137,7 +137,7 @@ fn handle_model(arg: Option<&str>, current_model: &str) -> String {
     match arg {
         Some(name) if !name.is_empty() => {
             println!(
-                "\x1b[32m✓ Switched model: {} → {}\x1b[0m",
+                "\x1b[32m✓ Switched model: {} -> {}\x1b[0m",
                 current_model, name
             );
             name.to_string()
@@ -188,7 +188,7 @@ fn handle_config(
 ) -> Result<ConfigSnapshot> {
     let arg_str = arg.unwrap_or("").trim();
 
-    // No argument — list all config values
+    // No argument - list all config values
     if arg_str.is_empty() {
         println!("  \x1b[1mCurrent configuration:\x1b[0m");
         println!("    verbose-level     : {}", verbose_level);
@@ -629,7 +629,8 @@ fn handle_restore(
             for f in msg.attached_files.drain(..) {
                 let path_str = f.path;
                 if Path::new(&path_str).exists() {
-                    match attach::read_attached_files(&[path_str.clone()]) {
+                    match attach::read_attached_files(&[path_str.clone()], attach::AttachMode::Raw)
+                    {
                         Ok(mut entries) => {
                             if let Some(entry) = entries.pop() {
                                 reloaded.push(entry);

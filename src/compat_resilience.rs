@@ -72,7 +72,7 @@ fn infer_tool_name_from_args(
             } else if all_params.contains(key) {
                 score += 1;
             } else {
-                score -= 3; // Unknown key → strongly penalize
+                score -= 3; // Unknown key -> strongly penalize
             }
         }
 
@@ -207,11 +207,11 @@ pub fn post_process_tool_calls(
     // Second pass: remove tool calls that still have empty function.name
     // or have unparseable arguments JSON (completely broken tool calls)
     tool_calls.retain(|tc| {
-        // Guard: empty function.name → unrecoverable
+        // Guard: empty function.name -> unrecoverable
         if tc.function.name.is_empty() {
             return false;
         }
-        // Guard: unparseable arguments JSON → also unrecoverable
+        // Guard: unparseable arguments JSON -> also unrecoverable
         if let serde_json::Value::String(s) = &tc.function.arguments
             && serde_json::from_str::<serde_json::Value>(s).is_err()
         {
