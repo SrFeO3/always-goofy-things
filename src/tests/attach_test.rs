@@ -1,4 +1,5 @@
 use super::*;
+use crate::file::{FileType, classify_file};
 
 #[test]
 fn test_no_at_prefix() {
@@ -105,7 +106,7 @@ fn test_classify_pdf_is_document() {
     let t = classify_file("spec.pdf");
     assert_eq!(
         t,
-        AttachType::Document {
+        FileType::Document {
             mime: "application/pdf".to_string()
         }
     );
@@ -116,7 +117,7 @@ fn test_classify_png_is_image() {
     let t = classify_file("photo.png");
     assert_eq!(
         t,
-        AttachType::Image {
+        FileType::Image {
             mime: "image/png".to_string()
         }
     );
@@ -125,5 +126,5 @@ fn test_classify_png_is_image() {
 #[test]
 fn test_classify_txt_is_text() {
     let t = classify_file("readme.txt");
-    assert_eq!(t, AttachType::Text);
+    assert_eq!(t, FileType::Text);
 }

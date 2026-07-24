@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::json;
 
-use crate::attach::AttachType;
 use crate::compat_resilience::ToolResultFormat;
+use crate::file::FileType;
 use crate::{ChatRequest, Message, Usage};
 
 /// LLM API provider type
@@ -257,7 +257,7 @@ fn attach_file_contents(
             // Subsequent blocks: one per attached file
             for f in &orig.attached_files {
                 match &f.attach_type {
-                    AttachType::Text => {
+                    FileType::Text => {
                         blocks.push(json!({
                             "type": "text",
                             "text": format!(
@@ -266,7 +266,7 @@ fn attach_file_contents(
                             )
                         }));
                     }
-                    AttachType::Image { .. } => {
+                    FileType::Image { .. } => {
                         // f.content is already a data: URL
                         blocks.push(json!({
                             "type": "image_url",
@@ -275,7 +275,7 @@ fn attach_file_contents(
                             }
                         }));
                     }
-                    AttachType::Audio { format } => {
+                    FileType::Audio { format } => {
                         blocks.push(json!({
                             "type": "input_audio",
                             "input_audio": {
@@ -284,7 +284,7 @@ fn attach_file_contents(
                             }
                         }));
                     }
-                    AttachType::Document { mime } => {
+                    FileType::Document { mime } => {
                         // f.content is already raw Base64
                         blocks.push(json!({
                             "type": "document",
@@ -328,7 +328,7 @@ fn extract_images_for_ollama(mut messages_json: Vec<serde_json::Value>) -> Vec<s
                     .get("image_url")
                     .and_then(|v| v.get("url"))
                     .and_then(|v| v.as_str())
-                && let Some((_media_type, data)) = crate::nontext::parse_data_url(url)
+                && let Some((_media_type, data)) = crate::file::parse_data_url(url)
             {
                 images.push(data.to_string());
             } else if block.get("type").and_then(|v| v.as_str()) == Some("document") {
@@ -641,7 +641,7 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
                             .get("image_url")
                             .and_then(|v| v.get("url"))
                             .and_then(|v| v.as_str())
-                        && let Some((media_type, data)) = crate::nontext::parse_data_url(url)
+                        && let Some((media_type, data)) = crate::file::parse_data_url(url)
                     {
                         return json!({
                             "type": "image",

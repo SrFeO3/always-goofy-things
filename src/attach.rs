@@ -2,7 +2,7 @@
 //!
 //! Parses `@path1, @path2, ...` prefixes from the beginning of user input,
 //! validates file existence, checks sizes, and reads file contents.
-//! Non-text files (PDF, image, audio) are automatically converted.
+//! File classification and encoding is delegated to [`crate::file`].
 //!
 //! ## Attach modes
 //!
@@ -19,21 +19,10 @@ use std::path::Path;
 
 use regex::Regex;
 
+use crate::file::FileType;
+
 /// Size threshold for large-file confirmation (1 MiB).
 pub const OVERLOADED_BYTES: u64 = 1_048_576;
-
-/// How an attached file should be represented in the LLM request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum AttachType {
-    /// Plain text content (includes PDF-to-text via `@@`).
-    Text,
-    /// Image encoded as a data URL; carries the MIME type.
-    Image { mime: String },
-    /// Audio encoded as raw Base64; carries the format name.
-    Audio { format: String },
-    /// Raw document (PDF) encoded as Base64; carries the MIME type.
-    Document { mime: String },
-}
 
 /// Controls how attached files are read and sent to the LLM.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,7 +39,7 @@ pub struct AttachedFile {
     pub path: String,
     #[serde(skip)]
     pub content: String,
-    pub attach_type: AttachType,
+    pub attach_type: FileType,
 }
 
 /// Format a file size in human-readable form, e.g. `"24.3 MB (25481220 bytes)"`.
@@ -108,8 +97,6 @@ pub fn parse_attached_files(input: &str) -> (String, Vec<String>, AttachMode) {
 }
 
 /// Validate that every path exists relative to the current working directory.
-///
-/// Returns `Ok(())` if all exist, or `Err` with a list of missing paths.
 pub fn validate_files(paths: &[String]) -> Result<(), Vec<String>> {
     let missing: Vec<String> = paths
         .iter()
@@ -125,8 +112,6 @@ pub fn validate_files(paths: &[String]) -> Result<(), Vec<String>> {
 }
 
 /// Check which files exceed the given size threshold.
-///
-/// Returns `Vec<(path, size_in_bytes)>` for files over `max_bytes`.
 pub fn check_oversized_files(paths: &[String], max_bytes: u64) -> Vec<(String, u64)> {
     paths
         .iter()
@@ -142,47 +127,6 @@ pub fn check_oversized_files(paths: &[String], max_bytes: u64) -> Vec<(String, u
         .collect()
 }
 
-/// Classify a file by extension.
-pub fn classify_file(path: &str) -> AttachType {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".pdf") {
-        return AttachType::Document {
-            mime: "application/pdf".to_string(),
-        };
-    }
-    if lower.ends_with(".png") {
-        return AttachType::Image {
-            mime: "image/png".to_string(),
-        };
-    }
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        return AttachType::Image {
-            mime: "image/jpeg".to_string(),
-        };
-    }
-    if lower.ends_with(".gif") {
-        return AttachType::Image {
-            mime: "image/gif".to_string(),
-        };
-    }
-    if lower.ends_with(".webp") {
-        return AttachType::Image {
-            mime: "image/webp".to_string(),
-        };
-    }
-    if lower.ends_with(".wav") {
-        return AttachType::Audio {
-            format: "wav".to_string(),
-        };
-    }
-    if lower.ends_with(".mp3") {
-        return AttachType::Audio {
-            format: "mp3".to_string(),
-        };
-    }
-    AttachType::Text
-}
-
 /// Read all files, converting non-text formats as needed.
 ///
 /// When `mode` is [`AttachMode::TextExtraction`], PDF files are converted to
@@ -193,40 +137,39 @@ pub fn read_attached_files(
 ) -> Result<Vec<AttachedFile>, String> {
     let mut files = Vec::with_capacity(paths.len());
     for p in paths {
-        let mut attach_type = classify_file(p);
+        let mut file_type = crate::file::classify_file(p);
 
         // @@ mode: override PDF from Document to Text (triggers pdf_oxide extraction)
-        if mode == AttachMode::TextExtraction && matches!(attach_type, AttachType::Document { .. })
-        {
-            attach_type = AttachType::Text;
+        if mode == AttachMode::TextExtraction && matches!(file_type, FileType::Document { .. }) {
+            file_type = FileType::Text;
         }
 
-        let content = match &attach_type {
-            AttachType::Text => {
+        let content = match &file_type {
+            FileType::Text => {
                 if p.to_lowercase().ends_with(".pdf") {
-                    let text = crate::nontext::extract_text_from_pdf(p)?;
-                    let _ = crate::nontext::save_converted_text(p, &text);
+                    let text = crate::file_pdf::extract_text_from_pdf(p)?;
+                    let _ = crate::file_pdf::save_converted_text(p, &text);
                     text
                 } else {
                     std::fs::read_to_string(p)
                         .map_err(|e| format!("Failed to read '{}': {}", p, e))?
                 }
             }
-            AttachType::Document { .. } => {
+            FileType::Document { .. } => {
                 let bytes =
                     std::fs::read(p).map_err(|e| format!("Failed to read '{}': {}", p, e))?;
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
             }
-            AttachType::Image { .. } => crate::nontext::convert_image_to_data_url(p)?,
-            AttachType::Audio { .. } => {
-                let (_format, b64) = crate::nontext::convert_audio_to_base64(p)?;
+            FileType::Image { .. } => crate::file::convert_image_to_data_url(p)?,
+            FileType::Audio { .. } => {
+                let (_format, b64) = crate::file::convert_audio_to_base64(p)?;
                 b64
             }
         };
         files.push(AttachedFile {
             path: p.clone(),
             content,
-            attach_type,
+            attach_type: file_type,
         });
     }
     Ok(files)

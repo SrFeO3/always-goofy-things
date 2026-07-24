@@ -613,7 +613,8 @@ fn handle_restore(
 
     // --- Re-read attached file contents from disk (paths-only were persisted) ---
     {
-        use crate::attach::{self, AttachType, AttachedFile};
+        use crate::attach::{self, AttachedFile};
+        use crate::file::FileType;
         use std::path::Path;
 
         let mut restored_paths: Vec<String> = Vec::new();
@@ -645,7 +646,7 @@ fn handle_restore(
                             reloaded.push(AttachedFile {
                                 path: path_str.clone(),
                                 content: String::new(),
-                                attach_type: AttachType::Text,
+                                attach_type: FileType::Text,
                             });
                             missing_paths.push(path_str);
                         }
@@ -658,7 +659,7 @@ fn handle_restore(
                     reloaded.push(AttachedFile {
                         path: path_str.clone(),
                         content: String::new(),
-                        attach_type: AttachType::Text,
+                        attach_type: FileType::Text,
                     });
                     missing_paths.push(path_str);
                 }
