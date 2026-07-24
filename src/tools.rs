@@ -265,6 +265,7 @@ pub async fn confirm_execute_tool(
     name: &str,
     args: &serde_json::Value,
     unsafe_reflex: bool,
+    batch: bool,
 ) -> ToolRunDecision {
     if unsafe_reflex && let (proceed, reason) = auto_confirm(name, args) {
         if proceed {
@@ -274,6 +275,15 @@ pub async fn confirm_execute_tool(
                 reason,
             };
         }
+    }
+
+    // In batch mode, deny any tool that wasn't auto-confirmed (no stdin available).
+    if batch {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some("Skipped: please try simpler and safer operations.".to_string()),
+        };
     }
 
     print!(

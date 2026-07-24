@@ -31,10 +31,13 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
 | `-E, --max-empty-retry <NUM>` | `MAX_EMPTY_RETRY` | Max retries when the LLM returns an empty response. | `1` |
+| `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Safety cap on LLM calls per user message. In batch mode exceeding it causes an error exit; in interactive mode it returns control to the prompt. | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM conversation display verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
+| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
+| `-o, --output <FILE>` | `OUTPUT_FILE` | Write the final answer to a file instead of stdout. Requires `-q`. | (none) |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
 
 > **Note:** Command-line options always take precedence over environment variables.
@@ -42,24 +45,16 @@ Configuration can be set via environment variables or command-line flags (flags 
 ### LLM Provider (`LLM_PROVIDER`)
 
 Controls which provider-specific API format is used. If not set, the provider is auto-detected from the URL.
-
-- `openai` - OpenAI API format. Also covers compatible backends (e.g., Google Gemini via OpenAI wrapper, or any OpenAI-proxy). Expects a standard `/v1/chat/completions` endpoint.
-- `ollama` - Ollama API format. Uses the `/api/chat` endpoint with Ollama-specific request structure.
-- `anthropic` - Anthropic-compatible API format. Uses `x-api-key` header and Anthropic-specific message format (content blocks, `tool_use`/`tool_result`).
+- `openai` - OpenAI-compatible API format. Endpoint: `/v1/chat/completions`
+- `ollama` - Ollama API format. Endpoint: `/api/chat`
+- `anthropic` - Anthropic-compatible API format. Endpoint: `/v1/messages` (gratuitously dissimilar).
 
 ### Tool Result Format (`TOOL_RESULT_FORMAT`)
 
-Controls how tool execution results are structured when sent back to the LLM. This applies to all tools and all providers.
-
-- `json_string` (default) - The full result JSON is serialized to a string. The LLM receives an escaped JSON string like `"{\"path\":\"...\",\"content\":\"...\"}"`.
-- `text` - Each tool result is rendered as a concise plain-text string, discarding structured metadata. Examples:
-  - `read_file` / `fetch_web` -> the content itself
-  - `execute_bash` -> stdout (and stderr if exit_code != 0)
-  - `write_file` -> `Written 1423 bytes to src/new_module.rs`
-  - `str_replace_editor` -> `Replaced 1 occurrence in src/main.rs (Perfect match.)`
-  - `grep_search` -> grep-style `path:line:text` lines
-  - `list_directory` -> `name\ttype\tsize bytes` lines
-- `json_structured` - The full result JSON is embedded as a proper JSON object, not an escaped string. Note: some providers may require tool message `content` to be a string.
+Controls how tool results are structured when sent back to the LLM.
+- `json_string` (default): escaped JSON string.
+- `text`: plain-text.
+- `json_structured`: JSON object.
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
 
@@ -78,57 +73,57 @@ Controls the visual styling and decorations applied to the terminal output.
 
 ## Usage
 
-### Default Execution (Local Ollama + gemma4:12b)
+### Quick Start
+
+Default execution with Local Ollama + gemma4:12b
 ```bash
 cargo run
 ```
 
-### Full Options Example (CLI flags, excluding llm-api-key)
-```bash
-cargo run -- \
-    --working-dir ./work \
-    --llm-url "http://localhost:11434/v1/chat/completions" \
-    --llm-model "gemma4:12b" \
-    --verbose-level 2 \
-    --pretty-level 1 \
-    --max-output-tokens 4096 \
-    --max-empty-retry 3
-```
-
-### Mixed Usage (Environment variables + short CLI flags, caution with cloud AI billing)
+Alternatively, with a cloud provider
 ```bash
 export LLM_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
- export LLM_API_KEY="......."
-cargo run -- -v 0 --llm-model gemma-4-31b-it
+ export LLM_API_KEY="..."
+cargo run -- -m gemini-2.5-pro
 ```
 
-## Example User Queries
+Then type a query like "Who are you and what tools can you use?".
 
-### Basic Queries
+### Batch Mode (`-q`)
 
-- "Who are you and what tools can you use?"
-- "Create a Python script named `test.py` that prints 'Hello, World!'."
-- "Find the Python script in the workspace and translate its output messages into Japanese."
-- "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
-- "Analyze the hyper documentation (https://docs.rs/hyper/latest/hyper/) and create a minimal HTTP server project in Rust."
-- "Fix this broken http server."
+Run a single query non-interactively and exit. The final answer is written to stdout (or `-o <file>`). Progress and errors go to stderr.
+
+```bash
+cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
+```
+
+> [!WARNING]
+> **No file-size guard**: large files attach without confirmation.
+> **Manual-confirm tools are denied**: tools that normally prompt `y/N` are skipped.
 
 ### Attaching Files (`@`) and Text Extraction (`@@`)
 
-Prepend `@file` paths to send files as-is, or `@@file` to force text extraction (useful for PDFs on providers without native document support). Paths are relative to the working directory. Multiple files are separated by commas. Files larger than 1 MiB prompt for confirmation.
+Prepend `@file` paths to attach files, or `@@file` to force text extraction (useful for PDFs on providers without native document support). Paths are relative to the working directory. Multiple files: `@a.txt, @b.txt`.
 
 | Prefix | Behaviour |
 |--------|-----------|
-| `@` | Send as-is: text -> UTF-8, images -> data URL, audio -> base64, **PDF -> base64 (native document)** |
-| `@@` | Force text extraction: **PDF -> Markdown** via pdf_oxide; saved to `{file}_converted_for_llm.txt`. Other files read as UTF-8. |
+| `@` | Send files (text, images, audio, PDF). Non-text is base64-encoded. |
+| `@@` | Converts PDF to Markdown; saved as `{file}_converted_for_llm.txt`. |
 
-PDF raw (`@`) support by provider:
-- Anthropic, OpenAI: supported.
-- Ollama: not supported. Use `@@` for PDF text extraction.
+Ollama requires `@@` for PDF (no native document support).
 
-Images (`@`): supported on all providers.
+### Examples
 
+**Basic queries:**
+- "Who are you and what tools can you use?"
+- "Create a Python script named `test.py` that prints 'Hello, World!'."
+
+**File operations:**
 - "@src/main.rs, @Cargo.toml Explain the structure of these files."
-- "@README.md Summarize this file."
 - "@diagram.png Describe this image."
-- "@@spec.pdf Verify the integrity of this document." (extracts text via pdf_oxide)
+- "@@spec.pdf Verify the integrity of this document."
+
+**Complex tasks:**
+- "Find the Python script in the workspace and translate its output messages into Shakespearean English."
+- "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
+- "Fix this broken http server."

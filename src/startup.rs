@@ -131,6 +131,22 @@ pub struct Config {
     /// How tool results are formatted when sent to the LLM
     #[arg(short = 'R', long, env = "TOOL_RESULT_FORMAT", value_enum, default_value_t = ToolResultFormat::JsonString)]
     pub tool_result_format: ToolResultFormat,
+
+    /// Batch query: run once non-interactively and print result to stdout.
+    /// When set, the agent runs in batch mode and exits after completion.
+    #[arg(short = 'q', long)]
+    pub query: Option<String>,
+
+    /// Write final LLM response to a file instead of stdout.
+    /// Only meaningful when -q/--query is also specified.
+    #[arg(short = 'o', long = "output", env = "OUTPUT_FILE")]
+    pub output_file: Option<String>,
+
+    /// Maximum reasoning turns per user message (tool-calling loop safety limit).
+    /// In batch mode (-q), exceeding this exits with an error.
+    /// In interactive mode, exceeding this returns control to the user.
+    #[arg(long, env = "MAX_REASONING_TURNS", default_value_t = 30)]
+    pub max_reasoning_turns: u32,
 }
 
 /// Print the startup banner and configuration summary.
@@ -161,6 +177,7 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  pretty-level       : {}", config.pretty_level);
     println!("  max-output-tokens  : {}", config.max_output_tokens);
     println!("  max-empty-retry    : {}", config.max_empty_retry);
+    println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  session-label      : {}", config.session_label);
 
     Ok(current_dir)

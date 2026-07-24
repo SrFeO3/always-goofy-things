@@ -155,10 +155,25 @@ struct CompletionTokensDetails {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
+
+    // Validate: -o requires -q
+    if config.output_file.is_some() && config.query.is_none() {
+        anyhow::bail!("--output/-o requires --query/-q (batch mode)");
+    }
+
+    let is_batch = config.query.is_some();
     let provider: LlmProvider = config
         .provider
         .unwrap_or_else(|| compat_provider::detect_provider(&config.llm_url));
-    let _current_dir = startup::print_startup_info(&config, &provider)?;
+
+    if is_batch {
+        // Batch: set up working directory silently (no banner)
+        let current_dir = std::fs::canonicalize(&config.working_dir)
+            .map_err(|e| anyhow!("Invalid working directory '{}': {}", config.working_dir, e))?;
+        std::env::set_current_dir(&current_dir)?;
+    } else {
+        let _current_dir = startup::print_startup_info(&config, &provider)?;
+    }
 
     let mut last_sent_count = 0;
     let mut last_llm_call: Option<std::time::Instant> = None;
@@ -181,10 +196,12 @@ async fn main() -> Result<()> {
     let mut max_output_tokens = config.max_output_tokens;
     let mut max_empty_retry = config.max_empty_retry;
 
-    println!(
-        "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
-        C_CYAN, RESET
-    );
+    if !is_batch {
+        println!(
+            "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
+            C_CYAN, RESET
+        );
+    }
 
     let mut messages = vec![Message {
         role: "system".to_string(), // Set the initial system instructions
@@ -216,31 +233,41 @@ async fn main() -> Result<()> {
 
     // Main conversation loop
     let mut turn: i32 = 1;
+    let mut batch_input: Option<String> = config.query.clone();
     loop {
-        let query_prompt = format!("\nUser-{} > ", turn);
-        let readline = query_reader.readline(&query_prompt);
+        let input = if let Some(q) = batch_input.take() {
+            // Batch: use the -q argument as the first (and only) user input
+            q
+        } else if is_batch {
+            // Batch mode with no more input (should not reach here normally)
+            break;
+        } else {
+            // Interactive: read from the user
+            let query_prompt = format!("\nUser-{} > ", turn);
+            let readline = query_reader.readline(&query_prompt);
 
-        let input = match readline {
-            Ok(line) => {
-                // Add to CLI input history (allows using arrow keys to recall previous inputs)
-                query_reader.add_history_entry(line.as_str())?;
-                line
-            }
-            Err(ReadlineError::Interrupted) => {
-                // Ctrl+C: Don't exit, show guidance instead
-                println!(
-                    "\x1b[93mUse '/exit' or '/quit' to end the session, or press Ctrl+D.\x1b[0m"
-                );
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                // Ctrl+D on an empty line, exit
-                println!("Ctrl-D received. Exiting.");
-                break;
-            }
-            Err(err) => {
-                println!("Error reading line: {:?}", err);
-                break;
+            match readline {
+                Ok(line) => {
+                    // Add to CLI input history (allows using arrow keys to recall previous inputs)
+                    query_reader.add_history_entry(line.as_str())?;
+                    line
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl+C: Don't exit, show guidance instead
+                    println!(
+                        "\x1b[93mUse '/exit' or '/quit' to end the session, or press Ctrl+D.\x1b[0m"
+                    );
+                    continue;
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl+D on an empty line, exit
+                    println!("Ctrl-D received. Exiting.");
+                    break;
+                }
+                Err(err) => {
+                    println!("Error reading line: {:?}", err);
+                    break;
+                }
             }
         };
         if input.trim().is_empty() {
@@ -325,22 +352,31 @@ async fn main() -> Result<()> {
                         if !oversized.is_empty() {
                             for (path, size) in &oversized {
                                 let size_str = attach::format_file_size(*size);
-                                println!(
-                                    "{}[Warning] {} exceeds 1 MiB: {}{}",
-                                    startup::C_YELLOW,
-                                    path,
-                                    size_str,
-                                    startup::RESET
-                                );
+                                if is_batch {
+                                    eprintln!(
+                                        "\x1b[93m[Warning] {} exceeds 1 MiB: {} (attaching anyway)\x1b[0m",
+                                        path, size_str
+                                    );
+                                } else {
+                                    println!(
+                                        "{}[Warning] {} exceeds 1 MiB: {}{}",
+                                        startup::C_YELLOW,
+                                        path,
+                                        size_str,
+                                        startup::RESET
+                                    );
+                                }
                             }
-                            print!("Attach these files anyway? (y/N) ");
-                            let _ = io::stdout().flush();
-                            let mut confirm = String::new();
-                            if io::stdin().read_line(&mut confirm).is_err()
-                                || !confirm.trim().eq_ignore_ascii_case("y")
-                            {
-                                // User cancelled or error - do not advance
-                                continue;
+                            if !is_batch {
+                                print!("Attach these files anyway? (y/N) ");
+                                let _ = io::stdout().flush();
+                                let mut confirm = String::new();
+                                if io::stdin().read_line(&mut confirm).is_err()
+                                    || !confirm.trim().eq_ignore_ascii_case("y")
+                                {
+                                    // User cancelled or error - do not advance
+                                    continue;
+                                }
                             }
                         }
 
@@ -415,8 +451,23 @@ async fn main() -> Result<()> {
         // `done` tracks whether this turn completed successfully (assistant responded normally).
         // If the loop exits via error/Ctrl+C/empty-limit, done=false and we do NOT increment turn.
         let mut empty_retry_count: usize = 0;
+        let mut reasoning_turn: u32 = 0;
         let mut done: bool = false;
         'reasoning_loop: loop {
+            reasoning_turn += 1;
+            if reasoning_turn > config.max_reasoning_turns {
+                if is_batch {
+                    anyhow::bail!(
+                        "Max reasoning turns ({}) exceeded without a final answer",
+                        config.max_reasoning_turns
+                    );
+                }
+                eprintln!(
+                    "\x1b[93m\u{26a0}\u{fe0f} Max reasoning turns ({}) reached. Returning to prompt.\x1b[0m",
+                    config.max_reasoning_turns
+                );
+                break 'reasoning_loop;
+            }
             if llm_rpm > 0 {
                 let min_interval = std::time::Duration::from_secs_f64(60.0 / llm_rpm as f64);
                 if let Some(last_call) = last_llm_call {
@@ -618,6 +669,7 @@ async fn main() -> Result<()> {
                         &call.function.name,
                         &args,
                         config.unsafe_reflex,
+                        is_batch,
                     )
                     .await;
                     let tool_call_decision_reason =
@@ -727,6 +779,18 @@ async fn main() -> Result<()> {
             break 'reasoning_loop;
         }
         if done {
+            if is_batch {
+                // Batch: output the final assistant response and exit
+                let final_answer = &messages.last().unwrap().content;
+                if let Some(output_path) = &config.output_file {
+                    std::fs::write(output_path, final_answer).map_err(|e| {
+                        anyhow!("Failed to write output to '{}': {}", output_path, e)
+                    })?;
+                } else {
+                    print!("{}", final_answer);
+                }
+                return Ok(());
+            }
             turn += 1;
         }
     }
