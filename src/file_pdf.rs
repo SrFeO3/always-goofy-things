@@ -52,10 +52,12 @@ pub fn save_converted_text(orig_path: &str, text: &str) -> Result<String, String
 
     std::fs::write(&path, text).map_err(|e| format!("Failed to write '{}': {}", path, e))?;
 
+    let size_str = crate::attach::format_file_size(text.len() as u64);
     println!(
-        "{}[Saved] Converted text written to {}{}",
+        "{}[Converted] {} (Markdown, {}){}",
         crate::startup::C_DIM_GRAY,
         path,
+        size_str,
         crate::startup::RESET
     );
 

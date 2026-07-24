@@ -49,6 +49,7 @@ use compat_provider::{LlmProvider, convert_anth_to_openai_format};
 use compat_resilience::{
     ToolResultFormat, extract_msg_base, merge_tool_call_delta, post_process_tool_calls,
 };
+use file::FileType;
 use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 
@@ -347,13 +348,20 @@ async fn main() -> Result<()> {
                         match attach::read_attached_files(&raw_paths, parse_mode) {
                             Ok(files) => {
                                 for f in &files {
-                                    let size_str = attach::format_file_size(f.content.len() as u64);
+                                    let is_converted_pdf = f.path.to_lowercase().ends_with(".pdf")
+                                        && matches!(f.attach_type, FileType::Text);
+                                    let label = if is_converted_pdf {
+                                        format!("Markdown extracted from {}", f.path)
+                                    } else {
+                                        let size_str =
+                                            attach::format_file_size(f.content.len() as u64);
+                                        format!("{} ({})", f.path, size_str)
+                                    };
                                     println!(
-                                        "{}[Attached] {}{} ({})",
+                                        "{}[Attached] {}{}",
                                         startup::C_DIM_GRAY,
-                                        f.path,
-                                        startup::RESET,
-                                        size_str
+                                        label,
+                                        startup::RESET
                                     );
                                 }
                                 attached_files = files;
