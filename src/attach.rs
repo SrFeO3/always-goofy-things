@@ -13,7 +13,8 @@
 //!
 //! Provider support for raw `@` mode:
 //! - Anthropic: PDF supported, images supported.
-//! - OpenAI, Ollama: PDF not supported (stripped with warning), images supported.
+//! - OpenAI: PDF supported, images supported.
+//! - Ollama: PDF not supported (use @@ for text extraction), images supported.
 
 use std::path::Path;
 

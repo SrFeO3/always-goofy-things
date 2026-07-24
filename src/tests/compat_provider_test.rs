@@ -68,7 +68,7 @@ fn test_ollama_extracts_images_and_collapses_content() {
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,ABC123"}}
         ]
     })];
-    let result = extract_images_for_ollama(msgs);
+    let result = convert_messages_for_ollama(msgs);
     let msg = &result[0];
 
     assert_eq!(msg["role"], "user");
@@ -87,7 +87,7 @@ fn test_ollama_text_only_blocks_collapse_to_string() {
             {"type": "text", "text": "<attached_file path=\"f.txt\">content</attached_file>"}
         ]
     })];
-    let result = extract_images_for_ollama(msgs);
+    let result = convert_messages_for_ollama(msgs);
     let msg = &result[0];
 
     assert_eq!(msg["role"], "user");
@@ -104,7 +104,7 @@ fn test_ollama_plain_string_unchanged() {
         "role": "user",
         "content": "Hello"
     })];
-    let result = extract_images_for_ollama(msgs);
+    let result = convert_messages_for_ollama(msgs);
     // Plain string content is not an array -> function skips it
     assert_eq!(result[0]["content"], "Hello");
     assert!(result[0].get("images").is_none());
@@ -116,7 +116,52 @@ fn test_ollama_non_user_messages_untouched() {
         json!({"role": "system", "content": "You are helpful"}),
         json!({"role": "assistant", "content": "Sure!"}),
     ];
-    let result = extract_images_for_ollama(msgs);
+    let result = convert_messages_for_ollama(msgs);
     assert_eq!(result[0]["content"], "You are helpful");
     assert_eq!(result[1]["content"], "Sure!");
+}
+
+// ------------------------------------------------------------------
+// OpenAI document -> image_url conversion tests
+// ------------------------------------------------------------------
+
+#[test]
+fn test_openai_converts_document_to_file() {
+    let msgs = vec![json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Analyze this"},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "PDF123"}}
+        ]
+    })];
+    let result = convert_messages_for_openai(msgs);
+    let msg = &result[0];
+
+    assert_eq!(msg["role"], "user");
+    let blocks = msg["content"].as_array().expect("content should be array");
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "file");
+    assert_eq!(
+        blocks[1]["file"]["file_data"],
+        "data:application/pdf;base64,PDF123"
+    );
+}
+
+#[test]
+fn test_openai_passes_non_document_blocks_unchanged() {
+    let msgs = vec![json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Query"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,ABC"}}
+        ]
+    })];
+    let result = convert_messages_for_openai(msgs);
+    let msg = &result[0];
+    let blocks = msg["content"].as_array().expect("content should be array");
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "image_url");
+    assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,ABC");
 }

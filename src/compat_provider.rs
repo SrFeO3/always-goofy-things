@@ -113,7 +113,7 @@ impl ChatRequest {
 
         match self.provider {
             LlmProvider::OpenAi => {
-                let messages = strip_unsupported_documents(messages, "OpenAI");
+                let messages = convert_messages_for_openai(messages);
                 let dto = OpenAiRequestDto {
                     model: self.model.clone(),
                     max_completion_tokens: self.max_output_tokens,
@@ -132,7 +132,7 @@ impl ChatRequest {
             }
 
             LlmProvider::Ollama => {
-                let messages = extract_images_for_ollama(messages);
+                let messages = convert_messages_for_ollama(messages);
                 let dto = OllamaRequestDto {
                     model: self.model.clone(),
                     messages,
@@ -304,12 +304,14 @@ fn attach_file_contents(
     messages_json
 }
 
-/// Convert OpenAI-format content blocks into Ollama's native `/api/chat` format.
+/// Convert content blocks for Ollama's native `/api/chat` format.
 ///
-/// Extracts Base64 data from `image_url` blocks into a top-level `images` array
-/// and collapses all text blocks into a plain content string. `document` blocks
-/// are skipped with a warning (Ollama does not support PDF natively).
-fn extract_images_for_ollama(mut messages_json: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+/// Extracts Base64 data from `image_url` blocks into a top-level `images`
+/// array and collapses text blocks into a plain content string.
+/// `document` blocks are skipped (Ollama does not support PDF natively).
+fn convert_messages_for_ollama(
+    mut messages_json: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
     for msg in &mut messages_json {
         if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
             continue;
@@ -332,7 +334,6 @@ fn extract_images_for_ollama(mut messages_json: Vec<serde_json::Value>) -> Vec<s
             {
                 images.push(data.to_string());
             } else if block.get("type").and_then(|v| v.as_str()) == Some("document") {
-                // Ollama does not support document blocks; skip with warning
                 has_unsupported = true;
             } else if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                 text_parts.push(text.to_string());
@@ -357,11 +358,12 @@ fn extract_images_for_ollama(mut messages_json: Vec<serde_json::Value>) -> Vec<s
     messages_json
 }
 
-/// Strip `document` content blocks from user messages for providers that
-/// lack native PDF support. Prints a warning for each document block removed.
-fn strip_unsupported_documents(
+/// Convert content blocks for OpenAI's Chat Completions API.
+///
+/// Transforms `document` blocks into `file` blocks (native Chat Completions
+/// format with `file_data` as a `data:` URL).
+fn convert_messages_for_openai(
     mut messages_json: Vec<serde_json::Value>,
-    provider_name: &str,
 ) -> Vec<serde_json::Value> {
     for msg in &mut messages_json {
         if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
@@ -371,32 +373,32 @@ fn strip_unsupported_documents(
             continue;
         };
 
-        let mut filtered: Vec<serde_json::Value> = blocks
+        let converted: Vec<serde_json::Value> = blocks
             .iter()
-            .filter(|block| {
-                if block.get("type").and_then(|v| v.as_str()) == Some("document") {
-                    eprintln!(
-                        "{}[Warning] {} does not support PDF/document attachments. \
-                         Use @@file for text extraction instead.{} ",
-                        crate::startup::C_YELLOW,
-                        provider_name,
-                        crate::startup::RESET
-                    );
-                    false
+            .map(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("document")
+                    && let Some(mime) = block
+                        .get("source")
+                        .and_then(|v| v.get("media_type"))
+                        .and_then(|v| v.as_str())
+                    && let Some(data) = block
+                        .get("source")
+                        .and_then(|v| v.get("data"))
+                        .and_then(|v| v.as_str())
+                {
+                    json!({
+                        "type": "file",
+                        "file": {
+                            "file_data": format!("data:{};base64,{}", mime, data)
+                        }
+                    })
                 } else {
-                    true
+                    block.clone()
                 }
             })
-            .cloned()
             .collect();
 
-        // If all blocks were stripped, insert a fallback text block so the
-        // API doesn't receive an empty content array (which it may reject).
-        if filtered.is_empty() {
-            filtered.push(json!({"type": "text", "text": ""}));
-        }
-
-        msg["content"] = json!(filtered);
+        msg["content"] = json!(converted);
     }
     messages_json
 }

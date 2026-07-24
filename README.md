@@ -123,12 +123,10 @@ Prepend `@file` paths to send files as-is, or `@@file` to force text extraction 
 | `@@` | Force text extraction: **PDF -> Markdown** via pdf_oxide; saved to `{file}_converted_for_llm.txt`. Other files read as UTF-8. |
 
 PDF raw (`@`) support by provider:
-- Anthropic only.
-- OpenAI, Ollama: not supported (stripped with warning).
+- Anthropic, OpenAI: supported.
+- Ollama: not supported. Use `@@` for PDF text extraction.
 
 Images (`@`): supported on all providers.
-
-Use `@@` for PDF text extraction on any provider.
 
 - "@src/main.rs, @Cargo.toml Explain the structure of these files."
 - "@README.md Summarize this file."
