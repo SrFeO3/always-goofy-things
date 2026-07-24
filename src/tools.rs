@@ -11,7 +11,7 @@
 //!
 //! # Available Tools
 //!
-//! - `read_file`: Read a file's content, optionally within a specific line range.
+//! - `read_file`: Read a text or binary file's content. Text files support line ranges.
 //! - `write_file`: Create a new file or overwrite an existing one with full content.
 //! - `str_replace_editor`: Replace specific text blocks in a file for code modification.
 //! - `grep_search`: Search for text patterns across files in the workspace.
@@ -26,10 +26,12 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use base64::Engine as _;
 use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 
+use crate::file::{self, FileType};
 use crate::reflex::auto_confirm;
 use crate::startup::{C_CYAN, RESET};
 use crate::tools_fuzzy::{
@@ -122,7 +124,7 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file. Optionally specify a line range to read only part of the file. Use this tool before editing files or investigating code.",
+                "description": "Read the contents of a file, including images, audio, and PDFs. For text files, optionally specify a line range. Use this tool before editing files or investigating code.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -314,38 +316,84 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len();
 
-    let start = args["start_line"]
-        .as_u64()
-        .map(|v| (v as usize).saturating_sub(1))
-        .unwrap_or(0);
-    let end = args["end_line"]
-        .as_u64()
-        .map(|v| (v as usize).min(total_lines))
-        .unwrap_or(total_lines);
-    if start > end || start >= total_lines {
-        return Err(anyhow!(
-            "[INVALID_ARGUMENTS] Invalid line range (total lines: {})",
-            total_lines
-        ));
+    let file_type = file::classify_file(path);
+
+    match file_type {
+        FileType::Text => {
+            let content = fs::read_to_string(path)
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
+            let lines: Vec<&str> = content.lines().collect();
+            let total_lines = lines.len();
+
+            let start = args["start_line"]
+                .as_u64()
+                .map(|v| (v as usize).saturating_sub(1))
+                .unwrap_or(0);
+            let end = args["end_line"]
+                .as_u64()
+                .map(|v| (v as usize).min(total_lines))
+                .unwrap_or(total_lines);
+            if start > end || start >= total_lines {
+                return Err(anyhow!(
+                    "[INVALID_ARGUMENTS] Invalid line range (total lines: {})",
+                    total_lines
+                ));
+            }
+
+            let sliced_content = lines[start..end].join("\n");
+            let truncated = start > 0 || end < total_lines;
+
+            Ok(json!({
+                "path": path,
+                "start_line": start + 1,
+                "end_line": end,
+                "total_lines": total_lines,
+                "content": sliced_content,
+                "truncated": truncated
+            }))
+        }
+        FileType::Image { mime } => {
+            let data_url = file::convert_image_to_data_url(path)
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
+            Ok(json!({
+                "path": path,
+                "content_type": "image",
+                "mime": mime,
+                "content": data_url
+            }))
+        }
+        FileType::Audio { format } => {
+            let (_format, b64) = file::convert_audio_to_base64(path)
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
+            let mime = audio_format_to_mime(&format);
+            Ok(json!({
+                "path": path,
+                "content_type": "audio",
+                "mime": mime,
+                "content": b64
+            }))
+        }
+        FileType::Document { mime } => {
+            let bytes = fs::read(path)
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(json!({
+                "path": path,
+                "content_type": "pdf",
+                "mime": mime,
+                "content": b64
+            }))
+        }
     }
+}
 
-    let sliced_content = lines[start..end].join("\n");
-
-    let truncated = start > 0 || end < total_lines;
-
-    Ok(json!({
-        "path": path,
-        "start_line": start + 1,
-        "end_line": end,
-        "total_lines": total_lines,
-        "content": sliced_content,
-        "truncated": truncated
-    }))
+fn audio_format_to_mime(format: &str) -> &str {
+    match format {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "application/octet-stream",
+    }
 }
 
 fn execute_write_file(args: &serde_json::Value) -> Result<serde_json::Value> {
