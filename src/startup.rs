@@ -149,6 +149,34 @@ pub struct Config {
     pub max_reasoning_turns: u32,
 }
 
+/// Build the initial system message describing immutable workspace rules.
+/// Used as `messages[0]` for every new session.
+pub fn system_message() -> crate::Message {
+    crate::Message {
+        role: "system".to_string(),
+        content: format!(
+            "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
+            ## 0. Workspace Context\n\
+            - Current Working Directory: Your root is ./ (the current directory).\n\
+            - Relative Paths Only: You MUST use relative paths (e.g., file.txt, ./src/) for all operations.\n\
+            - Prohibitions: NEVER use absolute paths starting with /. NEVER use ../ to escape the directory.\n\n\
+            ## 1. Command Execution (bash)\n\
+            - Allowed command patterns: [{}]\n\
+            - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.\n\n\
+            ## 2. File Editing (str_replace_editor, write_file)\n\
+            - str_replace_editor: Provide 'old_string' exactly as it appears in the file, including all whitespace and indentation.\n\
+            - write_file: Use this to create new files or overwrite existing files entirely.\n\n\
+            ## 3. Information Retrieval (fetch_web)\n\
+            - Supports only http/https. Access to private or local networks is strictly prohibited.\n\n\
+            ## 4. Response Style\n\
+            - Briefly explain the purpose of a tool before calling it.\n\
+            - Maintain system rules at the top of the context for inference efficiency.",
+            crate::tools::ALLOW_COMMAND_LIST.join(", ")
+        ),
+        ..Default::default()
+    }
+}
+
 /// Print the startup banner and configuration summary.
 /// Returns the canonical working directory.
 pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std::path::PathBuf> {

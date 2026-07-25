@@ -17,27 +17,23 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::Session;
+use crate::Settings;
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
-/// Result of handling a slash command.
+/// Outcome of handling a slash command. The caller still owns the amended
+/// turn counter for `RewoundTo` / `RestoredTo`; `Settings`/`Session` mutations
+/// happen in-place inside this module so no value is echoed back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCmdResult {
-    /// Command requires no turn change (e.g. /help), just re-prompt.
+    /// No turn change (e.g. /help), just re-prompt.
     NoAdvance,
     /// Rewind succeeded - reset the turn counter to this value.
     RewoundTo(i32),
-    /// Model was switched to the new name.
-    ModelChanged(String),
-    /// Config values changed
-    ConfigChanged {
-        verbose_level: u8,
-        pretty_level: u8,
-        llm_rpm: u32,
-        max_output_tokens: u32,
-        max_empty_retry: u32,
-    },
     /// Session was restored. Reset turn counter to this value.
     RestoredTo { turn: i32, label: String },
+    /// User requested termination (`/exit`, `/quit`, bare `exit` / `quit`).
+    Exit,
 }
 
 /// Check if the input starts with a slash command, and handle it if so.
@@ -45,19 +41,21 @@ pub enum SlashCmdResult {
 /// Returns:
 /// - `Some(SlashCmdResult)` - slash command was found and handled.
 /// - `None` - NOT a slash command; let the caller process it as a normal message.
+///
+/// Bare `exit` / `quit` are also absorbed here so the caller has a single
+/// `Exit` arm to break on. Model/config changes mutate `settings` in place.
 pub fn try_handle_slash_command(
     input: &str,
-    messages: &mut Vec<crate::Message>,
-    turn: i32,
-    current_model: &str,
-    current_label: &str,
-    verbose_level: &mut u8,
-    pretty_level: &mut u8,
-    llm_rpm: &mut u32,
-    max_output_tokens: &mut u32,
-    max_empty_retry: &mut u32,
+    session: &mut Session,
+    settings: &mut Settings,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
+    // Termination aliases (bare or `/`-prefixed). Centralised here so the
+    // caller has one `Exit` arm instead of a parallel string-equality check.
+    match trimmed {
+        "/exit" | "/quit" | "exit" | "quit" => return Some(SlashCmdResult::Exit),
+        _ => {}
+    }
     if !trimmed.starts_with('/') {
         return None;
     }
@@ -70,7 +68,7 @@ pub fn try_handle_slash_command(
             print_help();
             Some(SlashCmdResult::NoAdvance)
         }
-        "/rewind" => match handle_rewind(arg, messages, turn) {
+        "/rewind" => match handle_rewind(arg, &mut session.messages, session.turn) {
             Ok(target) => Some(SlashCmdResult::RewoundTo(target)),
             Err(e) => {
                 eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
@@ -78,34 +76,21 @@ pub fn try_handle_slash_command(
             }
         },
         "/history" => {
-            handle_history(arg, messages);
+            handle_history(arg, &session.messages);
             Some(SlashCmdResult::NoAdvance)
         }
         "/model" => {
-            let new_model = handle_model(arg, current_model);
-            Some(SlashCmdResult::ModelChanged(new_model))
+            handle_model(arg, &mut settings.llm_model);
+            Some(SlashCmdResult::NoAdvance)
         }
-        "/config" => match handle_config(
-            arg,
-            verbose_level,
-            pretty_level,
-            llm_rpm,
-            max_output_tokens,
-            max_empty_retry,
-        ) {
-            Ok(changed) => Some(SlashCmdResult::ConfigChanged {
-                verbose_level: changed.verbose_level,
-                pretty_level: changed.pretty_level,
-                llm_rpm: changed.llm_rpm,
-                max_output_tokens: changed.max_output_tokens,
-                max_empty_retry: changed.max_empty_retry,
-            }),
+        "/config" => match handle_config(arg, settings) {
+            Ok(()) => Some(SlashCmdResult::NoAdvance),
             Err(e) => {
                 eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
                 Some(SlashCmdResult::NoAdvance)
             }
         },
-        "/restore" => match handle_restore(messages, current_label, arg) {
+        "/restore" => match handle_restore(&mut session.messages, &session.label, arg) {
             Ok((new_turn, used_label)) => Some(SlashCmdResult::RestoredTo {
                 turn: new_turn,
                 label: used_label,
@@ -133,18 +118,17 @@ pub fn try_handle_slash_command(
 ///
 /// Without an argument, print the currently active model name.
 /// With an argument, switch to the provided model name and confirm.
-fn handle_model(arg: Option<&str>, current_model: &str) -> String {
+fn handle_model(arg: Option<&str>, current_model: &mut String) {
     match arg {
         Some(name) if !name.is_empty() => {
             println!(
                 "\x1b[32m✓ Switched model: {} -> {}\x1b[0m",
                 current_model, name
             );
-            name.to_string()
+            *current_model = name.to_string();
         }
         _ => {
             println!("\x1b[93mCurrent model: {}\x1b[0m", current_model);
-            current_model.to_string()
         }
     }
 }
@@ -153,16 +137,7 @@ fn handle_model(arg: Option<&str>, current_model: &str) -> String {
 // /config
 // ---------------------------------------------------------------------------
 
-/// Returns a tuple of (verbose_level, pretty_level, llm_rpm) after updates.
-pub struct ConfigSnapshot {
-    pub verbose_level: u8,
-    pub pretty_level: u8,
-    pub llm_rpm: u32,
-    pub max_output_tokens: u32,
-    pub max_empty_retry: u32,
-}
-
-/// Parse `key value` from arg. E.g. "v 2" -> Some(("v", "2")).
+/// Parse `key value` from arg. E.g. "v 2" -> Some(("v", "2"))
 /// Supports both short aliases (v, p, r) and full names.
 fn parse_config_kv(input: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
@@ -178,31 +153,18 @@ fn parse_config_kv(input: &str) -> Option<(String, String)> {
 /// - No arg: list all config values.
 /// - `-s` / `--short`: show short aliases for quick reference.
 /// - `key value`: set the config value (e.g. `v 3`, `pretty-level 2`, `llm-rpm 30`).
-fn handle_config(
-    arg: Option<&str>,
-    verbose_level: &mut u8,
-    pretty_level: &mut u8,
-    llm_rpm: &mut u32,
-    max_output_tokens: &mut u32,
-    max_empty_retry: &mut u32,
-) -> Result<ConfigSnapshot> {
+fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
     let arg_str = arg.unwrap_or("").trim();
 
     // No argument - list all config values
     if arg_str.is_empty() {
         println!("  \x1b[1mCurrent configuration:\x1b[0m");
-        println!("    verbose-level     : {}", verbose_level);
-        println!("    pretty-level      : {}", pretty_level);
-        println!("    llm-rpm           : {}", llm_rpm);
-        println!("    max-output-tokens : {}", max_output_tokens);
-        println!("    max-empty-retry   : {}", max_empty_retry);
-        return Ok(ConfigSnapshot {
-            verbose_level: *verbose_level,
-            pretty_level: *pretty_level,
-            llm_rpm: *llm_rpm,
-            max_output_tokens: *max_output_tokens,
-            max_empty_retry: *max_empty_retry,
-        });
+        println!("    verbose-level     : {}", settings.verbose_level);
+        println!("    pretty-level      : {}", settings.pretty_level);
+        println!("    llm-rpm           : {}", settings.llm_rpm);
+        println!("    max-output-tokens : {}", settings.max_output_tokens);
+        println!("    max-empty-retry   : {}", settings.max_empty_retry);
+        return Ok(());
     }
 
     // `-s` or `--short`: show short aliases
@@ -213,13 +175,7 @@ fn handle_config(
         println!("    \x1b[36mr\x1b[0m   - llm-rpm            (0 = unlimited)");
         println!("    \x1b[36mt\x1b[0m   - max-output-tokens  (default: 16384)");
         println!("    \x1b[36me\x1b[0m   - max-empty-retry    (default: 1)");
-        return Ok(ConfigSnapshot {
-            verbose_level: *verbose_level,
-            pretty_level: *pretty_level,
-            llm_rpm: *llm_rpm,
-            max_output_tokens: *max_output_tokens,
-            max_empty_retry: *max_empty_retry,
-        });
+        return Ok(());
     }
 
     // Parse "key value"
@@ -236,7 +192,7 @@ fn handle_config(
             if val > 4 {
                 return Err(anyhow!("verbose-level must be 0-4, got {}", val));
             }
-            *verbose_level = val;
+            settings.verbose_level = val;
         }
         "p" | "pretty-level" | "pretty_level" | "pretty" => {
             let val: u8 = kv
@@ -246,7 +202,7 @@ fn handle_config(
             if val > 2 {
                 return Err(anyhow!("pretty-level must be 0-2, got {}", val));
             }
-            *pretty_level = val;
+            settings.pretty_level = val;
         }
         "r" | "llm-rpm" | "llm_rpm" | "rpm" => {
             let val: u32 = kv.1.parse().map_err(|_| {
@@ -255,7 +211,7 @@ fn handle_config(
                     kv.1
                 )
             })?;
-            *llm_rpm = val;
+            settings.llm_rpm = val;
         }
         "t" | "max-output-tokens" | "max_output_tokens" | "output-tokens" => {
             let val: u32 = kv.1.parse().map_err(|_| {
@@ -267,7 +223,7 @@ fn handle_config(
             if val == 0 {
                 return Err(anyhow!("max-output-tokens must be > 0, got {}", val));
             }
-            *max_output_tokens = val;
+            settings.max_output_tokens = val;
         }
         "e" | "max-empty-retry" | "max_empty_retry" | "empty-retry" => {
             let val: u32 = kv.1.parse().map_err(|_| {
@@ -276,7 +232,7 @@ fn handle_config(
                     kv.1
                 )
             })?;
-            *max_empty_retry = val;
+            settings.max_empty_retry = val;
         }
         _ => {
             return Err(anyhow!(
@@ -287,14 +243,7 @@ fn handle_config(
     }
 
     println!("  \x1b[32m✓ Changed {} to {}\x1b[0m", kv.0, kv.1);
-
-    Ok(ConfigSnapshot {
-        verbose_level: *verbose_level,
-        pretty_level: *pretty_level,
-        llm_rpm: *llm_rpm,
-        max_output_tokens: *max_output_tokens,
-        max_empty_retry: *max_empty_retry,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
