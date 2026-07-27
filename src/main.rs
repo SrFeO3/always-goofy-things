@@ -224,6 +224,7 @@ async fn main() -> Result<()> {
     }
 
     let is_batch = config.query.is_some();
+    let start_time = std::time::Instant::now();
     let provider: LlmProvider = config
         .provider
         .unwrap_or_else(|| compat_provider::detect_provider(&config.llm_url));
@@ -435,6 +436,32 @@ async fn main() -> Result<()> {
                 } else {
                     print!("{}", final_answer);
                 }
+                // Print batch completion summary
+                let elapsed = start_time.elapsed();
+                let secs = elapsed.as_secs_f64();
+                let time_str = if secs >= 60.0 {
+                    format!("{:.0}m {:.1}s", secs / 60.0, secs % 60.0)
+                } else {
+                    format!("{:.1}s", secs)
+                };
+                let out_label = config.output_file.as_deref().unwrap_or("stdout");
+                let q_preview: String = config
+                    .query
+                    .as_deref()
+                    .map(|q| {
+                        let one_line = q.replace('\n', "\\n").replace('\r', "");
+                        let chars: Vec<char> = one_line.chars().collect();
+                        if chars.len() > 10 {
+                            format!("{}...", chars[..10].iter().collect::<String>())
+                        } else {
+                            one_line
+                        }
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "\n{}Batch completed in {}, output -> {}, query: \"{}\"{}.",
+                    C_CYAN, time_str, out_label, q_preview, RESET
+                );
                 return Ok(());
             }
             session.turn += 1;
