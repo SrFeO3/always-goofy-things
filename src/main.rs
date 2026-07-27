@@ -975,8 +975,12 @@ async fn call_llm(
                 continue;
             }
 
-            // Skip Anthropic's SSE event-name
-            if line.starts_with("event:") {
+            // SSE protocol lines (RFC 7320): event-type ("event:" prefix) and
+            // comments (":" prefix). Both must be silently ignored by the client.
+            if line.starts_with("event:") || line.starts_with(":") {
+                if settings.verbose_level >= 4 {
+                    println!("\x1b[90m[SSE] {}\x1b[0m", line);
+                }
                 continue;
             }
 
