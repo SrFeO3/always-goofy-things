@@ -3,11 +3,11 @@
 //! Automatically determines if a tool call can bypass manual confirmation
 //! based on predefined execution policies.
 
-use crate::reflex_literal_filter::is_exact_matched_command;
-use crate::reflex_literal_filter::is_safe_grep_query;
-use crate::reflex_literal_filter::is_safe_subpath;
-use crate::reflex_literal_filter::is_safe_url;
-use crate::reflex_literal_filter::is_shallow_matched_command;
+use crate::reflex_literal::is_exact_matched_command;
+use crate::reflex_literal::is_safe_grep_query;
+use crate::reflex_literal::is_safe_subpath;
+use crate::reflex_literal::is_safe_url;
+use crate::reflex_literal::is_shallow_matched_command;
 
 /// Automatically determines if a tool call can bypass manual confirmation.
 ///

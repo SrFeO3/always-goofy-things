@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "always-goofy-things"
-version = "0.5.38"
+version = "0.5.39"
 dependencies = [
  "anyhow",
  "base64",

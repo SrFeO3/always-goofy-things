@@ -39,7 +39,7 @@ mod file_pdf;
 mod persistence;
 mod pretty;
 mod reflex;
-mod reflex_literal_filter;
+mod reflex_literal;
 mod startup;
 mod tools;
 mod tools_fuzzy;
