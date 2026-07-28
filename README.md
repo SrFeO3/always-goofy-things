@@ -37,7 +37,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
 | `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
-| `-o, --output <FILE>` | `OUTPUT_FILE` | Write the final answer to a file instead of stdout. Requires `-q`. | (none) |
+| `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. In batch mode: single write. In interactive mode: appends with turn separators. | (none) |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for certain safety checkpoints. | false |
 
 > **Note:** Command-line options always take precedence over environment variables.

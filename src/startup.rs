@@ -137,8 +137,9 @@ pub struct Config {
     #[arg(short = 'q', long)]
     pub query: Option<String>,
 
-    /// Write final LLM response to a file instead of stdout.
-    /// Only meaningful when -q/--query is also specified.
+    /// Write each turn's final LLM response to a file.
+    /// In batch mode (-q): single write (1 turn).
+    /// In interactive mode: append each turn with a separator.
     #[arg(short = 'o', long = "output", env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
 

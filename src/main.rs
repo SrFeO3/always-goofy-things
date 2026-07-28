@@ -218,11 +218,6 @@ struct CompletionTokensDetails {
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
 
-    // Validate: -o requires -q
-    if config.output_file.is_some() && config.query.is_none() {
-        anyhow::bail!("--output/-o requires --query/-q (batch mode)");
-    }
-
     let is_batch = config.query.is_some();
     let start_time = std::time::Instant::now();
     let provider: LlmProvider = config
@@ -426,17 +421,34 @@ async fn main() -> Result<()> {
         .await?;
 
         if done {
-            if is_batch {
-                // Batch: output the final assistant response and exit
+            // Write final answer to file (-o). Works in both batch and interactive mode.
+            // Uses append semantics so interactive multi-turn sessions accumulate all answers.
+            if let Some(output_path) = &config.output_file {
                 let final_answer = &session.messages.last().unwrap().content;
-                if let Some(output_path) = &config.output_file {
-                    std::fs::write(output_path, final_answer).map_err(|e| {
-                        anyhow!("Failed to write output to '{}': {}", output_path, e)
-                    })?;
+                let need_sep = std::fs::metadata(output_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+                let content = if need_sep {
+                    format!(
+                        "\n\n<!-- always-goofy-things | turn {} | session: {} -->\n\n{}",
+                        session.turn, session.label, final_answer
+                    )
                 } else {
-                    print!("{}", final_answer);
+                    final_answer.clone()
+                };
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(output_path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
+                    .map_err(|e| anyhow!("Failed to write output to '{}': {}", output_path, e))?;
+            }
+
+            if is_batch {
+                // Batch: print to stdout if no -o was given, then summary & exit
+                if config.output_file.is_none() {
+                    print!("{}", session.messages.last().unwrap().content);
                 }
-                // Print batch completion summary
                 let elapsed = start_time.elapsed();
                 let secs = elapsed.as_secs_f64();
                 let time_str = if secs >= 60.0 {
