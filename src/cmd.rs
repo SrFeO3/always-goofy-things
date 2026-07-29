@@ -290,7 +290,7 @@ fn print_help() {
 /// Finds the turn boundary by counting user messages (each user message
 /// starts a new turn), truncates messages from that point, and returns
 /// the `target` turn number so the caller can reset the turn counter.
-fn handle_rewind(
+pub(crate) fn handle_rewind(
     arg: Option<&str>,
     messages: &mut Vec<crate::Message>,
     current_turn: i32,
@@ -518,7 +518,7 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
 ///
 /// Restores the previous session from `previous_session_{label}.jsonl`, replacing
 /// the current conversation. Returns the new turn count and the label used for restoration.
-fn handle_restore(
+pub(crate) fn handle_restore(
     messages: &mut Vec<crate::Message>,
     current_label: &str,
     arg_label: Option<&str>,

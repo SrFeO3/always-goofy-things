@@ -21,6 +21,8 @@
 
 use std::io;
 use std::io::Write;
+#[cfg(feature = "gui")]
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -36,6 +38,8 @@ mod compat_provider;
 mod compat_resilience;
 mod file;
 mod file_pdf;
+#[cfg(feature = "gui")]
+mod gui;
 mod persistence;
 mod pretty;
 mod reflex;
@@ -54,15 +58,15 @@ use startup::{C_CYAN, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, 
 use tools::{ToolRunDecision, ToolRunDecisionKind};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct Message {
-    role: String,
-    content: String,
+pub(crate) struct Message {
+    pub(crate) role: String,
+    pub(crate) content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
+    pub(crate) reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    pub(crate) tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
+    pub(crate) tool_call_id: Option<String>,
     #[serde(skip)]
     pub tool_name: Option<String>,
     #[serde(skip)]
@@ -93,6 +97,7 @@ impl Default for Message {
 }
 
 /// Append-only conversation state. Single mutable owner, never concurrent.
+#[derive(Clone)]
 pub(crate) struct Session {
     pub(crate) label: String,
     pub(crate) messages: Vec<Message>,
@@ -154,21 +159,27 @@ pub(crate) struct Metrics {
     pub(crate) cache_ever_reported: bool,
 }
 
+/// Shared buffer for LLM streaming output. `.0` = reasoning, `.1` = content.
+/// Worker writes chunks via `push_str`; the GUI reads and clears them each frame.
+#[cfg(feature = "gui")]
+pub(crate) static LLM_STREAM_BUF: LazyLock<Mutex<(String, String)>> =
+    LazyLock::new(|| Mutex::new((String::new(), String::new())));
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ToolCall {
+pub(crate) struct ToolCall {
     #[serde(default)]
     pub id: String,
     #[serde(rename = "type", default)]
     pub tool_type: String,
-    function: FunctionCall,
+    pub(crate) function: FunctionCall,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct FunctionCall {
-    name: String,
-    arguments: serde_json::Value,
+pub(crate) struct FunctionCall {
+    pub(crate) name: String,
+    pub(crate) arguments: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -215,14 +226,26 @@ struct CompletionTokensDetails {
 }
 
 #[tokio::main]
+#[cfg_attr(feature = "gui", allow(unreachable_code))]
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
 
-    let is_batch = config.query.is_some();
-    let start_time = std::time::Instant::now();
     let provider: LlmProvider = config
         .provider
         .unwrap_or_else(|| compat_provider::detect_provider(&config.llm_url));
+
+    #[cfg(feature = "gui")]
+    {
+        // eframe::run_native blocks the current thread.
+        // block_in_place lets tokio move spawned tasks to other threads.
+        tokio::task::block_in_place(|| {
+            gui::run(config, provider);
+        });
+        return Ok(());
+    }
+
+    let is_batch = config.query.is_some();
+    let start_time = std::time::Instant::now();
 
     if is_batch {
         // Batch: set up working directory silently (no banner)
@@ -1074,6 +1097,8 @@ async fn call_llm(
                     }
                     print!("{}", reasoning);
                     io::stdout().flush()?;
+                    #[cfg(feature = "gui")]
+                    LLM_STREAM_BUF.lock().unwrap().0.push_str(reasoning);
                     full_message
                         .reasoning_content
                         .get_or_insert_with(String::new)
@@ -1097,6 +1122,8 @@ async fn call_llm(
                     }
                     print!("{}", content);
                     io::stdout().flush()?;
+                    #[cfg(feature = "gui")]
+                    LLM_STREAM_BUF.lock().unwrap().1.push_str(content);
 
                     full_message.content.push_str(content);
                 }
