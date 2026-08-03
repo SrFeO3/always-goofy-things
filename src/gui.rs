@@ -16,22 +16,13 @@ use crate::cmd::{self, SlashCmdResult};
 use crate::compat_provider::LlmProvider;
 use crate::persistence;
 use crate::startup::{self, Config};
-use crate::tools::{
-    TOOL_INTERACT_CH, ToolInteractMsg, ToolNotice, ToolRunDecision, ToolRunDecisionKind,
-};
+use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
 use crate::{LLM_STREAM_BUF, Message, Metrics, Session, Settings, run_reasoning_loop};
 
 // egui color constants -- roughly match ANSI 32/35/90 as rendered in Alacritty's default theme.
 const C_GREEN: egui::Color32 = egui::Color32::from_rgb(120, 170, 80);
 const C_MAGENTA: egui::Color32 = egui::Color32::from_rgb(170, 120, 170);
 const C_GRAY: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
-
-// Unified live-event queue preserving arrival order during a turn.
-enum LiveItem {
-    Reasoning(String),
-    Content(String),
-    ToolNotice(ToolNotice),
-}
 
 struct GuiApp {
     config: Arc<Config>,
@@ -43,7 +34,11 @@ struct GuiApp {
     current_model: String,
     input_text: String,
     conversation: String,
-    live_items: VecDeque<LiveItem>,
+    /// In-progress messages for the current turn (cleared on completion).
+    /// Each entry is a `Message` rendered through the same code path as
+    /// completed session messages, preserving chronological
+    /// assistant / tool / assistant ordering.
+    draft_msgs: Vec<Message>,
     pending_confirms: VecDeque<PendingConfirm>,
 
     done_rx: Option<oneshot::Receiver<(Session, Settings, Metrics, bool)>>,
@@ -82,7 +77,7 @@ impl GuiApp {
             current_model,
             input_text: String::new(),
             conversation: String::new(),
-            live_items: VecDeque::new(),
+            draft_msgs: Vec::new(),
             pending_confirms: VecDeque::new(),
             done_rx: None,
             is_running: false,
@@ -93,6 +88,66 @@ impl GuiApp {
     fn sync_model(&mut self) {
         if let Some(ref s) = self.settings {
             self.current_model = s.llm_model.clone();
+        }
+    }
+
+    /// Render a single `Message` with consistent formatting.
+    /// Used for both completed session messages and the in-progress draft,
+    /// ensuring identical display during and after a turn.
+    fn render_message(ui: &mut egui::Ui, msg: &Message, turn: &mut u32) {
+        match msg.role.as_str() {
+            "user" => {
+                *turn += 1;
+                ui.colored_label(
+                    C_GRAY,
+                    format!("\u{2500}\u{2500} Turn {} \u{2500}\u{2500}", *turn),
+                );
+                ui.label(format!("User-{} > {}", *turn, msg.content));
+                for f in &msg.attached_files {
+                    ui.colored_label(C_GRAY, format!("[Attached] {}", f.path));
+                }
+            }
+            "assistant" => {
+                if let Some(ref rc) = msg.reasoning_content
+                    && !rc.trim().is_empty()
+                {
+                    ui.colored_label(C_GREEN, "[Thinking]");
+                    ui.colored_label(C_GREEN, rc);
+                }
+                if !msg.content.trim().is_empty() {
+                    ui.label(format!("Assistant > {}", msg.content));
+                } else if let Some(ref tc) = msg.tool_calls
+                    && !tc.is_empty()
+                {
+                    let names: Vec<&str> = tc.iter().map(|c| c.function.name.as_str()).collect();
+                    ui.label(format!("Assistant > [Tool Call: {}]", names.join(", ")));
+                }
+            }
+            "tool" => {
+                let name = msg.tool_name.as_deref().unwrap_or("?");
+                match msg.tool_call_decision.as_ref().map(|d| &d.kind) {
+                    Some(ToolRunDecisionKind::AutoConfirm) => {
+                        ui.colored_label(C_MAGENTA, format!("[Tool: {}] (AutoConfirm)", name));
+                    }
+                    Some(ToolRunDecisionKind::UserConfirm) => {
+                        ui.colored_label(C_GREEN, format!("[Tool: {}] (UserConfirm)", name));
+                    }
+                    _ => {
+                        ui.label(format!("[Tool: {}]", name));
+                    }
+                }
+                if !msg.content.is_empty() {
+                    ui.label(format!("  {}", msg.content));
+                }
+                if let Some(reason) = msg
+                    .tool_call_decision
+                    .as_ref()
+                    .and_then(|d| d.reason.as_deref())
+                {
+                    ui.colored_label(C_MAGENTA, reason);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -183,30 +238,39 @@ pub fn run(config: Config, provider: LlmProvider) {
 
 impl eframe::App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain streaming text into the unified live-items queue.
+        // Drain streaming text into the last draft assistant message.
         let mut had_update = false;
         {
             let mut buf = LLM_STREAM_BUF.lock().unwrap();
             let (ref mut reasoning, ref mut content) = *buf;
-            if !reasoning.is_empty() {
-                let text = std::mem::take(reasoning);
-                match self.live_items.back_mut() {
-                    Some(LiveItem::Reasoning(existing)) => existing.push_str(&text),
-                    _ => self.live_items.push_back(LiveItem::Reasoning(text)),
+            let has_stream = !reasoning.is_empty() || !content.is_empty();
+            if has_stream {
+                // Ensure the last draft message is an assistant (push one if
+                // the queue is empty or the last entry is a tool message).
+                if self.draft_msgs.last().is_none_or(|m| m.role != "assistant") {
+                    self.draft_msgs.push(Message {
+                        role: "assistant".to_string(),
+                        ..Default::default()
+                    });
                 }
-                had_update = true;
-            }
-            if !content.is_empty() {
-                let text = std::mem::take(content);
-                match self.live_items.back_mut() {
-                    Some(LiveItem::Content(existing)) => existing.push_str(&text),
-                    _ => self.live_items.push_back(LiveItem::Content(text)),
+                let draft = self.draft_msgs.last_mut().unwrap();
+                if !reasoning.is_empty() {
+                    let text = std::mem::take(reasoning);
+                    draft
+                        .reasoning_content
+                        .get_or_insert_default()
+                        .push_str(&text);
+                    had_update = true;
                 }
-                had_update = true;
+                if !content.is_empty() {
+                    let text = std::mem::take(content);
+                    draft.content.push_str(&text);
+                    had_update = true;
+                }
             }
         }
 
-        // Drain tool interactions into the same queue to preserve arrival order.
+        // Drain tool interactions.
         while let Ok(msg) = TOOL_INTERACT_CH.1.lock().unwrap().try_recv() {
             match msg {
                 ToolInteractMsg::Prompt { notice, reply } => {
@@ -218,7 +282,20 @@ impl eframe::App for GuiApp {
                     had_update = true;
                 }
                 ToolInteractMsg::Notice(notice) => {
-                    self.live_items.push_back(LiveItem::ToolNotice(notice));
+                    // Push as a "tool" message so it renders in chronological
+                    // order between assistant messages.
+                    let args_str = serde_json::to_string(&notice.args).unwrap_or_default();
+                    self.draft_msgs.push(Message {
+                        role: "tool".to_string(),
+                        content: format!("Args: {}", args_str),
+                        tool_name: Some(notice.name),
+                        tool_call_decision: Some(ToolRunDecision {
+                            proceed: true,
+                            kind: ToolRunDecisionKind::AutoConfirm,
+                            reason: notice.reason,
+                        }),
+                        ..Default::default()
+                    });
                     had_update = true;
                 }
             }
@@ -241,7 +318,7 @@ impl eframe::App for GuiApp {
             self.done_rx = None;
             self.is_running = false;
             self.sync_model();
-            self.live_items.clear();
+            self.draft_msgs.clear();
             self.pending_confirms.clear();
             self.conversation.clear();
             self.focus_input = true;
@@ -278,7 +355,7 @@ impl eframe::App for GuiApp {
                             self.metrics = metrics.or_else(|| self.metrics.take());
                         }
                         self.is_running = false;
-                        self.live_items.clear();
+                        self.draft_msgs.clear();
                         self.pending_confirms.clear();
                         self.focus_input = true;
                     }
@@ -289,9 +366,12 @@ impl eframe::App for GuiApp {
         // ── bottom: input ──
         egui::Panel::bottom("input_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut te = egui::TextEdit::singleline(&mut self.input_text)
-                    .hint_text("Describe your task... (@file for attachments)")
-                    .desired_width(f32::INFINITY);
+                let mut te = egui::TextEdit::multiline(&mut self.input_text)
+                    .hint_text(
+                        "Describe your task... (Shift+Enter for newline, @file for attachments)",
+                    )
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(3);
                 if self.is_running {
                     te = te.interactive(false);
                 }
@@ -302,8 +382,10 @@ impl eframe::App for GuiApp {
                     self.focus_input = false;
                 }
 
-                let enter_sent = (resp.lost_focus()
-                    || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                // Enter sends, Shift+Enter inserts newline (the TextEdit already
+                // inserted the newline; we detect plain Enter here).
+                let enter_send = ui
+                    .input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
                     && !self.input_text.trim().is_empty()
                     && !self.is_running;
 
@@ -314,7 +396,7 @@ impl eframe::App for GuiApp {
                     )
                     .clicked();
 
-                if send_clicked || enter_sent {
+                if send_clicked || enter_send {
                     let ctx = ui.ctx().clone();
                     self.send_message(&ctx);
                 }
@@ -327,103 +409,39 @@ impl eframe::App for GuiApp {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+                    let mut turn = 0u32;
+
+                    // Render completed session messages.
                     if let Some(ref s) = self.session {
-                        let mut turn = 0u32;
                         for msg in s.messages.iter().skip(1) {
-                            match msg.role.as_str() {
-                                "user" => {
-                                    turn += 1;
-                                    ui.colored_label(
-                                        C_GRAY,
-                                        format!("\u{2500}\u{2500} Turn {} \u{2500}\u{2500}", turn),
-                                    );
-                                    ui.label(&msg.content);
-                                    for f in &msg.attached_files {
-                                        ui.colored_label(C_GRAY, format!("[Attached] {}", f.path));
-                                    }
-                                }
-                                "assistant" => {
-                                    if let Some(ref rc) = msg.reasoning_content
-                                        && !rc.trim().is_empty()
-                                    {
-                                        ui.colored_label(C_GREEN, "[Thinking]");
-                                        ui.colored_label(C_GREEN, rc);
-                                    }
-                                    if !msg.content.trim().is_empty() {
-                                        ui.label(format!("Assistant > {}", msg.content));
-                                    } else if let Some(ref tc) = msg.tool_calls
-                                        && !tc.is_empty()
-                                    {
-                                        let names: Vec<&str> =
-                                            tc.iter().map(|c| c.function.name.as_str()).collect();
-                                        ui.label(format!(
-                                            "Assistant > [Tool Call: {}]",
-                                            names.join(", ")
-                                        ));
-                                    }
-                                }
-                                "tool" => {
-                                    let name = msg.tool_name.as_deref().unwrap_or("?");
-                                    match msg.tool_call_decision.as_ref().map(|d| &d.kind) {
-                                        Some(ToolRunDecisionKind::AutoConfirm) => {
-                                            ui.colored_label(
-                                                C_MAGENTA,
-                                                format!("[Tool: {}] (AutoConfirm)", name),
-                                            );
-                                        }
-                                        Some(ToolRunDecisionKind::UserConfirm) => {
-                                            ui.colored_label(
-                                                C_GREEN,
-                                                format!("[Tool: {}] (UserConfirm)", name),
-                                            );
-                                        }
-                                        _ => {
-                                            ui.label(format!("[Tool: {}]", name));
-                                        }
-                                    }
-                                    ui.label(format!("  {}", msg.content));
-                                }
-                                _ => {}
-                            }
+                            Self::render_message(ui, msg, &mut turn);
                         }
                     }
+
+                    // Render in-progress draft messages (chronological order).
+                    for msg in &self.draft_msgs {
+                        Self::render_message(ui, msg, &mut turn);
+                    }
+
+                    // Error messages (set by send_message on early returns).
                     if !self.conversation.is_empty() {
                         ui.label(&self.conversation);
                     }
-                    for item in &self.live_items {
-                        match item {
-                            LiveItem::Reasoning(text) => {
-                                ui.colored_label(C_GREEN, text);
-                            }
-                            LiveItem::Content(text) => {
-                                ui.label(text);
-                            }
-                            LiveItem::ToolNotice(notice) => {
-                                ui.separator();
-                                ui.colored_label(
-                                    C_MAGENTA,
-                                    format!("Auto-confirmed: {}", notice.name),
-                                );
-                                ui.monospace(format!(
-                                    "Args: {}",
-                                    serde_json::to_string(&notice.args).unwrap_or_default()
-                                ));
-                                if let Some(ref r) = notice.reason {
-                                    ui.colored_label(C_MAGENTA, r);
-                                }
-                                ui.add_space(2.0);
-                            }
-                        }
+
+                    // Status indicators.
+                    let has_session_msgs =
+                        self.session.as_ref().is_some_and(|s| s.messages.len() > 1);
+                    let is_idle = !self.is_running
+                        && self.draft_msgs.is_empty()
+                        && self.conversation.is_empty()
+                        && !has_session_msgs;
+                    if is_idle {
+                        ui.colored_label(C_GRAY, "Type a task and press Enter or click Send.");
                     }
-                    if self.is_running && self.live_items.is_empty() && self.conversation.is_empty()
+                    if self.is_running && self.draft_msgs.is_empty() && self.conversation.is_empty()
                     {
                         ui.colored_label(C_GRAY, "Waiting for response...");
-                    }
-                    if self.conversation.is_empty()
-                        && self.live_items.is_empty()
-                        && !self.is_running
-                    {
-                        ui.colored_label(C_GRAY, "Type a task and press Enter or click Send.");
                     }
                 });
         });
@@ -477,7 +495,11 @@ impl eframe::App for GuiApp {
 
 impl GuiApp {
     fn send_message(&mut self, ctx: &egui::Context) {
-        let input = std::mem::take(&mut self.input_text);
+        let mut input = std::mem::take(&mut self.input_text);
+        // Strip the trailing newline that Enter-to-send inserts in multiline mode.
+        if input.ends_with('\n') {
+            input.pop();
+        }
         if input.trim().is_empty() {
             return;
         }
@@ -580,7 +602,12 @@ impl GuiApp {
         let (done_tx, done_rx) = oneshot::channel();
 
         self.is_running = true;
-        self.live_items.clear();
+        // Seed draft queue with one empty assistant message for streaming display.
+        // Rendered in ui() through the same code path as completed messages.
+        self.draft_msgs.push(Message {
+            role: "assistant".to_string(),
+            ..Default::default()
+        });
         self.pending_confirms.clear();
 
         // Pre-push user message to canonical session for immediate display.
