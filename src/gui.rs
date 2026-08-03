@@ -42,7 +42,7 @@ struct GuiApp {
     draft_msgs: Vec<Message>,
     pending_confirms: VecDeque<PendingConfirm>,
 
-    done_rx: Option<oneshot::Receiver<(Session, Settings, Metrics, bool)>>,
+    done_rx: Option<oneshot::Receiver<(Session, Settings, Metrics, bool, Option<String>)>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: bool,
     focus_input: bool,
@@ -267,7 +267,14 @@ impl eframe::App for GuiApp {
                 }
                 if !content.is_empty() {
                     let text = std::mem::take(content);
-                    draft.content.push_str(&text);
+                    // LLM errors are written to the content buffer with a
+                    // marker; route to conversation so they survive draft
+                    // cleanup on completion.
+                    if text.starts_with("[LLM Error]") {
+                        self.conversation.push_str(&text);
+                    } else {
+                        draft.content.push_str(&text);
+                    }
                     had_update = true;
                 }
             }
@@ -310,13 +317,17 @@ impl eframe::App for GuiApp {
         // Check worker completion.
         let mut had_completion = false;
         if let Some(ref mut rx) = self.done_rx
-            && let Ok((mut session, settings, metrics, done)) = rx.try_recv()
+            && let Ok((mut session, settings, metrics, done, err_msg)) = rx.try_recv()
         {
             // Only advance turn when the reasoning loop completed successfully.
             // On interruption (Stop / error) the user message is reused on the
             // next send, matching CLI Ctrl+C behaviour.
             if done {
                 session.turn += 1;
+            }
+            if let Some(msg) = err_msg {
+                self.conversation
+                    .push_str(&format!("\n[LLM Error] {}\n", msg));
             }
             self.session = Some(session);
             self.settings = Some(settings);
@@ -327,7 +338,6 @@ impl eframe::App for GuiApp {
             self.sync_model();
             self.draft_msgs.clear();
             self.pending_confirms.clear();
-            self.conversation.clear();
             self.focus_input = true;
             had_completion = true;
         }
@@ -356,9 +366,13 @@ impl eframe::App for GuiApp {
                         if let Some(mut rx) = self.done_rx.take() {
                             let recovered = rx.try_recv().ok();
                             match recovered {
-                                Some((mut session, settings, metrics, done)) => {
+                                Some((mut session, settings, metrics, done, err_msg)) => {
                                     if done {
                                         session.turn += 1;
+                                    }
+                                    if let Some(msg) = err_msg {
+                                        self.conversation
+                                            .push_str(&format!("\n[LLM Error] {}\n", msg));
                                     }
                                     self.session = Some(session);
                                     self.settings = Some(settings);
@@ -367,9 +381,6 @@ impl eframe::App for GuiApp {
                                 None => {
                                     // Worker was aborted; the pre-pushed user
                                     // message stays visible (matching CLI Ctrl+C).
-                                    // Duplicates are prevented by send_message
-                                    // updating in-place when the last message is
-                                    // already an unanswered user.
                                 }
                             }
                         }
@@ -446,12 +457,14 @@ impl eframe::App for GuiApp {
 
                     // Error messages (set by send_message on early returns).
                     if !self.conversation.is_empty() {
-                        ui.label(&self.conversation);
+                        ui.colored_label(C_RED, &self.conversation);
                     }
 
-                    // Interruption indicator: last session message is an unanswered user.
+                    // Interruption indicator: unanswered user without an error message.
+                    // (LLM errors are displayed separately via self.conversation.)
                     if !self.is_running
                         && self.draft_msgs.is_empty()
+                        && self.conversation.is_empty()
                         && self
                             .session
                             .as_ref()
@@ -632,6 +645,7 @@ impl GuiApp {
         let provider = self.provider;
         let (done_tx, done_rx) = oneshot::channel();
 
+        self.conversation.clear();
         self.is_running = true;
         // Push / update user message in session for display.
         // If the previous turn left an unanswered user message (Stop / error),
@@ -661,7 +675,7 @@ impl GuiApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         let handle = tokio::spawn(async move {
-            let done = run_reasoning_loop(
+            let (done, err_msg) = match run_reasoning_loop(
                 &config,
                 provider,
                 &mut session,
@@ -671,9 +685,12 @@ impl GuiApp {
                 attached_files,
             )
             .await
-            .unwrap_or(false);
+            {
+                Ok(d) => (d, None),
+                Err(e) => (false, Some(e.to_string())),
+            };
 
-            let _ = done_tx.send((session, settings, metrics, done));
+            let _ = done_tx.send((session, settings, metrics, done, err_msg));
         });
 
         self.done_rx = Some(done_rx);

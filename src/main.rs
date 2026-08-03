@@ -589,6 +589,10 @@ async fn run_reasoning_loop(
                    Err(e) => {
                        println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
                        println!("Conversation history preserved. You can try again or rephrase.");
+                       #[cfg(feature = "gui")]
+                       {
+                           LLM_STREAM_BUF.lock().unwrap().1.push_str(&format!("[LLM Error] {}", e));
+                       }
                        break 'reasoning_loop;
                     }
                 }
