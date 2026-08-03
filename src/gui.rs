@@ -23,6 +23,7 @@ use crate::{LLM_STREAM_BUF, Message, Metrics, Session, Settings, run_reasoning_l
 const C_GREEN: egui::Color32 = egui::Color32::from_rgb(120, 170, 80);
 const C_MAGENTA: egui::Color32 = egui::Color32::from_rgb(170, 120, 170);
 const C_GRAY: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
+const C_RED: egui::Color32 = egui::Color32::from_rgb(220, 80, 80);
 
 struct GuiApp {
     config: Arc<Config>,
@@ -42,6 +43,7 @@ struct GuiApp {
     pending_confirms: VecDeque<PendingConfirm>,
 
     done_rx: Option<oneshot::Receiver<(Session, Settings, Metrics, bool)>>,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: bool,
     focus_input: bool,
 }
@@ -80,6 +82,7 @@ impl GuiApp {
             draft_msgs: Vec::new(),
             pending_confirms: VecDeque::new(),
             done_rx: None,
+            worker_handle: None,
             is_running: false,
             focus_input: true,
         }
@@ -307,15 +310,19 @@ impl eframe::App for GuiApp {
         // Check worker completion.
         let mut had_completion = false;
         if let Some(ref mut rx) = self.done_rx
-            && let Ok((mut session, settings, metrics, _done)) = rx.try_recv()
+            && let Ok((mut session, settings, metrics, done)) = rx.try_recv()
         {
-            // Always advance turn; otherwise run_reasoning_loop will
-            // overwrite the last user message on the next round.
-            session.turn += 1;
+            // Only advance turn when the reasoning loop completed successfully.
+            // On interruption (Stop / error) the user message is reused on the
+            // next send, matching CLI Ctrl+C behaviour.
+            if done {
+                session.turn += 1;
+            }
             self.session = Some(session);
             self.settings = Some(settings);
             self.metrics = Some(metrics);
             self.done_rx = None;
+            self.worker_handle = None;
             self.is_running = false;
             self.sync_model();
             self.draft_msgs.clear();
@@ -341,18 +348,30 @@ impl eframe::App for GuiApp {
                 ui.label(format!("model: {}", self.current_model));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.is_running && ui.button("\u{23f9} Stop").clicked() {
-                        // Recover session/settings/metrics if the worker finished before this click; otherwise leave them None.
+                        // Abort the worker task.
+                        if let Some(handle) = self.worker_handle.take() {
+                            handle.abort();
+                        }
+                        // Recover session if the worker finished just before this click.
                         if let Some(mut rx) = self.done_rx.take() {
                             let recovered = rx.try_recv().ok();
-                            let (session, settings, metrics) = match recovered {
-                                Some((session, settings, metrics, _done)) => {
-                                    (Some(session), Some(settings), Some(metrics))
+                            match recovered {
+                                Some((mut session, settings, metrics, done)) => {
+                                    if done {
+                                        session.turn += 1;
+                                    }
+                                    self.session = Some(session);
+                                    self.settings = Some(settings);
+                                    self.metrics = Some(metrics);
                                 }
-                                None => (None, None, None),
-                            };
-                            self.session = session.or_else(|| self.session.take());
-                            self.settings = settings.or_else(|| self.settings.take());
-                            self.metrics = metrics.or_else(|| self.metrics.take());
+                                None => {
+                                    // Worker was aborted; the pre-pushed user
+                                    // message stays visible (matching CLI Ctrl+C).
+                                    // Duplicates are prevented by send_message
+                                    // updating in-place when the last message is
+                                    // already an unanswered user.
+                                }
+                            }
                         }
                         self.is_running = false;
                         self.draft_msgs.clear();
@@ -367,8 +386,9 @@ impl eframe::App for GuiApp {
         egui::Panel::bottom("input_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let mut te = egui::TextEdit::multiline(&mut self.input_text)
+                    .frame(egui::Frame::default())
                     .hint_text(
-                        "Describe your task... (Shift+Enter for newline, @file for attachments)",
+                        "Describe your task... (Enter to send, Shift+Enter for newline, @file for attachments)",
                     )
                     .desired_width(f32::INFINITY)
                     .desired_rows(3);
@@ -429,6 +449,17 @@ impl eframe::App for GuiApp {
                         ui.label(&self.conversation);
                     }
 
+                    // Interruption indicator: last session message is an unanswered user.
+                    if !self.is_running
+                        && self.draft_msgs.is_empty()
+                        && self
+                            .session
+                            .as_ref()
+                            .is_some_and(|s| s.messages.last().is_some_and(|m| m.role == "user"))
+                    {
+                        ui.colored_label(C_RED, "[interrupted]");
+                    }
+
                     // Status indicators.
                     let has_session_msgs =
                         self.session.as_ref().is_some_and(|s| s.messages.len() > 1);
@@ -437,7 +468,7 @@ impl eframe::App for GuiApp {
                         && self.conversation.is_empty()
                         && !has_session_msgs;
                     if is_idle {
-                        ui.colored_label(C_GRAY, "Type a task and press Enter or click Send.");
+                        ui.colored_label(C_GRAY, "Type a task and press Enter.");
                     }
                     if self.is_running && self.draft_msgs.is_empty() && self.conversation.is_empty()
                     {
@@ -575,7 +606,7 @@ impl GuiApp {
                 return;
             }
         };
-        let mut settings = match self.settings.take() {
+        let mut settings = match self.settings.clone() {
             Some(s) => s,
             None => {
                 self.conversation
@@ -585,7 +616,7 @@ impl GuiApp {
                 return;
             }
         };
-        let mut metrics = match self.metrics.take() {
+        let mut metrics = match self.metrics.clone() {
             Some(m) => m,
             None => {
                 self.conversation
@@ -602,28 +633,34 @@ impl GuiApp {
         let (done_tx, done_rx) = oneshot::channel();
 
         self.is_running = true;
-        // Seed draft queue with one empty assistant message for streaming display.
-        // Rendered in ui() through the same code path as completed messages.
+        // Push / update user message in session for display.
+        // If the previous turn left an unanswered user message (Stop / error),
+        // update it in-place so the turn counter stays correct.
+        if let Some(ref mut s) = self.session {
+            if s.messages.last().is_some_and(|m| m.role == "user") {
+                let last = s.messages.last_mut().unwrap();
+                last.content = query_text.clone();
+                last.attached_files = attached_files.clone();
+            } else {
+                s.messages.push(Message {
+                    role: "user".to_string(),
+                    content: query_text.clone(),
+                    attached_files: attached_files.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        // Seed an empty assistant draft for streaming display.
         self.draft_msgs.push(Message {
             role: "assistant".to_string(),
             ..Default::default()
         });
         self.pending_confirms.clear();
 
-        // Pre-push user message to canonical session for immediate display.
-        if let Some(ref mut s) = self.session {
-            s.messages.push(Message {
-                role: "user".to_string(),
-                content: query_text.clone(),
-                attached_files: attached_files.clone(),
-                ..Default::default()
-            });
-        }
-
         // This runs in ui (after logic), so kick off the 16ms wakeup here too.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let done = run_reasoning_loop(
                 &config,
                 provider,
@@ -640,5 +677,6 @@ impl GuiApp {
         });
 
         self.done_rx = Some(done_rx);
+        self.worker_handle = Some(handle);
     }
 }

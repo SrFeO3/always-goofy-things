@@ -116,6 +116,7 @@ impl Session {
 }
 
 /// Runtime settings mutable via `/model` / `/config` slash commands.
+#[derive(Clone)]
 pub(crate) struct Settings {
     pub(crate) llm_model: String,
     pub(crate) verbose_level: startup::Verbosity,
@@ -150,7 +151,7 @@ impl Settings {
 }
 
 /// Accumulated token metrics, derived from LLM responses.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Metrics {
     pub(crate) in_normal: u64,
     pub(crate) in_cached: u64,
