@@ -257,13 +257,13 @@ pub async fn execute_tool(name: &str, args: &serde_json::Value) -> Result<serde_
     }
 
     match name {
-        "read_file" => execute_read_file(&args),
-        "write_file" => execute_write_file(&args),
-        "str_replace_editor" => execute_str_replace(&args),
-        "grep_search" => execute_grep_search(&args),
-        "list_directory" => execute_list_directory(&args),
-        "execute_bash" => execute_bash(&args).await,
-        "fetch_web" => execute_fetch_web(&args).await,
+        "read_file" => execute_read_file(args),
+        "write_file" => execute_write_file(args),
+        "str_replace_editor" => execute_str_replace(args),
+        "grep_search" => execute_grep_search(args),
+        "list_directory" => execute_list_directory(args),
+        "execute_bash" => execute_bash(args).await,
+        "fetch_web" => execute_fetch_web(args).await,
         _ => Err(anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
     }
 }
@@ -304,20 +304,21 @@ pub async fn confirm_execute_tool(
     unsafe_reflex: bool,
     batch: bool,
 ) -> ToolRunDecision {
-    if unsafe_reflex && let (proceed, reason) = auto_confirm(name, args) {
-        if proceed {
-            #[cfg(feature = "gui")]
-            let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
-                name: name.to_string(),
-                args: args.clone(),
-                reason: reason.clone(),
-            }));
-            return ToolRunDecision {
-                proceed: true,
-                kind: ToolRunDecisionKind::AutoConfirm,
-                reason,
-            };
-        }
+    if unsafe_reflex
+        && let (proceed, reason) = auto_confirm(name, args)
+        && proceed
+    {
+        #[cfg(feature = "gui")]
+        let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
+            name: name.to_string(),
+            args: args.clone(),
+            reason: reason.clone(),
+        }));
+        return ToolRunDecision {
+            proceed: true,
+            kind: ToolRunDecisionKind::AutoConfirm,
+            reason,
+        };
     }
 
     // In batch mode, deny any tool that wasn't auto-confirmed (no stdin available).
@@ -742,20 +743,20 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
 
     // --- Step 3.5: Tab-fuzzy + blank-line tolerant (space/tab-only blank lines ignored) ---
     let tab_skip_blank_pattern = build_tab_skip_blank_pattern(old_str);
-    if !tab_skip_blank_pattern.is_empty() {
-        if let Ok(re) = Regex::new(&tab_skip_blank_pattern) {
-            match try_fuzzy_replace(
-                &content,
-                &re,
-                old_str,
-                new_str,
-                path,
-                "tab_skip_blank_match",
-            ) {
-                Ok(res) => return Ok(res),
-                Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
-                _ => {}
-            }
+    if !tab_skip_blank_pattern.is_empty()
+        && let Ok(re) = Regex::new(&tab_skip_blank_pattern)
+    {
+        match try_fuzzy_replace(
+            &content,
+            &re,
+            old_str,
+            new_str,
+            path,
+            "tab_skip_blank_match",
+        ) {
+            Ok(res) => return Ok(res),
+            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            _ => {}
         }
     }
 
@@ -771,20 +772,20 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
 
     // --- Step 4.5: Full-fuzzy + blank-line tolerant (space/tab-only blank lines ignored) ---
     let full_skip_blank_pattern = build_full_skip_blank_pattern(old_str);
-    if !full_skip_blank_pattern.is_empty() {
-        if let Ok(re) = Regex::new(&full_skip_blank_pattern) {
-            match try_fuzzy_replace(
-                &content,
-                &re,
-                old_str,
-                new_str,
-                path,
-                "full_skip_blank_match",
-            ) {
-                Ok(res) => return Ok(res),
-                Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
-                _ => {}
-            }
+    if !full_skip_blank_pattern.is_empty()
+        && let Ok(re) = Regex::new(&full_skip_blank_pattern)
+    {
+        match try_fuzzy_replace(
+            &content,
+            &re,
+            old_str,
+            new_str,
+            path,
+            "full_skip_blank_match",
+        ) {
+            Ok(res) => return Ok(res),
+            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            _ => {}
         }
     }
 

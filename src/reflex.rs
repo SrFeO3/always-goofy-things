@@ -75,7 +75,7 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
             };
 
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                if is_safe_grep_query(&query) && is_safe_subpath(&path) {
+                if is_safe_grep_query(&query) && is_safe_subpath(path) {
                     (
                         true,
                         Some(format!(
@@ -120,12 +120,12 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                 None => return (false, None),
             };
 
-            if is_exact_matched_command(&command) {
+            if is_exact_matched_command(command) {
                 (
                     true,
                     Some(format!("A reasonably polite command: {}", command)),
                 )
-            } else if is_shallow_matched_command(&command) {
+            } else if is_shallow_matched_command(command) {
                 (
                     true,
                     Some(format!("A reasonably familiar pattern: {}", command)),

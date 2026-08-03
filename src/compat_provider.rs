@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::compat_resilience::ToolResultFormat;
 use crate::file::FileType;
-use crate::{ChatRequest, Message, Usage};
+use crate::model::{ChatRequest, Message, Usage};
 
 /// LLM API provider type
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, clap::ValueEnum)]
@@ -693,10 +693,9 @@ pub(crate) fn accumulate_usage(json: &serde_json::Value, current: &mut Option<Us
                 // Preserve prompt_tokens_details from the first non-empty details
                 if u.prompt_tokens_details.as_ref().is_some_and(|d| {
                     d.cached_tokens > 0 || d.cache_creation_tokens > 0 || d.audio_tokens > 0
-                }) {
-                    if existing.prompt_tokens_details.is_none() {
-                        existing.prompt_tokens_details = u.prompt_tokens_details;
-                    }
+                }) && existing.prompt_tokens_details.is_none()
+                {
+                    existing.prompt_tokens_details = u.prompt_tokens_details;
                 }
                 // Accumulate completion_tokens_details (reasoning tokens from OpenAI o1/o3)
                 if let Some(ref details) = u.completion_tokens_details {

@@ -17,8 +17,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::Session;
-use crate::Settings;
+use crate::model::{Message, Session, Settings};
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
 /// Outcome of handling a slash command. The caller still owns the amended
@@ -250,7 +249,7 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
 // /help
 // ---------------------------------------------------------------------------
 
-/// Print the help text (matches the spec in `work/spec/slash_command.md`).
+/// Print the help text.
 fn print_help() {
     println!(
         "\x1b[1mUsage:\x1b[0m \x1b[0m/<command> [options]
@@ -292,7 +291,7 @@ fn print_help() {
 /// the `target` turn number so the caller can reset the turn counter.
 pub(crate) fn handle_rewind(
     arg: Option<&str>,
-    messages: &mut Vec<crate::Message>,
+    messages: &mut Vec<Message>,
     current_turn: i32,
 ) -> Result<i32> {
     let target: i32 = match arg {
@@ -375,7 +374,7 @@ pub(crate) fn handle_rewind(
 ///
 /// Without `-a` / `--all`, prints a human-readable summary of each turn.
 /// With `-a` / `--all`, prints the full raw JSON payload.
-fn handle_history(arg: Option<&str>, messages: &Vec<crate::Message>) {
+fn handle_history(arg: Option<&str>, messages: &Vec<Message>) {
     let show_all = match arg {
         Some(s) => s == "-a" || s == "--all",
         None => false,
@@ -519,7 +518,7 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
 /// Restores the previous session from `previous_session_{label}.jsonl`, replacing
 /// the current conversation. Returns the new turn count and the label used for restoration.
 pub(crate) fn handle_restore(
-    messages: &mut Vec<crate::Message>,
+    messages: &mut Vec<Message>,
     current_label: &str,
     arg_label: Option<&str>,
 ) -> Result<(i32, String)> {
@@ -579,8 +578,10 @@ pub(crate) fn handle_restore(
                 let path_str = f.path;
                 let fallback_type = f.attach_type;
                 if Path::new(&path_str).exists() {
-                    match attach::read_attached_files(&[path_str.clone()], attach::AttachMode::Raw)
-                    {
+                    match attach::read_attached_files(
+                        std::slice::from_ref(&path_str),
+                        attach::AttachMode::Raw,
+                    ) {
                         Ok(mut entries) => {
                             if let Some(entry) = entries.pop() {
                                 reloaded.push(entry);

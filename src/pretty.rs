@@ -25,12 +25,12 @@
 //!     - Success: Minimal, `ls`-like terminal output (multi-line)
 //!     - Error: Error reason (1 line)
 //! - `execute_bash`: Run terminal commands to perform development tasks.
-//!       - Preview: Show the command to be executed (1 line)
-//!      - Success: Minimal terminal output (multi-line)
-//!      - Error: Error reason (multi-line)
+//!     - Preview: Show the command to be executed (1 line)
+//!     - Success: Minimal terminal output (multi-line)
+//!     - Error: Error reason (multi-line)
 //! - `fetch_web`: Fetch and extract text content from a specified URL.
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
-//!      - Error: Error reason (multi-line)
+//!     - Error: Error reason (multi-line)
 
 use serde_json::{Value, json};
 
@@ -279,8 +279,8 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
 
     // Step 2: Space-fuzzy match - only horizontal space count variation ([ ]*)
     let space_fuzzy_pattern = build_space_fuzzy_pattern(old_s);
-    if let Ok(space_re) = regex::Regex::new(&space_fuzzy_pattern) {
-        if let Some(res) = try_fuzzy_diff(
+    if let Ok(space_re) = regex::Regex::new(&space_fuzzy_pattern)
+        && let Some(res) = try_fuzzy_diff(
             &path,
             &content,
             &space_re,
@@ -288,15 +288,15 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
             new_s,
             &file_lines,
             "space_fuzzy_match",
-        ) {
-            return Some(res);
-        }
+        )
+    {
+        return Some(res);
     }
 
     // Step 3: Tab-fuzzy match - tabs in old_s become [ \t]* (space/tab mix)
     let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_s);
-    if let Ok(tab_re) = regex::Regex::new(&tab_fuzzy_pattern) {
-        if let Some(res) = try_fuzzy_diff(
+    if let Ok(tab_re) = regex::Regex::new(&tab_fuzzy_pattern)
+        && let Some(res) = try_fuzzy_diff(
             &path,
             &content,
             &tab_re,
@@ -304,27 +304,26 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
             new_s,
             &file_lines,
             "tab_fuzzy_match",
-        ) {
-            return Some(res);
-        }
+        )
+    {
+        return Some(res);
     }
 
     // Step 3.5: Tab-fuzzy + blank-line tolerant
     let tab_skip_blank_pattern = build_tab_skip_blank_pattern(old_s);
-    if !tab_skip_blank_pattern.is_empty() {
-        if let Ok(tab_skip_re) = regex::Regex::new(&tab_skip_blank_pattern) {
-            if let Some(res) = try_fuzzy_diff(
-                &path,
-                &content,
-                &tab_skip_re,
-                old_s,
-                new_s,
-                &file_lines,
-                "tab_skip_blank_match",
-            ) {
-                return Some(res);
-            }
-        }
+    if !tab_skip_blank_pattern.is_empty()
+        && let Ok(tab_skip_re) = regex::Regex::new(&tab_skip_blank_pattern)
+        && let Some(res) = try_fuzzy_diff(
+            &path,
+            &content,
+            &tab_skip_re,
+            old_s,
+            new_s,
+            &file_lines,
+            "tab_skip_blank_match",
+        )
+    {
+        return Some(res);
     }
 
     // Step 4: Full fuzzy match - all whitespace fully flexible
@@ -353,20 +352,19 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
 
     // Step 4.5: Full-fuzzy + blank-line tolerant
     let full_skip_blank_pattern = build_full_skip_blank_pattern(old_s);
-    if !full_skip_blank_pattern.is_empty() {
-        if let Ok(full_skip_re) = regex::Regex::new(&full_skip_blank_pattern) {
-            if let Some(res) = try_fuzzy_diff(
-                &path,
-                &content,
-                &full_skip_re,
-                old_s,
-                new_s,
-                &file_lines,
-                "full_skip_blank_match",
-            ) {
-                return Some(res);
-            }
-        }
+    if !full_skip_blank_pattern.is_empty()
+        && let Ok(full_skip_re) = regex::Regex::new(&full_skip_blank_pattern)
+        && let Some(res) = try_fuzzy_diff(
+            &path,
+            &content,
+            &full_skip_re,
+            old_s,
+            new_s,
+            &file_lines,
+            "full_skip_blank_match",
+        )
+    {
+        return Some(res);
     }
 
     println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);

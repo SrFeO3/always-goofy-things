@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 
-use crate::Message;
 use crate::attach::AttachedFile;
+use crate::model::Message;
 
 /// Project directories singleton.
 fn project_dirs() -> Option<ProjectDirs> {

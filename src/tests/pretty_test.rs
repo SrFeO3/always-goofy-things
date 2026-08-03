@@ -153,7 +153,7 @@ fn test_pretty_print_command_write_file_multiline() {
         "path": "multi.py",
         "content": "#!/usr/bin/env python3\n\nprint(\"hello\")\nprint(\"world\")"
     });
-    // Should render 4 lines (including blank line) as Added with line numbers 1–4
+    // Should render 4 lines (including blank line) as Added with line numbers 1-4
     pretty_print_command("write_file", &args);
 }
 

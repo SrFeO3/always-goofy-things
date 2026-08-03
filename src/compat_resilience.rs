@@ -10,6 +10,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::model::{FunctionCall, ToolCall};
+
 /// How tool results are formatted when sent back to the LLM.
 /// Which format works best depends on the LLM's capabilities;
 /// some models handle plain text better, others handle structured JSON.
@@ -171,10 +173,7 @@ pub fn normalize_tool_call_format(json: &mut Value) -> bool {
 /// Post-processes tool calls assembled from SSE streaming to handle
 /// DeepSeek-style missing fields (id, function.name) and validate
 /// arguments JSON in parallel tool calling scenarios.
-pub fn post_process_tool_calls(
-    tool_calls: &mut Vec<crate::ToolCall>,
-    tool_defs: &[serde_json::Value],
-) {
+pub fn post_process_tool_calls(tool_calls: &mut Vec<ToolCall>, tool_defs: &[serde_json::Value]) {
     // First pass: fill in missing ids and function names
     for i in 0..tool_calls.len() {
         if tool_calls[i].id.is_empty() {
@@ -244,7 +243,7 @@ pub fn extract_msg_base(json: &Value) -> &Value {
 /// `with_thought_signature=false` skips the `thought_signature` field
 /// (preserving the trailing-buffer drain's historical behavior).
 pub fn merge_tool_call_delta(
-    tool_calls: &mut Vec<crate::ToolCall>,
+    tool_calls: &mut Vec<ToolCall>,
     calls: &[Value],
     default_index: usize,
     with_thought_signature: bool,
@@ -256,10 +255,10 @@ pub fn merge_tool_call_delta(
             .unwrap_or(default_index as u64) as usize;
 
         while tool_calls.len() <= index {
-            tool_calls.push(crate::ToolCall {
+            tool_calls.push(ToolCall {
                 id: String::new(),
                 tool_type: "function".to_string(),
-                function: crate::FunctionCall {
+                function: FunctionCall {
                     name: String::new(),
                     arguments: serde_json::Value::String(String::new()),
                 },

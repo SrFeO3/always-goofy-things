@@ -79,8 +79,7 @@ pub fn is_safe_url(url: &str) -> bool {
     }
 
     ALLOWED_PREFIXES.iter().any(|prefix| {
-        if url.starts_with(prefix) {
-            let remaining = &url[prefix.len()..];
+        if let Some(remaining) = url.strip_prefix(prefix) {
             remaining
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')

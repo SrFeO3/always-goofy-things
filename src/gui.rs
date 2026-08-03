@@ -14,10 +14,11 @@ use tokio::sync::oneshot;
 use crate::attach;
 use crate::cmd::{self, SlashCmdResult};
 use crate::compat_provider::LlmProvider;
+use crate::model::{LLM_STREAM_BUF, Message, Metrics, Session, Settings};
 use crate::persistence;
+use crate::reasoning::run_reasoning_loop;
 use crate::startup::{self, Config};
 use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
-use crate::{LLM_STREAM_BUF, Message, Metrics, Session, Settings, run_reasoning_loop};
 
 // egui color constants -- roughly match ANSI 32/35/90 as rendered in Alacritty's default theme.
 const C_GREEN: egui::Color32 = egui::Color32::from_rgb(120, 170, 80);
@@ -352,7 +353,7 @@ impl eframe::App for GuiApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ── top bar ──
+        // -- top bar --
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("model: {}", self.current_model));
@@ -393,7 +394,7 @@ impl eframe::App for GuiApp {
             });
         });
 
-        // ── bottom: input ──
+        // -- bottom: input --
         egui::Panel::bottom("input_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let mut te = egui::TextEdit::multiline(&mut self.input_text)
@@ -434,7 +435,7 @@ impl eframe::App for GuiApp {
             });
         });
 
-        // ── centre: conversation ──
+        // -- centre: conversation --
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
@@ -490,7 +491,7 @@ impl eframe::App for GuiApp {
                 });
         });
 
-        // ── modal: tool confirm (oldest unhandled request only) ──
+        // -- modal: tool confirm (oldest unhandled request only) --
         let mut confirm_response: Option<ToolRunDecision> = None;
         if let Some(pending) = self.pending_confirms.front() {
             egui::Window::new("Confirm Tool Execution")

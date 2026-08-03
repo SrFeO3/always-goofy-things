@@ -152,8 +152,8 @@ pub struct Config {
 
 /// Build the initial system message describing immutable workspace rules.
 /// Used as `messages[0]` for every new session.
-pub fn system_message() -> crate::Message {
-    crate::Message {
+pub fn system_message() -> crate::model::Message {
+    crate::model::Message {
         role: "system".to_string(),
         content: format!(
             "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
