@@ -72,17 +72,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let is_batch = config.query.is_some();
+    let is_batch = config.query.is_some() || config.todo_mode > 0;
     let start_time = std::time::Instant::now();
 
-    if is_batch {
-        // Batch: set up working directory silently (no banner)
-        let current_dir = std::fs::canonicalize(&config.working_dir)
-            .map_err(|e| anyhow!("Invalid working directory '{}': {}", config.working_dir, e))?;
-        std::env::set_current_dir(&current_dir)?;
-    } else {
-        let _current_dir = startup::print_startup_info(&config, &provider)?;
-    }
+    // Set working directory and print banner (all modes)
+    let _current_dir = startup::print_startup_info(&config, &provider)?;
 
     let mut query_reader = DefaultEditor::new()?;
 
@@ -106,7 +100,11 @@ async fn main() -> Result<()> {
     persistence::save_message(&session.label, &session.messages[0])?;
 
     // Main conversation loop
-    let mut batch_input: Option<String> = config.query.clone();
+    let mut batch_input: Option<String> = if config.todo_mode > 0 {
+        Some(String::from("")) // dummy: todo.md is the real input
+    } else {
+        config.query.clone()
+    };
     loop {
         let input = if let Some(q) = batch_input.take() {
             // Batch: use the -q argument as the first (and only) user input
@@ -143,8 +141,7 @@ async fn main() -> Result<()> {
                 }
             }
         };
-        if input.trim().is_empty() {
-            // Check for empty input after trimming
+        if input.trim().is_empty() && config.todo_mode == 0 {
             continue;
         }
         // Slash commands. cmd.rs mutates `session` / `settings` in place.
@@ -344,7 +341,7 @@ fn handle_turn_output(
     if is_batch {
         // Batch: print to stdout if no -o was given, then summary & exit
         if config.output_file.is_none() {
-            print!("{}", final_answer);
+            println!("{}", final_answer);
         }
         let elapsed = start_time.elapsed();
         let secs = elapsed.as_secs_f64();

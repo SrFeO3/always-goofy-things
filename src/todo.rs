@@ -288,6 +288,30 @@ pub(crate) async fn run_todo_loop(
     let total = tasks.len();
     let pending: Vec<&TaskItem> = tasks.iter().filter(|t| !t.done).collect();
 
+    // Read todo.md title line for preview
+    let todo_title = {
+        let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
+        content
+            .lines()
+            .find(|l| !l.trim().is_empty() && l.starts_with('#'))
+            .unwrap_or("(no title)")
+            .trim_start_matches('#')
+            .trim()
+            .to_string()
+    };
+    let mode_name = if config.todo_mode == 2 {
+        "Plan-Exec-Dynamic"
+    } else {
+        "Plan-Exec-Static"
+    };
+    println!(
+        "\n{0}Executing todo plan \"{2}\" ({1} mode).{3}\n",
+        startup::C_CYAN,
+        mode_name,
+        todo_title,
+        startup::RESET
+    );
+
     if pending.is_empty() {
         return Ok("All tasks already completed.".to_string());
     }
@@ -409,7 +433,7 @@ async fn run_todo_loop_mode2(
         if check_conclusion(&todo_content) {
             println!(
                 "{}--- [TODO LOOP] Conclusion reached. Exiting. ---{}",
-                startup::C_GREEN,
+                startup::C_CYAN,
                 startup::RESET
             );
             break;
@@ -433,7 +457,7 @@ async fn run_todo_loop_mode2(
         if check_conclusion(&updated) {
             println!(
                 "{}--- [TODO LOOP] Conclusion reached during replan. Exiting. ---{}",
-                startup::C_GREEN,
+                startup::C_CYAN,
                 startup::RESET
             );
             break;

@@ -243,8 +243,23 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         APP_DESCRIPTION
     );
     println!("CONFIGURATION:");
+    println!(
+        "  mode               : {}",
+        match config.todo_mode {
+            1 => "Plan-Exec-Static",
+            2 => "Plan-Exec-Dynamic",
+            _ => "ReAct",
+        }
+    );
+    println!(
+        "  run                : {}",
+        if config.query.is_some() || config.todo_mode > 0 {
+            "batch"
+        } else {
+            "interactive"
+        }
+    );
     println!("  working-dir        : {}", current_dir.display());
-    println!("  todo-mode          : {}", config.todo_mode);
     println!("  unsafe-reflex      : {}", config.unsafe_reflex);
     println!("  llm-url            : {}", config.llm_url);
     println!("  llm-provider       : {}", provider);
