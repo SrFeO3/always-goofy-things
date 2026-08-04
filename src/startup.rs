@@ -44,7 +44,7 @@ pub type PrettyLevel = u8;
 pub type Verbosity = u8;
 
 /// The Always-Goofy-Things CLI configuration
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = APP_NAME,
     bin_name = APP_BIN_NAME,
@@ -66,6 +66,10 @@ pub struct Config {
     /// Directory where AI tools operate
     #[arg(short = 'w', long, env = "WORKING_DIR", default_value = ".")]
     pub working_dir: String,
+
+    /// Todo execution mode
+    #[arg(short = 't', long = "todo", env = "TODO_MODE", default_value_t = 0)]
+    pub todo_mode: u8,
 
     /// Endpoint for the Chat API
     #[arg(
@@ -148,6 +152,11 @@ pub struct Config {
     /// In interactive mode, exceeding this returns control to the user.
     #[arg(long, env = "MAX_REASONING_TURNS", default_value_t = 30)]
     pub max_reasoning_turns: u32,
+
+    /// Maximum consecutive replan attempts without reducing unchecked tasks (Mode 2).
+    /// When the replan loop fails to decrease `- [ ]` count this many times, the agent stops.
+    #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
+    pub max_replan_attempts: u32,
 }
 
 /// Build the initial system message describing immutable workspace rules.
@@ -178,6 +187,49 @@ pub fn system_message() -> crate::model::Message {
     }
 }
 
+/// Build a system message for todo-mode sessions.
+/// Embeds the immutable workspace rules plus the full todo.md content.
+pub fn system_message_with_todo(todo_md: &str) -> crate::model::Message {
+    let base = system_message();
+    crate::model::Message {
+        role: "system".to_string(),
+        content: format!(
+            "{}\n\n\
+            ## 5. Todo Context (Plan-Exec Mode)\n\
+            - You are operating in Plan-and-Execute mode. The full task plan is below for context.\n\
+            - Execute ONLY the specific task given in the user message. Do NOT proceed to subsequent tasks.\n\
+            - Report what you did when finished. The agent will mark the task as done.\n\
+            - When all tasks are complete, report a summary to the user.\n\n\
+            {}",
+            base.content, todo_md
+        ),
+        ..Default::default()
+    }
+}
+
+/// Build a system message for Mode 2 (Plan-Exec-Dynamic) sessions.
+/// Instructs the LLM to update todo.md via write_file, including marking
+/// tasks as done and writing the Conclusion when all tasks are complete.
+pub fn system_message_with_todo_mode2(todo_md: &str) -> crate::model::Message {
+    let base = system_message();
+    crate::model::Message {
+        role: "system".to_string(),
+        content: format!(
+            "{}\n\n\
+            ## 5. Todo Context (Plan-Exec-Dynamic Mode)\n\
+            - You have ONE job: execute the task in the user message.\n\
+            - After completing the task, use `write_file` to update `./todo.md`:\n\
+              * Mark your task as `[x]`.\n\
+              * If all tasks are done, update `## Conclusion` with `Status: Completed`.\n\
+              * If you discovered new subtasks, add them to `## Tasks`.\n\
+            - Do NOT proceed to other tasks -- they will be handled separately.\n\n\
+            {}",
+            base.content, todo_md
+        ),
+        ..Default::default()
+    }
+}
+
 /// Print the startup banner and configuration summary.
 /// Returns the canonical working directory.
 pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std::path::PathBuf> {
@@ -192,6 +244,7 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     );
     println!("CONFIGURATION:");
     println!("  working-dir        : {}", current_dir.display());
+    println!("  todo-mode          : {}", config.todo_mode);
     println!("  unsafe-reflex      : {}", config.unsafe_reflex);
     println!("  llm-url            : {}", config.llm_url);
     println!("  llm-provider       : {}", provider);
@@ -207,6 +260,7 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  max-output-tokens  : {}", config.max_output_tokens);
     println!("  max-empty-retry    : {}", config.max_empty_retry);
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
+    println!("  max-replan-attempts: {}", config.max_replan_attempts);
     println!("  session-label      : {}", config.session_label);
 
     Ok(current_dir)

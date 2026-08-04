@@ -37,8 +37,8 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
 | `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
+| `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |
-
 
 ### LLM Provider (`LLM_PROVIDER`)
 
@@ -68,6 +68,14 @@ Controls how much LLM API traffic is displayed on the terminal.
 Controls the visual styling and decorations applied to the terminal output.
 - `0`: Plain - no colors or visual decorations
 - `1`: Standard - colored text with structured sections and separators
+
+### Todo Mode (`TODO_MODE`)
+
+Plan-and-Execute execution for complex multi-step tasks. The agent reads `./todo.md`, resets LLM context between steps, and carries state forward via the file.
+
+- `0` (default): Standard ReAct loop. Single-turn tasks.
+- `1`: Static sequential execution from a user-prepared plan. Known step-by-step workflows.
+- `2`: Dynamic AI-driven replanning. The AI rewrites `./todo.md` as it works. Exploratory / research tasks.
 
 ## Usage
 

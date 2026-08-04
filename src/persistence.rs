@@ -145,6 +145,36 @@ pub fn restore_previous_session(label: &str) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
+/// Archive a todo task's session: rename `last_session_{label}.jsonl` -> `todo_loop_{task_index}_{label}.jsonl`.
+///
+/// Called after a todo task completes to preserve its conversation history
+/// separately from the current session file.
+pub fn archive_todo_session(label: &str, task_index: usize) -> Result<()> {
+    let last_path =
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine last session path"))?;
+
+    if !last_path.exists() {
+        return Ok(());
+    }
+
+    let dirs = project_dirs().ok_or_else(|| anyhow!("Could not determine project dirs"))?;
+    let archive_path = dirs
+        .data_local_dir()
+        .join(format!("todo_loop_{}_{}.jsonl", task_index, label));
+
+    if let Some(parent) = archive_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&last_path, &archive_path).with_context(|| {
+        format!(
+            "Failed to archive session {:?} -> {:?}",
+            last_path, archive_path
+        )
+    })?;
+
+    Ok(())
+}
+
 /// Read messages from any given jsonl file path.
 ///
 /// Because `attached_files` is `#[serde(skip)]` on `Message`, the raw JSON is

@@ -386,7 +386,7 @@ pub(crate) async fn run_reasoning_loop(
     Ok(done)
 }
 
-async fn call_llm(
+pub(crate) async fn call_llm(
     config: &startup::Config,
     settings: &Settings,
     provider: LlmProvider,

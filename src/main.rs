@@ -42,6 +42,7 @@ mod reasoning;
 mod reflex;
 mod reflex_literal;
 mod startup;
+mod todo;
 mod tools;
 mod tools_fuzzy;
 
@@ -257,77 +258,119 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Reasoning loop + final answer. `done=false` (Ctrl+C / empty-retry /
-        // connection error) re-prompts without advancing the turn counter.
-        let done = run_reasoning_loop(
-            &config,
-            provider,
-            &mut session,
-            &mut settings,
-            &mut metrics,
-            query_text,
-            attached_files,
-        )
-        .await?;
+        // --- Mode-aware execution ---
+        let (done, final_answer) = match config.todo_mode {
+            0 => {
+                let d = run_reasoning_loop(
+                    &config,
+                    provider,
+                    &mut session,
+                    &mut settings,
+                    &mut metrics,
+                    query_text,
+                    attached_files,
+                )
+                .await?;
+                let answer = if d {
+                    session.messages.last().unwrap().content.clone()
+                } else {
+                    String::new()
+                };
+                (d, answer)
+            }
+            1 | 2 => {
+                let summary = todo::run_todo_loop(
+                    &config,
+                    provider,
+                    &mut settings,
+                    &mut metrics,
+                    query_text,
+                    attached_files,
+                )
+                .await?;
+                (true, summary)
+            }
+            _ => unreachable!(),
+        };
 
         if done {
-            // Write final answer to file (-o). Works in both batch and interactive mode.
-            // Uses append semantics so interactive multi-turn sessions accumulate all answers.
-            if let Some(output_path) = &config.output_file {
-                let final_answer = &session.messages.last().unwrap().content;
-                let need_sep = std::fs::metadata(output_path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false);
-                let content = if need_sep {
-                    format!(
-                        "\n\n<!-- always-goofy-things | turn {} | session: {} -->\n\n{}",
-                        session.turn, session.label, final_answer
-                    )
-                } else {
-                    final_answer.clone()
-                };
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(output_path)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
-                    .map_err(|e| anyhow!("Failed to write output to '{}': {}", output_path, e))?;
-            }
-
+            handle_turn_output(
+                &final_answer,
+                &config,
+                session.turn,
+                &session.label,
+                is_batch,
+                start_time,
+            )?;
             if is_batch {
-                // Batch: print to stdout if no -o was given, then summary & exit
-                if config.output_file.is_none() {
-                    print!("{}", session.messages.last().unwrap().content);
-                }
-                let elapsed = start_time.elapsed();
-                let secs = elapsed.as_secs_f64();
-                let time_str = if secs >= 60.0 {
-                    format!("{:.0}m {:.1}s", secs / 60.0, secs % 60.0)
-                } else {
-                    format!("{:.1}s", secs)
-                };
-                let out_label = config.output_file.as_deref().unwrap_or("stdout");
-                let q_preview: String = config
-                    .query
-                    .as_deref()
-                    .map(|q| {
-                        let one_line = q.replace('\n', "\\n").replace('\r', "");
-                        let chars: Vec<char> = one_line.chars().collect();
-                        if chars.len() > 10 {
-                            format!("{}...", chars[..10].iter().collect::<String>())
-                        } else {
-                            one_line
-                        }
-                    })
-                    .unwrap_or_default();
-                eprintln!(
-                    "\n{}Batch completed in {}, output -> {}, query: \"{}\"{}.",
-                    C_CYAN, time_str, out_label, q_preview, RESET
-                );
                 return Ok(());
             }
             session.turn += 1;
         }
+    }
+    Ok(())
+}
+
+/// Write final answer to file (-o) and print batch summary.
+fn handle_turn_output(
+    final_answer: &str,
+    config: &startup::Config,
+    turn: i32,
+    label: &str,
+    is_batch: bool,
+    start_time: std::time::Instant,
+) -> Result<()> {
+    // -o file output
+    if let Some(output_path) = &config.output_file {
+        let need_sep = std::fs::metadata(output_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        let content = if need_sep {
+            format!(
+                "\n\n<!-- always-goofy-things | turn {} | session: {} -->\n\n{}",
+                turn, label, final_answer
+            )
+        } else {
+            final_answer.to_string()
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
+            .map_err(|e| anyhow!("Failed to write output to '{}': {}", output_path, e))?;
+    }
+
+    if is_batch {
+        // Batch: print to stdout if no -o was given, then summary & exit
+        if config.output_file.is_none() {
+            print!("{}", final_answer);
+        }
+        let elapsed = start_time.elapsed();
+        let secs = elapsed.as_secs_f64();
+        let time_str = if secs >= 60.0 {
+            format!("{:.0}m {:.1}s", secs / 60.0, secs % 60.0)
+        } else {
+            format!("{:.1}s", secs)
+        };
+        let out_label = config.output_file.as_deref().unwrap_or("stdout");
+        let q_preview: String = config
+            .query
+            .as_deref()
+            .map(|q| {
+                let one_line = q.replace('\n', "\\n").replace('\r', "");
+                let chars: Vec<char> = one_line.chars().collect();
+                if chars.len() > 10 {
+                    format!("{}...", chars[..10].iter().collect::<String>())
+                } else {
+                    one_line
+                }
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "\n{}Batch completed in {}, output -> {}, query: \"{}\"{}.",
+            C_CYAN, time_str, out_label, q_preview, RESET
+        );
     }
     Ok(())
 }
