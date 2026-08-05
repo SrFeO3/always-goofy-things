@@ -77,6 +77,8 @@ Plan-and-Execute execution for complex multi-step tasks. The agent reads `./todo
 - `1`: Static sequential execution from a user-prepared plan. Known step-by-step workflows.
 - `2`: Dynamic AI-driven replanning. The AI rewrites `./todo.md` as it works. Exploratory / research tasks.
 
+See [docs/todo-mode.md](docs/todo-mode.md) for sample `./todo.md` files and quick-start guides.
+
 ## Usage
 
 ### Quick Start
@@ -129,3 +131,14 @@ Ollama requires `@@` for PDF (no native document support).
 - "Find the Python script in the workspace and translate its output messages into Shakespearean English."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
 - "@@spec.pdf Fix this broken http server based on the specification."
+
+**Long complex tasks - too large for a single LLM context. Use todo mode:**
+
+Requires a `./todo.md` plan file instead of a typed query, and runs immediately.
+
+Example tasks:
+- "Refactor this entire legacy codebase, writing unit tests for every module."
+- "Crawl the docs of a web framework and generate a migration guide for v2 to v3."
+- "Design a DB schema, write backend APIs, build frontend, and verify end-to-end."
+
+See [docs/todo-mode.md](docs/todo-mode.md) for how to use.

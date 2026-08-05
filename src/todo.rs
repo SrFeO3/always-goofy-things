@@ -1,7 +1,7 @@
-//! Plan-Execute task loop for multi-step task execution with todo.md-based handover.
+//! Plan-Execute task loop for multi-task execution with todo.md-based handover.
 //!
 //! Runs Mode 1 (Plan-Exec-Static) and Mode 2 (Plan-Exec-Dynamic)
-//! for multi-step task execution with LLM context reset between steps.
+//! for multi-task execution with LLM context reset between tasks.
 //!
 //! # Execution Flow
 //!
@@ -20,7 +20,7 @@
 //! 2. [Todo Loop]      : Recursive cycle until the LLM declares completion.
 //!    - Parse State    : Read todo.md to get current tasks and progress.
 //!    - Replan         : LLM reviews and rewrites todo.md if needed (lightweight, 1 turn).
-//!    - Reasoning Loop : Recursive cycle for this task (LLM Call -> Tool Exec -> Feedback).
+//!    - Reasoning Loop : Recursive cycle for this task (LLM Call -> Tool Exec -> Feedback & Reflection/Completion Check).
 //!    - Store State    : Update todo.md (LLM rewrites with results) and reset LLM context.
 //! 3. [Final Answer]   : Present the final conclusion to the user.
 
@@ -213,7 +213,7 @@ fn check_conclusion(todo_md: &str) -> bool {
     status_completed && count_unchecked(todo_md) == 0
 }
 
-/// Lightweight replan step (Mode 2): ask the LLM to review and update todo.md.
+/// Lightweight replan phase (Mode 2): ask the LLM to review and update todo.md.
 ///
 /// Calls `call_llm` directly (1 turn), executes `write_file` for `./todo.md`
 /// without confirmation, and returns the updated todo.md content.
@@ -422,10 +422,10 @@ async fn run_todo_loop_mode2(
 ) -> Result<String> {
     let mut completed = 0usize;
     let mut replan_stalls = 0u32;
-    let mut step = 0usize;
+    let mut task_index = 0usize;
 
     loop {
-        step += 1;
+        task_index += 1;
         let todo_content =
             std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
 
@@ -488,9 +488,9 @@ async fn run_todo_loop_mode2(
 
         let task = pending[0];
         println!(
-            "\n{}--- [Step {}] {} ---{}",
+            "\n{}--- [Task {}] {} ---{}",
             startup::C_MAGENTA,
-            step,
+            task_index,
             task.description,
             startup::RESET
         );
@@ -498,7 +498,7 @@ async fn run_todo_loop_mode2(
         // Mode 2 system message: full todo.md + instruction to update it via write_file
         let system_msg = startup::system_message_with_todo_mode2(&updated);
 
-        let task_label = format!("{}_step{}", config.session_label, step);
+        let task_label = format!("{}_task{}", config.session_label, task_index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
 
         let done = run_reasoning_loop(
@@ -513,13 +513,13 @@ async fn run_todo_loop_mode2(
         .await?;
 
         if done {
-            persistence::archive_todo_session(&task_label, step)?;
+            persistence::archive_todo_session(&task_label, task_index)?;
             completed += 1;
         } else {
             println!(
-                "\n{}--- [Interrupted] Step {} was not completed. Run again to resume. ---{}",
+                "\n{}--- [Interrupted] Task {} was not completed. Run again to resume. ---{}",
                 startup::C_YELLOW,
-                step,
+                task_index,
                 startup::RESET
             );
             break;
@@ -532,10 +532,10 @@ async fn run_todo_loop_mode2(
         Ok("All tasks completed (Conclusion reached).".to_string())
     } else if completed > 0 {
         Ok(format!(
-            "{} step(s) completed. Check ./todo.md for progress.",
+            "{} task(s) completed. Check ./todo.md for progress.",
             completed
         ))
     } else {
-        Ok("No steps completed. Check ./todo.md for pending items.".to_string())
+        Ok("No tasks completed. Check ./todo.md for pending items.".to_string())
     }
 }

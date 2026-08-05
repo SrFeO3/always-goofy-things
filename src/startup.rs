@@ -196,10 +196,10 @@ pub fn system_message_with_todo(todo_md: &str) -> crate::model::Message {
         content: format!(
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec Mode)\n\
-            - You are operating in Plan-and-Execute mode. The full task plan is below for context.\n\
-            - Execute ONLY the specific task given in the user message. Do NOT proceed to subsequent tasks.\n\
-            - Report what you did when finished. The agent will mark the task as done.\n\
-            - When all tasks are complete, report a summary to the user.\n\n\
+            - Your context just reset. Do ONLY the given task, then stop.\n\
+            - If you need context from previous work, check `artifacts/`.\n\
+            - Report what you did when finished. The agent marks the task as done.\n\
+            - Save your outputs to `artifacts/`.\n\n\
             {}",
             base.content, todo_md
         ),
@@ -217,12 +217,13 @@ pub fn system_message_with_todo_mode2(todo_md: &str) -> crate::model::Message {
         content: format!(
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec-Dynamic Mode)\n\
-            - You have ONE job: execute the task in the user message.\n\
-            - After completing the task, use `write_file` to update `./todo.md`:\n\
+            - Your context just reset. Do ONLY the given task, then stop.\n\
+            - If you need context from previous work, check `artifacts/`.\n\
+            - After completing, use `write_file` to update `./todo.md`:\n\
               * Mark your task as `[x]`.\n\
               * If all tasks are done, update `## Conclusion` with `Status: Completed`.\n\
               * If you discovered new subtasks, add them to `## Tasks`.\n\
-            - Do NOT proceed to other tasks -- they will be handled separately.\n\n\
+            - Save your outputs to `artifacts/`.\n\n\
             {}",
             base.content, todo_md
         ),
