@@ -275,6 +275,7 @@ pub(crate) async fn run_todo_loop(
     provider: LlmProvider,
     settings: &mut Settings,
     metrics: &mut Metrics,
+    gui_log: &mut Session,
     _user_input: String,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
@@ -327,9 +328,18 @@ pub(crate) async fn run_todo_loop(
     );
 
     if config.todo_mode == 2 {
-        run_todo_loop_mode2(config, provider, settings, metrics, attached_files).await
+        run_todo_loop_mode2(config, provider, settings, metrics, gui_log, attached_files).await
     } else {
-        run_todo_loop_mode1(config, provider, settings, metrics, attached_files, pending).await
+        run_todo_loop_mode1(
+            config,
+            provider,
+            settings,
+            metrics,
+            gui_log,
+            attached_files,
+            pending,
+        )
+        .await
     }
 }
 
@@ -339,11 +349,13 @@ async fn run_todo_loop_mode1(
     provider: LlmProvider,
     settings: &mut Settings,
     metrics: &mut Metrics,
+    gui_log: &mut Session,
     attached_files: Vec<AttachedFile>,
     pending: Vec<&TaskItem>,
 ) -> Result<String> {
     let pending_count = pending.len();
     let mut completed = 0usize;
+    let mut last_conclusion = String::new();
 
     for task in &pending {
         let task_num = completed + 1;
@@ -389,7 +401,26 @@ async fn run_todo_loop_mode1(
             };
 
             mark_task_done(0, &note)?;
+
+            // Capture LLM's final message as conclusion
+            if let Some(msg) = task_session.messages.last() {
+                if !msg.content.trim().is_empty() {
+                    last_conclusion = msg.content.clone();
+                }
+            }
+
             persistence::archive_todo_session(&task_label, task.index)?;
+
+            // Push task's LLM conversation to GUI log
+            for msg in task_session.messages.iter().skip(1) {
+                gui_log.messages.push(msg.clone());
+            }
+            gui_log.messages.push(Message {
+                role: "system".to_string(),
+                content: format!("--- Task {}/{} done ---", task_num, pending_count),
+                ..Default::default()
+            });
+
             completed += 1;
         } else {
             println!(
@@ -403,7 +434,11 @@ async fn run_todo_loop_mode1(
     }
 
     Ok(if completed == pending_count {
-        format!("All {} tasks completed successfully.", pending_count)
+        if !last_conclusion.is_empty() {
+            last_conclusion
+        } else {
+            format!("All {} tasks completed successfully.", pending_count)
+        }
     } else {
         format!(
             "{} of {} tasks completed. Check ./todo.md for pending items.",
@@ -418,11 +453,13 @@ async fn run_todo_loop_mode2(
     provider: LlmProvider,
     settings: &mut Settings,
     metrics: &mut Metrics,
+    gui_log: &mut Session,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
     let mut completed = 0usize;
     let mut replan_stalls = 0u32;
     let mut task_index = 0usize;
+    let mut last_conclusion = String::new();
 
     loop {
         task_index += 1;
@@ -450,6 +487,7 @@ async fn run_todo_loop_mode2(
                     e,
                     startup::RESET
                 );
+                // Continue with current todo.md
                 todo_content.clone()
             }
         };
@@ -513,7 +551,24 @@ async fn run_todo_loop_mode2(
         .await?;
 
         if done {
+            // Capture LLM's final message as conclusion
+            if let Some(msg) = task_session.messages.last() {
+                if !msg.content.trim().is_empty() {
+                    last_conclusion = msg.content.clone();
+                }
+            }
             persistence::archive_todo_session(&task_label, task_index)?;
+
+            // Push task's LLM conversation to GUI log
+            for msg in task_session.messages.iter().skip(1) {
+                gui_log.messages.push(msg.clone());
+            }
+            gui_log.messages.push(Message {
+                role: "system".to_string(),
+                content: format!("--- Task {} done ---", task_index),
+                ..Default::default()
+            });
+
             completed += 1;
         } else {
             println!(
@@ -529,7 +584,11 @@ async fn run_todo_loop_mode2(
     // Final check: did the LLM write a Conclusion?
     let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
     if check_conclusion(&final_todo) {
-        Ok("All tasks completed (Conclusion reached).".to_string())
+        if last_conclusion.is_empty() {
+            Ok("All tasks completed (Conclusion reached).".to_string())
+        } else {
+            Ok(last_conclusion)
+        }
     } else if completed > 0 {
         Ok(format!(
             "{} task(s) completed. Check ./todo.md for progress.",

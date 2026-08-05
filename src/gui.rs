@@ -18,6 +18,7 @@ use crate::model::{LLM_STREAM_BUF, Message, Metrics, Session, Settings};
 use crate::persistence;
 use crate::reasoning::run_reasoning_loop;
 use crate::startup::{self, Config};
+use crate::todo;
 use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
 
 // egui color constants -- roughly match ANSI 32/35/90 as rendered in Alacritty's default theme.
@@ -47,6 +48,7 @@ struct GuiApp {
     worker_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: bool,
     focus_input: bool,
+    todo_started: bool,
 }
 
 struct PendingConfirm {
@@ -86,6 +88,7 @@ impl GuiApp {
             worker_handle: None,
             is_running: false,
             focus_input: true,
+            todo_started: false,
         }
     }
 
@@ -150,6 +153,9 @@ impl GuiApp {
                 {
                     ui.colored_label(C_MAGENTA, reason);
                 }
+            }
+            "system" => {
+                ui.label(&msg.content);
             }
             _ => {}
         }
@@ -350,6 +356,13 @@ impl eframe::App for GuiApp {
         if self.is_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+
+        // Auto-start todo mode on first frame
+        if self.config.todo_mode > 0 && !self.todo_started && self.session.is_some() {
+            self.todo_started = true;
+            self.input_text = String::new();
+            self.send_message(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -545,7 +558,7 @@ impl GuiApp {
         if input.ends_with('\n') {
             input.pop();
         }
-        if input.trim().is_empty() {
+        if input.trim().is_empty() && self.config.todo_mode == 0 {
             return;
         }
 
@@ -676,19 +689,43 @@ impl GuiApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         let handle = tokio::spawn(async move {
-            let (done, err_msg) = match run_reasoning_loop(
-                &config,
-                provider,
-                &mut session,
-                &mut settings,
-                &mut metrics,
-                query_text,
-                attached_files,
-            )
-            .await
-            {
-                Ok(d) => (d, None),
-                Err(e) => (false, Some(e.to_string())),
+            let (done, err_msg) = if config.todo_mode > 0 {
+                match todo::run_todo_loop(
+                    &config,
+                    provider,
+                    &mut settings,
+                    &mut metrics,
+                    &mut session,
+                    query_text,
+                    attached_files,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        session.messages.push(Message {
+                            role: "assistant".to_string(),
+                            content: summary,
+                            ..Default::default()
+                        });
+                        (true, None)
+                    }
+                    Err(e) => (false, Some(e.to_string())),
+                }
+            } else {
+                match run_reasoning_loop(
+                    &config,
+                    provider,
+                    &mut session,
+                    &mut settings,
+                    &mut metrics,
+                    query_text,
+                    attached_files,
+                )
+                .await
+                {
+                    Ok(d) => (d, None),
+                    Err(e) => (false, Some(e.to_string())),
+                }
             };
 
             let _ = done_tx.send((session, settings, metrics, done, err_msg));

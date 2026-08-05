@@ -281,6 +281,7 @@ async fn main() -> Result<()> {
                     provider,
                     &mut settings,
                     &mut metrics,
+                    &mut session,
                     query_text,
                     attached_files,
                 )
