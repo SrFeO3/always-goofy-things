@@ -71,7 +71,7 @@ Controls the visual styling and decorations applied to the terminal output.
 
 ### Todo Mode (`TODO_MODE`)
 
-Plan-and-Execute execution for complex multi-step tasks. The agent reads `./todo.md`, resets LLM context between steps, and carries state forward via the file.
+Plan-and-Execute execution for complex multi-step tasks. Reads `./todo.md`, resets LLM context between steps, and carries state forward via the file.
 
 - `0` (default): Standard ReAct loop. Single-turn tasks.
 - `1`: Static sequential execution from a user-prepared plan. Known step-by-step workflows.
