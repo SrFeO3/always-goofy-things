@@ -33,7 +33,30 @@ use crate::persistence;
 use crate::reasoning::{call_llm, run_reasoning_loop};
 use crate::startup;
 
-const TODO_MD_PATH: &str = "./todo.md";
+pub(crate) const TODO_MD_PATH: &str = "./todo.md";
+
+/// Push a system message to both the session log (for persistence / completed
+/// display) and the live GUI stream buffer (so it appears during execution).
+#[cfg(feature = "gui")]
+fn push_system_msg(gui_log: &mut Session, text: &str) {
+    push_system_msg_blank(gui_log, text, true);
+}
+
+/// Same as `push_system_msg` but with control over the leading blank line.
+#[cfg(feature = "gui")]
+fn push_system_msg_blank(gui_log: &mut Session, text: &str, leading_blank: bool) {
+    gui_log.messages.push(Message {
+        role: "system".to_string(),
+        content: text.to_string(),
+        ..Default::default()
+    });
+    let mut buf = crate::model::LLM_STREAM_BUF.lock().unwrap();
+    if leading_blank {
+        buf.2.push('\n');
+    }
+    buf.2.push_str(text);
+    buf.2.push('\n');
+}
 
 /// A single task item parsed from todo.md.
 #[derive(Debug, Clone)]
@@ -305,27 +328,19 @@ pub(crate) async fn run_todo_loop(
     } else {
         "Plan-Exec-Static"
     };
-    println!(
-        "\n{0}Executing todo plan \"{2}\" ({1} mode).{3}\n",
-        startup::C_CYAN,
-        mode_name,
-        todo_title,
-        startup::RESET
-    );
 
     if pending.is_empty() {
         return Ok("All tasks already completed.".to_string());
     }
 
     let pending_count = pending.len();
-    println!(
-        "{}--- [TODO LOOP] {} tasks ({}/{} pending) ---{}",
-        startup::C_CYAN,
-        total,
-        pending_count,
-        total,
-        startup::RESET
+    let exec_line = format!(
+        "Executing todo plan \"{}\" ({} mode) - {} tasks, {}/{} pending.",
+        todo_title, mode_name, total, pending_count, total
     );
+    println!("\n{}{}{}\n", startup::C_CYAN, exec_line, startup::RESET);
+    #[cfg(feature = "gui")]
+    push_system_msg_blank(gui_log, &exec_line, false);
 
     if config.todo_mode == 2 {
         run_todo_loop_mode2(config, provider, settings, metrics, gui_log, attached_files).await
@@ -361,11 +376,20 @@ async fn run_todo_loop_mode1(
         let task_num = completed + 1;
         println!(
             "\n{}--- [Task {}/{}] {} ---{}",
-            startup::C_MAGENTA,
+            startup::C_CYAN,
             task_num,
             pending_count,
             task.description,
             startup::RESET
+        );
+        // Also push to GUI so the task header appears during execution.
+        #[cfg(feature = "gui")]
+        push_system_msg(
+            gui_log,
+            &format!(
+                "--- [Task {}/{}] {} ---",
+                task_num, pending_count, task.description
+            ),
         );
 
         let todo_content =
@@ -403,10 +427,10 @@ async fn run_todo_loop_mode1(
             mark_task_done(0, &note)?;
 
             // Capture LLM's final message as conclusion
-            if let Some(msg) = task_session.messages.last() {
-                if !msg.content.trim().is_empty() {
-                    last_conclusion = msg.content.clone();
-                }
+            if let Some(msg) = task_session.messages.last()
+                && !msg.content.trim().is_empty()
+            {
+                last_conclusion = msg.content.clone();
             }
 
             persistence::archive_todo_session(&task_label, task.index)?;
@@ -415,11 +439,19 @@ async fn run_todo_loop_mode1(
             for msg in task_session.messages.iter().skip(1) {
                 gui_log.messages.push(msg.clone());
             }
+            let done_msg = format!("--- Task {}/{} done ---", task_num, pending_count);
+            println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
             gui_log.messages.push(Message {
                 role: "system".to_string(),
-                content: format!("--- Task {}/{} done ---", task_num, pending_count),
+                content: done_msg.clone(),
                 ..Default::default()
             });
+            #[cfg(feature = "gui")]
+            crate::model::LLM_STREAM_BUF
+                .lock()
+                .unwrap()
+                .2
+                .push_str(&format!("{}\n", done_msg));
 
             completed += 1;
         } else {
@@ -477,13 +509,16 @@ async fn run_todo_loop_mode2(
         }
 
         // --- Replan ---
+        println!("{}--- [Replan] ---{}", startup::C_CYAN, startup::RESET);
+        #[cfg(feature = "gui")]
+        push_system_msg(gui_log, "--- [Replan] ---");
         let prev_unchecked = count_unchecked(&todo_content);
         let updated = match run_replan_loop(config, settings, provider, &todo_content).await {
             Ok(u) => u,
             Err(e) => {
                 println!(
-                    "\n{}[Replan] LLM error: {}. Continuing with current plan.{} ",
-                    startup::C_YELLOW,
+                    "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
+                    startup::C_RED,
                     e,
                     startup::RESET
                 );
@@ -527,10 +562,16 @@ async fn run_todo_loop_mode2(
         let task = pending[0];
         println!(
             "\n{}--- [Task {}] {} ---{}",
-            startup::C_MAGENTA,
+            startup::C_CYAN,
             task_index,
             task.description,
             startup::RESET
+        );
+        // Also push to GUI so the task header appears during execution.
+        #[cfg(feature = "gui")]
+        push_system_msg(
+            gui_log,
+            &format!("--- [Task {}] {} ---", task_index, task.description),
         );
 
         // Mode 2 system message: full todo.md + instruction to update it via write_file
@@ -552,10 +593,10 @@ async fn run_todo_loop_mode2(
 
         if done {
             // Capture LLM's final message as conclusion
-            if let Some(msg) = task_session.messages.last() {
-                if !msg.content.trim().is_empty() {
-                    last_conclusion = msg.content.clone();
-                }
+            if let Some(msg) = task_session.messages.last()
+                && !msg.content.trim().is_empty()
+            {
+                last_conclusion = msg.content.clone();
             }
             persistence::archive_todo_session(&task_label, task_index)?;
 
@@ -563,11 +604,19 @@ async fn run_todo_loop_mode2(
             for msg in task_session.messages.iter().skip(1) {
                 gui_log.messages.push(msg.clone());
             }
+            let done_msg = format!("--- Task {} done ---", task_index);
+            println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
             gui_log.messages.push(Message {
                 role: "system".to_string(),
-                content: format!("--- Task {} done ---", task_index),
+                content: done_msg.clone(),
                 ..Default::default()
             });
+            #[cfg(feature = "gui")]
+            crate::model::LLM_STREAM_BUF
+                .lock()
+                .unwrap()
+                .2
+                .push_str(&format!("{}\n", done_msg));
 
             completed += 1;
         } else {

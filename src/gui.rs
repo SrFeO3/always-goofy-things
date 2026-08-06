@@ -14,6 +14,8 @@ use tokio::sync::oneshot;
 use crate::attach;
 use crate::cmd::{self, SlashCmdResult};
 use crate::compat_provider::LlmProvider;
+use crate::gui_pretty;
+use crate::gui_pretty::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED};
 use crate::model::{LLM_STREAM_BUF, Message, Metrics, Session, Settings};
 use crate::persistence;
 use crate::reasoning::run_reasoning_loop;
@@ -21,11 +23,7 @@ use crate::startup::{self, Config};
 use crate::todo;
 use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
 
-// egui color constants -- roughly match ANSI 32/35/90 as rendered in Alacritty's default theme.
-const C_GREEN: egui::Color32 = egui::Color32::from_rgb(120, 170, 80);
-const C_MAGENTA: egui::Color32 = egui::Color32::from_rgb(170, 120, 170);
-const C_GRAY: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
-const C_RED: egui::Color32 = egui::Color32::from_rgb(220, 80, 80);
+type TurnResult = (Session, Settings, Metrics, bool, Option<String>);
 
 struct GuiApp {
     config: Arc<Config>,
@@ -37,14 +35,17 @@ struct GuiApp {
     current_model: String,
     input_text: String,
     conversation: String,
-    /// In-progress messages for the current turn (cleared on completion).
-    /// Each entry is a `Message` rendered through the same code path as
-    /// completed session messages, preserving chronological
-    /// assistant / tool / assistant ordering.
-    draft_msgs: Vec<Message>,
+    /// Display buffer holding the current turn's messages in pretty format
+    /// (reasoning / content split, tool diff previews). Rebuilt from session
+    /// on completion so the display stays consistent before and after the turn.
+    stream_message_buffer: Vec<Message>,
+    /// Number of `session.messages` committed before the current turn.
+    /// Messages before this index are rendered from `session.messages`;
+    /// messages from this index onward are rendered from `stream_message_buffer`.
+    session_msg_base: usize,
     pending_confirms: VecDeque<PendingConfirm>,
 
-    done_rx: Option<oneshot::Receiver<(Session, Settings, Metrics, bool, Option<String>)>>,
+    done_rx: Option<oneshot::Receiver<TurnResult>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
     is_running: bool,
     focus_input: bool,
@@ -82,7 +83,8 @@ impl GuiApp {
             current_model,
             input_text: String::new(),
             conversation: String::new(),
-            draft_msgs: Vec::new(),
+            stream_message_buffer: Vec::new(),
+            session_msg_base: 1, // system message at index 0, render from index 1 onward
             pending_confirms: VecDeque::new(),
             done_rx: None,
             worker_handle: None,
@@ -99,7 +101,7 @@ impl GuiApp {
     }
 
     /// Render a single `Message` with consistent formatting.
-    /// Used for both completed session messages and the in-progress draft,
+    /// Used for both completed session messages and the in-progress stream,
     /// ensuring identical display during and after a turn.
     fn render_message(ui: &mut egui::Ui, msg: &Message, turn: &mut u32) {
         match msg.role.as_str() {
@@ -143,8 +145,19 @@ impl GuiApp {
                         ui.label(format!("[Tool: {}]", name));
                     }
                 }
+                // Show pretty command preview when args are available (stream messages).
+                if let Some(ref args) = msg.tool_args {
+                    gui_pretty::gui_pretty_command(ui, name, args);
+                }
+                // Show pretty result when content is parseable JSON (completed messages).
+                // Fall back to plain text for non-JSON content.
                 if !msg.content.is_empty() {
-                    ui.label(format!("  {}", msg.content));
+                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        gui_pretty::gui_pretty_result(ui, name, &result, msg.tool_args.as_ref());
+                    } else if msg.tool_args.is_none() {
+                        // Only show raw content if we didn't already show a pretty preview.
+                        ui.label(format!("  {}", msg.content));
+                    }
                 }
                 if let Some(reason) = msg
                     .tool_call_decision
@@ -155,7 +168,15 @@ impl GuiApp {
                 }
             }
             "system" => {
-                ui.label(&msg.content);
+                if msg.content.is_empty() {
+                    // Blank line separator between todo-loop boundaries.
+                    ui.label("");
+                } else if msg.content.contains("--- [") || msg.content.starts_with("Executing todo")
+                {
+                    ui.colored_label(C_CYAN, &msg.content);
+                } else {
+                    ui.label(&msg.content);
+                }
             }
             _ => {}
         }
@@ -248,25 +269,80 @@ pub fn run(config: Config, provider: LlmProvider) {
 
 impl eframe::App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain streaming text into the last draft assistant message.
+        // Drain streaming text into the stream message buffer.
         let mut had_update = false;
         {
             let mut buf = LLM_STREAM_BUF.lock().unwrap();
-            let (ref mut reasoning, ref mut content) = *buf;
-            let has_stream = !reasoning.is_empty() || !content.is_empty();
+            let (ref mut reasoning, ref mut content, ref mut system, ref mut user) = *buf;
+            let has_stream = !reasoning.is_empty()
+                || !content.is_empty()
+                || !system.is_empty()
+                || !user.is_empty();
             if has_stream {
-                // Ensure the last draft message is an assistant (push one if
-                // the queue is empty or the last entry is a tool message).
-                if self.draft_msgs.last().is_none_or(|m| m.role != "assistant") {
-                    self.draft_msgs.push(Message {
-                        role: "assistant".to_string(),
-                        ..Default::default()
-                    });
+                // System messages come first (task headers, etc.).
+                if !system.is_empty() {
+                    let text = std::mem::take(system);
+                    // Split preserving blank lines (\n\n -> empty entry).
+                    let lines: Vec<&str> = text.split('\n').collect();
+                    let last_nonempty = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
+                    for (i, line) in lines.iter().enumerate() {
+                        if i > last_nonempty {
+                            break;
+                        }
+                        self.stream_message_buffer.push(Message {
+                            role: "system".to_string(),
+                            content: line.to_string(),
+                            ..Default::default()
+                        });
+                    }
+                    had_update = true;
                 }
-                let draft = self.draft_msgs.last_mut().unwrap();
+                // User messages from the reasoning loop (turn-start markers).
+                if !user.is_empty() {
+                    let text = std::mem::take(user);
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            // If send_message pre-pushed a user message, update it
+                            // instead of creating a duplicate.
+                            if self
+                                .stream_message_buffer
+                                .last()
+                                .is_some_and(|m| m.role == "user")
+                            {
+                                let last = self.stream_message_buffer.last_mut().unwrap();
+                                last.content = trimmed.to_string();
+                            } else {
+                                self.stream_message_buffer.push(Message {
+                                    role: "user".to_string(),
+                                    content: trimmed.to_string(),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                    had_update = true;
+                }
+                // Reasoning and content go to separate messages so they
+                // display in strict chronological order without the visual
+                // glitch of two independently-expanding sections.
                 if !reasoning.is_empty() {
                     let text = std::mem::take(reasoning);
-                    draft
+                    // Append to the last assistant that already has reasoning,
+                    // otherwise push a fresh one.
+                    let can_append = self
+                        .stream_message_buffer
+                        .last()
+                        .is_some_and(|m| m.role == "assistant" && m.reasoning_content.is_some());
+                    if !can_append {
+                        self.stream_message_buffer.push(Message {
+                            role: "assistant".to_string(),
+                            ..Default::default()
+                        });
+                    }
+                    self.stream_message_buffer
+                        .last_mut()
+                        .unwrap()
                         .reasoning_content
                         .get_or_insert_default()
                         .push_str(&text);
@@ -275,12 +351,34 @@ impl eframe::App for GuiApp {
                 if !content.is_empty() {
                     let text = std::mem::take(content);
                     // LLM errors are written to the content buffer with a
-                    // marker; route to conversation so they survive draft
+                    // marker; route to conversation so they survive stream
                     // cleanup on completion.
                     if text.starts_with("[LLM Error]") {
                         self.conversation.push_str(&text);
                     } else {
-                        draft.content.push_str(&text);
+                        // Push a fresh assistant for content when the last
+                        // message has reasoning (so the two stay separate).
+                        let last_has_reasoning =
+                            self.stream_message_buffer.last().is_some_and(|m| {
+                                m.role == "assistant"
+                                    && m.reasoning_content.as_ref().is_some_and(|r| !r.is_empty())
+                            });
+                        if last_has_reasoning
+                            || self
+                                .stream_message_buffer
+                                .last()
+                                .is_none_or(|m| m.role != "assistant")
+                        {
+                            self.stream_message_buffer.push(Message {
+                                role: "assistant".to_string(),
+                                ..Default::default()
+                            });
+                        }
+                        self.stream_message_buffer
+                            .last_mut()
+                            .unwrap()
+                            .content
+                            .push_str(&text);
                     }
                     had_update = true;
                 }
@@ -302,10 +400,11 @@ impl eframe::App for GuiApp {
                     // Push as a "tool" message so it renders in chronological
                     // order between assistant messages.
                     let args_str = serde_json::to_string(&notice.args).unwrap_or_default();
-                    self.draft_msgs.push(Message {
+                    self.stream_message_buffer.push(Message {
                         role: "tool".to_string(),
                         content: format!("Args: {}", args_str),
                         tool_name: Some(notice.name),
+                        tool_args: Some(notice.args),
                         tool_call_decision: Some(ToolRunDecision {
                             proceed: true,
                             kind: ToolRunDecisionKind::AutoConfirm,
@@ -343,7 +442,13 @@ impl eframe::App for GuiApp {
             self.worker_handle = None;
             self.is_running = false;
             self.sync_model();
-            self.draft_msgs.clear();
+
+            // Rebuild stream buffer from completed session (keeps display consistent).
+            rebuild_stream_from_session(
+                &mut self.stream_message_buffer,
+                self.session.as_ref(),
+                self.session_msg_base,
+            );
             self.pending_confirms.clear();
             self.focus_input = true;
             had_completion = true;
@@ -391,6 +496,12 @@ impl eframe::App for GuiApp {
                                     self.session = Some(session);
                                     self.settings = Some(settings);
                                     self.metrics = Some(metrics);
+                                    // Rebuild stream buffer from completed session messages.
+                                    rebuild_stream_from_session(
+                                        &mut self.stream_message_buffer,
+                                        self.session.as_ref(),
+                                        self.session_msg_base,
+                                    );
                                 }
                                 None => {
                                     // Worker was aborted; the pre-pushed user
@@ -399,7 +510,6 @@ impl eframe::App for GuiApp {
                             }
                         }
                         self.is_running = false;
-                        self.draft_msgs.clear();
                         self.pending_confirms.clear();
                         self.focus_input = true;
                     }
@@ -457,15 +567,16 @@ impl eframe::App for GuiApp {
 
                     let mut turn = 0u32;
 
-                    // Render completed session messages.
+                    // Render completed session messages from previous turns.
                     if let Some(ref s) = self.session {
-                        for msg in s.messages.iter().skip(1) {
+                        let limit = self.session_msg_base.min(s.messages.len());
+                        for msg in s.messages.iter().skip(1).take(limit.saturating_sub(1)) {
                             Self::render_message(ui, msg, &mut turn);
                         }
                     }
 
-                    // Render in-progress draft messages (chronological order).
-                    for msg in &self.draft_msgs {
+                    // Render current turn from stream buffer (always pretty format).
+                    for msg in &self.stream_message_buffer {
                         Self::render_message(ui, msg, &mut turn);
                     }
 
@@ -477,7 +588,7 @@ impl eframe::App for GuiApp {
                     // Interruption indicator: unanswered user without an error message.
                     // (LLM errors are displayed separately via self.conversation.)
                     if !self.is_running
-                        && self.draft_msgs.is_empty()
+                        && self.stream_message_buffer.is_empty()
                         && self.conversation.is_empty()
                         && self
                             .session
@@ -491,13 +602,15 @@ impl eframe::App for GuiApp {
                     let has_session_msgs =
                         self.session.as_ref().is_some_and(|s| s.messages.len() > 1);
                     let is_idle = !self.is_running
-                        && self.draft_msgs.is_empty()
+                        && self.stream_message_buffer.is_empty()
                         && self.conversation.is_empty()
                         && !has_session_msgs;
                     if is_idle {
                         ui.colored_label(C_GRAY, "Type a task and press Enter.");
                     }
-                    if self.is_running && self.draft_msgs.is_empty() && self.conversation.is_empty()
+                    if self.is_running
+                        && self.stream_message_buffer.is_empty()
+                        && self.conversation.is_empty()
                     {
                         ui.colored_label(C_GRAY, "Waiting for response...");
                     }
@@ -521,6 +634,13 @@ impl eframe::App for GuiApp {
                             .unwrap_or_else(|_| "<unprintable>".to_string())
                     ));
                     ui.separator();
+                    // Pretty command preview (diff, etc.)
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            gui_pretty::gui_pretty_command(ui, &pending.name, &pending.args);
+                        });
+                    ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("Deny").clicked() {
                             confirm_response = Some(ToolRunDecision {
@@ -543,6 +663,40 @@ impl eframe::App for GuiApp {
             && let Some(pending) = self.pending_confirms.pop_front()
         {
             let _ = pending.reply.send(resp);
+        }
+    }
+}
+
+/// Rebuild `stream_message_buffer` from session messages starting at `base`,
+/// converting to display format: reasoning split from content, tool / user as-is.
+fn rebuild_stream_from_session(buf: &mut Vec<Message>, session: Option<&Session>, base: usize) {
+    buf.clear();
+    if let Some(s) = session {
+        let start = base.min(s.messages.len());
+        for msg in &s.messages[start..] {
+            match msg.role.as_str() {
+                "assistant" => {
+                    if let Some(ref rc) = msg.reasoning_content
+                        && !rc.trim().is_empty()
+                    {
+                        buf.push(Message {
+                            role: "assistant".to_string(),
+                            reasoning_content: Some(rc.clone()),
+                            ..Default::default()
+                        });
+                    }
+                    let has_body = !msg.content.trim().is_empty() || msg.tool_calls.is_some();
+                    if has_body {
+                        let mut m = msg.clone();
+                        m.reasoning_content = None;
+                        buf.push(m);
+                    }
+                }
+                "user" | "tool" | "system" => {
+                    buf.push(msg.clone());
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -661,6 +815,11 @@ impl GuiApp {
 
         self.conversation.clear();
         self.is_running = true;
+
+        // Snapshot: session messages before this turn are rendered from session;
+        // the current turn's messages come from stream_message_buffer.
+        self.session_msg_base = self.session.as_ref().map_or(0, |s| s.messages.len());
+
         // Push / update user message in session for display.
         // If the previous turn left an unanswered user message (Stop / error),
         // update it in-place so the turn counter stays correct.
@@ -670,19 +829,20 @@ impl GuiApp {
                 last.content = query_text.clone();
                 last.attached_files = attached_files.clone();
             } else {
-                s.messages.push(Message {
+                let user_msg = Message {
                     role: "user".to_string(),
                     content: query_text.clone(),
                     attached_files: attached_files.clone(),
                     ..Default::default()
-                });
+                };
+                s.messages.push(user_msg.clone());
+                // In todo mode the reasoning loop pushes the real user message
+                // (task description) via LLM_STREAM_BUF.3, so skip the empty one.
+                if self.config.todo_mode == 0 {
+                    self.stream_message_buffer.push(user_msg);
+                }
             }
         }
-        // Seed an empty assistant draft for streaming display.
-        self.draft_msgs.push(Message {
-            role: "assistant".to_string(),
-            ..Default::default()
-        });
         self.pending_confirms.clear();
 
         // This runs in ui (after logic), so kick off the 16ms wakeup here too.

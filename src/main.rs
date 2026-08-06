@@ -35,6 +35,8 @@ mod file;
 mod file_pdf;
 #[cfg(feature = "gui")]
 mod gui;
+#[cfg(feature = "gui")]
+mod gui_pretty;
 mod model;
 mod persistence;
 mod pretty;

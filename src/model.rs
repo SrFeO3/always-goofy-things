@@ -33,6 +33,9 @@ pub(crate) struct Message {
     #[serde(skip)]
     pub tool_call_decision: Option<ToolRunDecision>,
     #[serde(skip)]
+    #[allow(dead_code)]
+    pub tool_args: Option<serde_json::Value>,
+    #[serde(skip)]
     pub attached_files: Vec<AttachedFile>,
 }
 
@@ -48,6 +51,7 @@ impl Default for Message {
             timestamp: chrono::Utc::now(),
             model: None,
             tool_call_decision: None,
+            tool_args: None,
             attached_files: Vec::new(),
         }
     }
@@ -117,11 +121,12 @@ pub(crate) struct Metrics {
     pub(crate) cache_ever_reported: bool,
 }
 
-/// Shared buffer for LLM streaming output. `.0` = reasoning, `.1` = content.
+/// Shared buffer for LLM streaming output.
+/// `.0` = reasoning, `.1` = content, `.2` = system, `.3` = user.
 /// Worker writes chunks via `push_str`; the GUI reads and clears them each frame.
 #[cfg(feature = "gui")]
-pub(crate) static LLM_STREAM_BUF: LazyLock<Mutex<(String, String)>> =
-    LazyLock::new(|| Mutex::new((String::new(), String::new())));
+pub(crate) static LLM_STREAM_BUF: LazyLock<Mutex<(String, String, String, String)>> =
+    LazyLock::new(|| Mutex::new((String::new(), String::new(), String::new(), String::new())));
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct ToolCall {

@@ -52,12 +52,19 @@ pub(crate) async fn run_reasoning_loop(
     } else {
         session.messages.push(Message {
             role: "user".to_string(),
-            content: user_input,
-            attached_files,
+            content: user_input.clone(),
+            attached_files: attached_files.clone(),
             ..Default::default()
         });
         persistence::save_message(&session.label, session.messages.last().unwrap())?;
     }
+    // Push user message to GUI live stream so turn numbers appear correctly.
+    #[cfg(feature = "gui")]
+    crate::model::LLM_STREAM_BUF
+        .lock()
+        .unwrap()
+        .3
+        .push_str(&format!("{}\n", user_input));
 
     // Inner loop to handle tool execution and sequential LLM reasoning.
     // `done` tracks whether this turn completed successfully (assistant
