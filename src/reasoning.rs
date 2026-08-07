@@ -20,6 +20,7 @@ use crate::pretty;
 use crate::startup;
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use crate::tools::{self, ToolRunDecision, ToolRunDecisionKind};
+use crate::tools_data;
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
 ///
@@ -283,6 +284,7 @@ pub(crate) async fn run_reasoning_loop(
                     &call.function.name,
                     &args,
                     config.unsafe_reflex,
+                    config.db_unsafe_reflex,
                     is_batch,
                 )
                 .await;
@@ -345,7 +347,8 @@ pub(crate) async fn run_reasoning_loop(
                     }
 
                     // execute tool and get tool_result json for following steps
-                    match tools::execute_tool(&call.function.name, &args).await {
+                    let db_ctx = tools_data::db_context_from_config(config);
+                    match tools::execute_tool(&call.function.name, &args, db_ctx.as_ref()).await {
                         Ok(res) => {
                             println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                             tool_result = res;
@@ -400,7 +403,7 @@ pub(crate) async fn call_llm(
     messages: &[Message],
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
-    let tools = tools::get_tool_definitions();
+    let tools = tools::get_tool_definitions(config.db_type.as_deref());
     let messages_vec = messages.to_vec();
 
     let req = ChatRequest {
@@ -714,7 +717,10 @@ pub(crate) async fn call_llm(
     // - Fill in missing id/function.name (infer from args for index 0)
     // - Filter out unrecoverable calls (empty name or unparseable arguments)
     if let Some(tool_calls) = &mut full_message.tool_calls {
-        post_process_tool_calls(tool_calls, &tools::get_tool_definitions());
+        post_process_tool_calls(
+            tool_calls,
+            &tools::get_tool_definitions(config.db_type.as_deref()),
+        );
         // If all tool calls were filtered out, set back to None
         // to avoid serializing an empty array which APIs reject.
         if tool_calls.is_empty() {

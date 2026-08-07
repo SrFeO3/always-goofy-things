@@ -46,6 +46,7 @@ mod reflex_literal;
 mod startup;
 mod todo;
 mod tools;
+mod tools_data;
 mod tools_fuzzy;
 
 use attach::AttachedFile;

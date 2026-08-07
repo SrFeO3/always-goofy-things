@@ -157,6 +157,36 @@ pub struct Config {
     /// When the replan loop fails to decrease `- [ ]` count this many times, the agent stops.
     #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
     pub max_replan_attempts: u32,
+
+    /// Database type for data_search / data_schema tools.
+    /// Supported: greptimedb, clickhouse, influxdb.
+    /// When set, the data tools are enabled.
+    #[arg(long, env = "DB_TYPE")]
+    pub db_type: Option<String>,
+
+    /// Database HTTP query endpoint URL (full path).
+    /// Required when --db-type is set.
+    #[arg(long, env = "DB_URL")]
+    pub db_url: Option<String>,
+
+    /// Authentication key/token for the database.
+    /// GreptimeDB/ClickHouse: user:password (Basic auth).
+    /// InfluxDB: API token (Bearer auth).
+    #[arg(long, env = "DB_AUTH_KEY")]
+    pub db_auth_key: Option<String>,
+
+    /// Query timeout in seconds (default: 30).
+    #[arg(long, env = "DB_TIMEOUT", default_value_t = 30)]
+    pub db_timeout: u64,
+
+    /// Maximum response size in bytes before truncation (default: 65536 = 64KB).
+    #[arg(long, env = "DB_MAX_BYTES", default_value_t = 65536)]
+    pub db_max_bytes: usize,
+
+    /// Auto-confirm data_search / data_schema tools without user prompt.
+    /// Data tools are read-only and safe to auto-execute.
+    #[arg(long, env = "DB_UNSAFE_REFLEX", default_value_t = false)]
+    pub db_unsafe_reflex: bool,
 }
 
 /// Build the initial system message describing immutable workspace rules.
@@ -278,6 +308,47 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
     println!("  session-label      : {}", config.session_label);
+
+    // --- Database configuration ---
+    if let Some(db_type) = config.db_type.as_deref() {
+        // Validate: db_type requires db_url
+        let Some(db_url) = config.db_url.as_deref() else {
+            anyhow::bail!(
+                "[DB_CONFIG_ERROR] --db-url is required when --db-type is set. Provide the database HTTP endpoint URL."
+            );
+        };
+
+        // Validate: db_type must be a supported value
+        if !matches!(db_type, "greptimedb" | "clickhouse" | "influxdb") {
+            anyhow::bail!(
+                "[DB_UNKNOWN_TYPE] Unsupported database type '{}'. Supported types: greptimedb, clickhouse, influxdb.",
+                db_type
+            );
+        }
+
+        // Warning: Basic auth should use user:password format
+        if matches!(db_type, "greptimedb" | "clickhouse")
+            && config
+                .db_auth_key
+                .as_deref()
+                .is_some_and(|k| !k.contains(':'))
+        {
+            println!(
+                "{C_YELLOW}[Warning] --db-auth-key for {} should be in 'user:password' format (Basic auth).{RESET}",
+                db_type
+            );
+        }
+
+        println!("  db-type            : {}", db_type);
+        println!("  db-url             : {}", db_url);
+        println!(
+            "  db-auth-key        : {}",
+            config.db_auth_key.as_ref().map_or("(none)", |_| "(set)")
+        );
+        println!("  db-timeout         : {}s", config.db_timeout);
+        println!("  db-max-bytes       : {}", config.db_max_bytes);
+        println!("  db-unsafe-reflex   : {}", config.db_unsafe_reflex);
+    }
 
     Ok(current_dir)
 }

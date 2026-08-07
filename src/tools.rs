@@ -40,6 +40,7 @@ use crate::file::{self, FileType};
 use crate::reflex::auto_confirm;
 #[cfg(not(feature = "gui"))]
 use crate::startup::{C_CYAN, RESET};
+use crate::tools_data;
 use crate::tools_fuzzy::{
     build_full_fuzzy_pattern, build_full_skip_blank_pattern, build_space_fuzzy_pattern,
     build_tab_fuzzy_pattern, build_tab_skip_blank_pattern,
@@ -141,8 +142,8 @@ pub(crate) enum ToolInteractMsg {
 /// Tool definitions sent to the LLM API.
 /// Order matters: `compat::infer_tool_name_from_args` picks the first
 /// highest-scoring match, so list more generic tools earlier.
-pub fn get_tool_definitions() -> Vec<serde_json::Value> {
-    vec![
+pub fn get_tool_definitions(db_type: Option<&str>) -> Vec<serde_json::Value> {
+    let mut tools = vec![
         serde_json::json!({
             "type": "function",
             "function": {
@@ -247,10 +248,24 @@ pub fn get_tool_definitions() -> Vec<serde_json::Value> {
                 }
             }
         }),
-    ]
+    ];
+
+    // Conditionally append data tools when db_type is configured
+    if let Some(dt) = db_type {
+        if let Ok(def) = tools_data::build_data_search_def(dt) {
+            tools.push(def);
+        }
+        tools.push(tools_data::build_data_schema_def());
+    }
+
+    tools
 }
 
-pub async fn execute_tool(name: &str, args: &serde_json::Value) -> Result<serde_json::Value> {
+pub async fn execute_tool(
+    name: &str,
+    args: &serde_json::Value,
+    db_ctx: Option<&tools_data::DbContext>,
+) -> Result<serde_json::Value> {
     // Path security check for tools that take 'path'
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
@@ -264,7 +279,28 @@ pub async fn execute_tool(name: &str, args: &serde_json::Value) -> Result<serde_
         "list_directory" => execute_list_directory(args),
         "execute_bash" => execute_bash(args).await,
         "fetch_web" => execute_fetch_web(args).await,
-        _ => Err(anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
+        "data_search" => {
+            let ctx = db_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[DB_CONFIG_ERROR] --db-url is required when --db-type is set. Provide the database HTTP endpoint URL."
+                )
+            })?;
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("[DB_INTERNAL_ERROR] Missing 'query' parameter."))?;
+            tools_data::execute_data_search(ctx, query).await
+        }
+        "data_schema" => {
+            let ctx = db_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[DB_CONFIG_ERROR] --db-url is required when --db-type is set. Provide the database HTTP endpoint URL."
+                )
+            })?;
+            let table = args.get("table").and_then(|v| v.as_str());
+            tools_data::execute_data_schema(ctx, table).await
+        }
+        _ => Err(anyhow::anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
     }
 }
 
@@ -302,9 +338,16 @@ pub async fn confirm_execute_tool(
     name: &str,
     args: &serde_json::Value,
     unsafe_reflex: bool,
+    db_unsafe_reflex: bool,
     batch: bool,
 ) -> ToolRunDecision {
-    if unsafe_reflex
+    // Auto-confirm data tools when --db-unsafe-reflex is set.
+    // Data tools (data_search, data_schema) are read-only queries against
+    // external databases -- inherently safe to auto-execute.
+    let is_data_tool = matches!(name, "data_search" | "data_schema");
+    let effective_unsafe = unsafe_reflex || (is_data_tool && db_unsafe_reflex);
+
+    if effective_unsafe
         && let (proceed, reason) = auto_confirm(name, args)
         && proceed
     {

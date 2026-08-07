@@ -150,6 +150,11 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                 (false, None)
             }
         }
+        "data_search" | "data_schema" => {
+            // Data tools are inherently read-only; queries are sanitized
+            // (whitelist/blacklist) before reaching the database.
+            (true, Some("Read-only database query".to_string()))
+        }
         _ => (false, None),
     }
 }
