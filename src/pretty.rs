@@ -34,6 +34,7 @@
 
 use serde_json::{Value, json};
 
+use crate::pretty_data;
 use crate::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, C_YELLOW, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED,
     RESET,
@@ -587,6 +588,7 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
 
             println!("[{} bytes ({})] {} ... {}", bytes, url, first, last);
         }
+        "data_search" | "data_schema" => pretty_data::pretty_print_data_result(result),
         _ => {
             println!("\x1b[90mResult:\x1b[0m {}", result);
         }
@@ -742,6 +744,7 @@ pub fn pretty_print_command(name: &str, args: &Value) {
             };
             println!("-- Fetch: {}{}{}", C_YELLOW, url, RESET);
         }
+        "data_search" | "data_schema" => pretty_data::pretty_print_data_command(name, args),
         _ => {}
     }
 }

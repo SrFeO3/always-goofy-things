@@ -40,6 +40,7 @@ mod gui_pretty;
 mod model;
 mod persistence;
 mod pretty;
+mod pretty_data;
 mod reasoning;
 mod reflex;
 mod reflex_literal;

@@ -22,6 +22,7 @@ pub const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
 
 pub const BG_RED: &str = "\x1b[48;2;190;85;85m";
 pub const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
+pub const BG_GRAY: &str = "\x1b[48;2;85;85;90m";
 
 pub const C_GRAY: &str = "\x1b[90m";
 pub const C_RED: &str = "\x1b[31m";
