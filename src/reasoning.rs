@@ -76,7 +76,7 @@ pub(crate) async fn run_reasoning_loop(
     let mut done: bool = false;
     'reasoning_loop: loop {
         reasoning_turn += 1;
-        if reasoning_turn > config.max_reasoning_turns {
+        if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
             if is_batch {
                 anyhow::bail!(
                     "Max reasoning turns ({}) exceeded without a final answer",

@@ -148,7 +148,7 @@ pub struct Config {
     #[arg(short = 'o', long = "output", env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
 
-    /// Maximum reasoning turns per user message (tool-calling loop safety limit).
+    /// Maximum reasoning turns per user message (tool-calling loop safety limit) (0 = unlimited).
     /// In batch mode (-q), exceeding this exits with an error.
     /// In interactive mode, exceeding this returns control to the user.
     #[arg(long, env = "MAX_REASONING_TURNS", default_value_t = 30)]

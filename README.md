@@ -30,7 +30,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
 | `-E, --max-empty-retry <NUM>` | `MAX_EMPTY_RETRY` | Maximum retries when the LLM returns an empty response. | `1` |
-| `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Safety cap on LLM calls per user message. In batch mode, exceeding it causes an error exit. | `30` |
+| `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM API traffic verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
