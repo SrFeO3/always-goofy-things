@@ -18,9 +18,6 @@ use serde_json::Value;
 
 use crate::startup::{BG_GRAY, C_GRAY, C_YELLOW, RESET};
 
-/// Maximum column width in characters.
-const MAX_COL_WIDTH: usize = 16;
-
 /// Maximum columns displayed before truncating the rest.
 const MAX_COLS: usize = 8;
 
@@ -29,6 +26,24 @@ const MAX_ROWS: usize = 16;
 
 /// How many rows to show at the top and bottom when truncating.
 const HEAD_TAIL_ROWS: usize = 7;
+
+/// Maximum per-column width when columns are few and terminal is wide.
+const MAX_COL_WIDTH: usize = 50;
+
+/// Minimum per-column width.
+const MIN_COL_WIDTH: usize = 5;
+
+/// Default terminal width when detection fails.
+const DEFAULT_TERM_WIDTH: usize = 80;
+
+/// Detect the current terminal width in columns.
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(DEFAULT_TERM_WIDTH)
+}
 
 /// Pretty-print the SQL query about to be executed.
 pub(crate) fn pretty_print_data_command(_name: &str, args: &Value) {
@@ -40,7 +55,8 @@ pub(crate) fn pretty_print_data_command(_name: &str, args: &Value) {
 }
 
 /// Parse a CSV line into fields, handling quoted fields with embedded
-/// commas and escaped double-quotes ("").
+/// commas and escaped double-quotes ("").  Strips stray `\r` characters
+/// that may appear from Windows-style line endings.
 fn parse_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current = String::new();
@@ -50,6 +66,11 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 
     while i < chars.len() {
         let ch = chars[i];
+        // silently skip stray carriage-return bytes
+        if ch == '\r' {
+            i += 1;
+            continue;
+        }
         if in_quotes {
             if ch == '"' {
                 if i + 1 < chars.len() && chars[i + 1] == '"' {
@@ -76,7 +97,8 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 /// Parse multi-line CSV body into rows, respecting quoted fields that
-/// contain embedded newlines.
+/// contain embedded newlines.  Treats both `\n` and `\r\n` as row
+/// separators so that Windows-style CSV is handled correctly.
 fn parse_csv_rows(body: &str) -> Vec<Vec<String>> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut current = String::new();
@@ -96,6 +118,14 @@ fn parse_csv_rows(body: &str) -> Vec<Vec<String>> {
                 }
             }
             current.push(ch);
+        } else if ch == '\r' {
+            // \r (standalone or part of \r\n) ends the row when outside quotes.
+            rows.push(parse_csv_line(&current));
+            current = String::new();
+            // If the next char is \n, skip it too.
+            if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                i += 1;
+            }
         } else if ch == '"' {
             in_quotes = true;
             current.push(ch);
@@ -163,26 +193,17 @@ pub(crate) fn pretty_print_data_result(result: &Value) {
         return;
     }
 
-    // Compute column widths, capped at MAX_COL_WIDTH
+    // Compute column widths dynamically based on terminal width.
+    let term_w = terminal_width();
     let col_count = headers.len();
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len().min(MAX_COL_WIDTH)).collect();
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < col_count {
-                widths[i] = widths[i].max(cell.len().min(MAX_COL_WIDTH));
-            }
-        }
-    }
 
-    // Limit visible columns
+    // Limit visible columns.
     let col_omitted = col_count.saturating_sub(MAX_COLS);
-    let visible_headers: Vec<&str> = headers.iter().take(MAX_COLS).map(|s| s.as_str()).collect();
-    let visible_widths: Vec<usize> = widths.iter().take(MAX_COLS).copied().collect();
+    let visible_cols = col_count.min(MAX_COLS);
 
     if col_omitted > 0 {
         println!(
-            "{}{}  ... {} column{} omitted ...{}",
-            BG_GRAY,
+            "{}  ... {} column{} omitted ...{}",
             C_GRAY,
             col_omitted,
             if col_omitted != 1 { "s" } else { "" },
@@ -190,67 +211,98 @@ pub(crate) fn pretty_print_data_result(result: &Value) {
         );
     }
 
-    let format_row = |cells: &[&str], widths_slice: &[usize]| -> String {
-        cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let w = widths_slice.get(i).copied().unwrap_or(0);
-                let truncated: String = c.chars().take(w).collect();
-                format!("{:width$}", truncated, width = w)
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
+    // Border overhead: `| c1 | c2 |` = 3 * n + 1 chars for n columns.
+    let overhead = 3 * visible_cols + 1;
+    let available = term_w.saturating_sub(overhead);
+    let equal_w = available
+        .checked_div(visible_cols)
+        .map(|w| w.clamp(MIN_COL_WIDTH, MAX_COL_WIDTH))
+        .unwrap_or(0);
+    let mut widths: Vec<usize> = vec![equal_w; visible_cols];
+
+    if col_omitted > 0 {
+        // Allocate a small "..." column at the end.
+        widths.push(3);
+    }
+
+    // Truncate a cell value to fit, appending `~` when truncated.
+    let truncate_cell = |s: &str, w: usize| -> String {
+        if s.chars().count() <= w {
+            s.to_string()
+        } else if w <= 1 {
+            "~".to_string()
+        } else {
+            let mut out: String = s.chars().take(w - 1).collect();
+            out.push('~');
+            out
+        }
     };
+
+    // Build a bordered row string like `| c1  | c2  |` with BG_GRAY wrapped.
+    let mk_line = |cells: &[String]| -> String {
+        let mut s = String::from("|");
+        for (i, cell) in cells.iter().enumerate() {
+            s.push(' ');
+            s.push_str(cell);
+            // Pad to column width + 1 so the trailing space + `|` align.
+            let visual = cell.chars().count();
+            let target = widths.get(i).copied().unwrap_or(visual);
+            for _ in visual..target {
+                s.push(' ');
+            }
+            s.push(' ');
+            s.push('|');
+        }
+        s
+    };
+
+    // Build visible cell slices for headers and rows.
+    let build_cells = |fields: &[String]| -> Vec<String> {
+        let mut cells: Vec<String> = fields
+            .iter()
+            .take(MAX_COLS)
+            .enumerate()
+            .map(|(i, f)| truncate_cell(f, widths[i]))
+            .collect();
+        if col_omitted > 0 {
+            cells.push("...".to_string());
+        }
+        cells
+    };
+
+    let visible_headers = build_cells(&headers);
+
+    println!("{}{}{}", BG_GRAY, mk_line(&visible_headers), RESET);
+
+    // Separator line.
+    let sep_cells: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
+    println!("{}{}{}", BG_GRAY, mk_line(&sep_cells), RESET);
 
     let total = rows.len();
 
-    println!(
-        "{}{}{}",
-        BG_GRAY,
-        format_row(&visible_headers, &visible_widths),
-        RESET
-    );
-    let sep: Vec<String> = visible_widths.iter().map(|&w| "-".repeat(w)).collect();
-    println!("{}{}{}", BG_GRAY, sep.join("-+-"), RESET);
+    let print_row = |row: &[String]| {
+        let cells = build_cells(row);
+        println!("{}{}{}", BG_GRAY, mk_line(&cells), RESET);
+    };
 
     if total <= MAX_ROWS {
         for row in &rows {
-            let cells: Vec<&str> = row.iter().take(MAX_COLS).map(|s| s.as_str()).collect();
-            println!(
-                "{}{}{}",
-                BG_GRAY,
-                format_row(&cells, &visible_widths),
-                RESET
-            );
+            print_row(row);
         }
     } else {
         for row in rows.iter().take(HEAD_TAIL_ROWS) {
-            let cells: Vec<&str> = row.iter().take(MAX_COLS).map(|s| s.as_str()).collect();
-            println!(
-                "{}{}{}",
-                BG_GRAY,
-                format_row(&cells, &visible_widths),
-                RESET
-            );
+            print_row(row);
         }
         let omitted = total.saturating_sub(HEAD_TAIL_ROWS * 2);
         println!(
-            "{}{}  ... {} row{} omitted ...{}",
-            BG_GRAY,
+            "{}  ... {} row{} omitted ...{}",
             C_GRAY,
             omitted,
             if omitted != 1 { "s" } else { "" },
             RESET
         );
         for row in rows.iter().skip(total.saturating_sub(HEAD_TAIL_ROWS)) {
-            let cells: Vec<&str> = row.iter().take(MAX_COLS).map(|s| s.as_str()).collect();
-            println!(
-                "{}{}{}",
-                BG_GRAY,
-                format_row(&cells, &visible_widths),
-                RESET
-            );
+            print_row(row);
         }
     }
 
