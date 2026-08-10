@@ -29,7 +29,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
-| `-E, --max-empty-retry <NUM>` | `MAX_EMPTY_RETRY` | Maximum retries when the LLM returns an empty response. | `1` |
+| `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM API traffic verbosity (`0`-`4`). | `1` |
@@ -39,6 +39,9 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
 | `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |
+
+> [!NOTE]
+> **Renamed**: `MAX_EMPTY_RETRY` / `--max-empty-retry` was replaced by `MAX_REASONING_EMPTY_RESPONSES` / `--max-reasoning-empty-responses`. New semantics: `N` = stop after N consecutive empty responses (`1` = stop at the first empty response, `2` = retry once, `0` = unlimited). The previous default `1` (retry once) now corresponds to `2`. The old env var and flag names are **removed** and will not be recognized.
 
 ### LLM Provider (`LLM_PROVIDER`)
 

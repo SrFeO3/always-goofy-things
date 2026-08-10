@@ -84,7 +84,7 @@ pub(crate) struct Settings {
     pub(crate) pretty_level: u8,
     pub(crate) llm_rpm: u32,
     pub(crate) max_output_tokens: u32,
-    pub(crate) max_empty_retry: u32,
+    pub(crate) max_reasoning_empty_responses: u32,
     pub(crate) last_llm_call: Option<std::time::Instant>,
     /// `session.messages.len()` snapshot right after the last assistant push.
     /// Drives verbose-level 2 incremental display in `call_llm`. Updated after
@@ -104,7 +104,7 @@ impl Settings {
             pretty_level: config.pretty_level,
             llm_rpm: config.llm_rpm,
             max_output_tokens: config.max_output_tokens,
-            max_empty_retry: config.max_empty_retry,
+            max_reasoning_empty_responses: config.max_reasoning_empty_responses,
             last_llm_call: None,
             last_sent_count: 0,
         }

@@ -121,9 +121,14 @@ pub struct Config {
     #[arg(short = 'T', long, env = "MAX_OUTPUT_TOKENS", default_value_t = 16384)]
     pub max_output_tokens: u32,
 
-    /// Max retries when the LLM returns an empty response
-    #[arg(short = 'E', long, env = "MAX_EMPTY_RETRY", default_value_t = 1)]
-    pub max_empty_retry: u32,
+    /// Stop after N consecutive empty LLM responses in the reasoning loop (0 = unlimited)
+    #[arg(
+        short = 'E',
+        long,
+        env = "MAX_REASONING_EMPTY_RESPONSES",
+        default_value_t = 2
+    )]
+    pub max_reasoning_empty_responses: u32,
 
     /// Session label for persistence (suffix for session files)
     #[arg(short = 's', long, env = "SESSION_LABEL", default_value = "default")]
@@ -305,7 +310,10 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  verbose-level      : {}", config.verbose_level);
     println!("  pretty-level       : {}", config.pretty_level);
     println!("  max-output-tokens  : {}", config.max_output_tokens);
-    println!("  max-empty-retry    : {}", config.max_empty_retry);
+    println!(
+        "  max-reasoning-empty-responses: {}",
+        config.max_reasoning_empty_responses
+    );
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
     println!("  session-label      : {}", config.session_label);

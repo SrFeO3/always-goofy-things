@@ -162,7 +162,10 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
         println!("    pretty-level      : {}", settings.pretty_level);
         println!("    llm-rpm           : {}", settings.llm_rpm);
         println!("    max-output-tokens : {}", settings.max_output_tokens);
-        println!("    max-empty-retry   : {}", settings.max_empty_retry);
+        println!(
+            "    max-reasoning-empty-responses: {}",
+            settings.max_reasoning_empty_responses
+        );
         return Ok(());
     }
 
@@ -173,7 +176,9 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
         println!("    \x1b[36mp\x1b[0m   - pretty-level       (0-2)");
         println!("    \x1b[36mr\x1b[0m   - llm-rpm            (0 = unlimited)");
         println!("    \x1b[36mt\x1b[0m   - max-output-tokens  (default: 16384)");
-        println!("    \x1b[36me\x1b[0m   - max-empty-retry    (default: 1)");
+        println!(
+            "    \x1b[36me\x1b[0m   - max-reasoning-empty-responses (default: 2, 0 = unlimited)"
+        );
         return Ok(());
     }
 
@@ -224,14 +229,17 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
             }
             settings.max_output_tokens = val;
         }
-        "e" | "max-empty-retry" | "max_empty_retry" | "empty-retry" => {
+        "e"
+        | "max-reasoning-empty-responses"
+        | "max_reasoning_empty_responses"
+        | "reasoning-empty-responses" => {
             let val: u32 = kv.1.parse().map_err(|_| {
                 anyhow!(
-                    "Invalid value for max-empty-retry: '{}'. Must be a non-negative integer.",
+                    "Invalid value for max-reasoning-empty-responses: '{}'. Must be a non-negative integer.",
                     kv.1
                 )
             })?;
-            settings.max_empty_retry = val;
+            settings.max_reasoning_empty_responses = val;
         }
         _ => {
             return Err(anyhow!(
@@ -272,7 +280,7 @@ fn print_help() {
    \x1b[90m/config p 2   - Set pretty-level to 2\x1b[0m
    \x1b[90m/config r 30  - Set llm-rpm to 30\x1b[0m
    \x1b[90m/config t 4096 - Set max-output-tokens to 4096\x1b[0m
-   \x1b[90m/config e 3   - Set max-empty-retry to 3\x1b[0m
+   \x1b[90m/config e 3   - Set max-reasoning-empty-responses to 3 (0 = unlimited)\x1b[0m
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
    \x1b[90m/restore      - Restore the latest session for current label\x1b[0m

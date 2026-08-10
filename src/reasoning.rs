@@ -71,7 +71,7 @@ pub(crate) async fn run_reasoning_loop(
     // `done` tracks whether this turn completed successfully (assistant
     // responded normally). If the loop exits via error/Ctrl+C/empty-limit, done
     // is false and the caller does NOT increment the turn counter.
-    let mut empty_retry_count: usize = 0;
+    let mut empty_response_count: usize = 0;
     let mut reasoning_turn: u32 = 0;
     let mut done: bool = false;
     'reasoning_loop: loop {
@@ -126,25 +126,42 @@ pub(crate) async fn run_reasoning_loop(
             }
         };
 
-        // Guard: retry if the assistant returned no content and no tool calls
+        // Guard: retry if the assistant returned no content and no tool calls.
+        // `max_reasoning_empty_responses` stops the loop after N consecutive
+        // empty responses (0 = unlimited retries).
         let has_content = !assistant_msg.content.trim().is_empty();
         let has_tools = assistant_msg.tool_calls.is_some();
         if !has_content && !has_tools {
-            empty_retry_count += 1;
-            if empty_retry_count > settings.max_empty_retry as usize {
-                println!(
-                    "\x1b[91m⚠️ {} repeatedly returned empty responses ({} retries). Stopping.\x1b[0m",
-                    settings.llm_model, empty_retry_count
-                );
+            empty_response_count += 1;
+            let limit = settings.max_reasoning_empty_responses;
+            if limit > 0 && empty_response_count >= limit as usize {
+                if empty_response_count == 1 {
+                    println!(
+                        "\x1b[91m⚠️ {} returned an empty response (limit: {}). Stopping.\x1b[0m",
+                        settings.llm_model, limit
+                    );
+                } else {
+                    println!(
+                        "\x1b[91m⚠️ {} returned {} consecutive empty responses (limit: {}). Stopping.\x1b[0m",
+                        settings.llm_model, empty_response_count, limit
+                    );
+                }
                 break 'reasoning_loop;
             }
-            println!(
-                "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
-                settings.llm_model, empty_retry_count
-            );
+            if limit > 0 {
+                println!(
+                    "\x1b[93m(Empty response from {}, retrying {}/{}...)\x1b[0m",
+                    settings.llm_model, empty_response_count, limit
+                );
+            } else {
+                println!(
+                    "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
+                    settings.llm_model, empty_response_count
+                );
+            }
             continue 'reasoning_loop;
         }
-        empty_retry_count = 0;
+        empty_response_count = 0;
 
         session.messages.push(assistant_msg.clone());
         // Was `let _ =` (swallowed). Propagate persistence errors now.
