@@ -1,12 +1,25 @@
 # Todo Mode (Plan-Execute with Handover)
 
-For tasks too large for a single LLM context, the agent reads a task plan from `./todo.md`, executes tasks one-by-one with fresh context each time, and carries state forward through the file. `-t` modes run immediately. (The default single-loop mode is called ReAct.)
+When a job is too large for a single LLM context, the agent breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
 
-## Mode 1: Static Plan
+## The Two Modes at a Glance
 
-User writes the full plan. Agent executes in order, marking `[x]`.
+| | Mode 1: Static Plan | Mode 2: Dynamic Replan |
+|---|---|---|
+| Startup flag (`-t`) | `1` | `2` |
+| Plan author | You - the complete plan is written upfront | The LLM - starting from your goal and initial tasks |
+| Who updates `todo.md` | The agent program - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and writes the Conclusion |
+| Use when | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
 
-### 1. Create `./todo.md`
+## Mode 1: Static Plan (Plan-Exec-Static)
+
+The plan is fixed before execution starts. You write the complete `./todo.md`; the agent executes the tasks strictly in order, one per fresh LLM context, and the agent program marks each task `[x]` (appending a short handover note) when it finishes. The AI never changes the plan itself. If execution is interrupted, rerunning `-t 1` resumes from the first unchecked task.
+
+### Example: Fixed Sequence (all steps known in advance)
+
+A typical Mode 1 case: a simple, fully-specified workflow with no unknowns.
+
+#### 1. Create `./todo.md`
 
 ```markdown
 # Counter Test
@@ -23,24 +36,34 @@ Count from 1 to 3, recording each number into count.txt.
 - Nothing executed yet.
 ```
 
-### 2. Run
+#### 2. Run
 
 ```bash
 cargo run -- -t 1
 ```
 
+What happens:
+
+1. The agent reads `./todo.md` and picks the first unchecked task.
+2. It executes that task with a fresh LLM context, then marks it `[x]` and appends a summary to `## Handover Notes`.
+3. It repeats for the next task, until all three are `[x]`.
+4. It reports that all tasks are complete and exits.
+
 ---
 
-## Mode 2
+## Mode 2: Dynamic Replan (Plan-Exec-Dynamic)
 
-User writes a goal and initial tasks. Before each task, the LLM replans —
-adding missing tasks, reordering, or writing `Conclusion` when done.
+The plan is a living document. You write a goal and an initial task list (it may be incomplete or wrong); before each task the LLM reviews `./todo.md` and rewrites it - adding, removing, reordering, or splitting tasks - and after each task it updates the file itself: marking tasks `[x]` and writing `## Conclusion` with `Status: Completed` once the goal is reached.
 
-### Dynamic Replan (adds missing tasks)
+- Replanning runs before each task as a lightweight 1-turn review.
+- The loop ends when the Conclusion says `Status: Completed` **and** no `- [ ]` tasks remain.
+- Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3), the agent stops.
 
-The LLM notices the Goal requires `two.txt` but only `one.txt` is listed.
+### Example 1: Missing Task Discovery (plan is incomplete; the AI fills the gap)
 
-### 1. Create `./todo.md`
+Shows the replan step in action: the Goal requires two files, but the Tasks list only mentions one. The LLM notices the gap and adds the missing task.
+
+#### 1. Create `./todo.md`
 
 ```markdown
 # Two-File Creation
@@ -60,24 +83,24 @@ Create one.txt with "hello" and two.txt with "world".
 - Key Findings / Results:
 ```
 
-### 2. Run
+#### 2. Run
 
 ```bash
 cargo run -- -t 2
 ```
 
 The LLM will:
-1. Replan — notice `two.txt` is missing, add it to Tasks
-2. Execute — create both files, update `./todo.md`
-3. Replan — mark both `[x]`, write `Status: Completed`
+
+1. Replan - notice `two.txt` is missing, add it to Tasks
+2. Execute - create both files, update `./todo.md`
+3. Replan - mark both `[x]`, write `Status: Completed`
 4. Exit
 
----
+### Example 2: Open-Ended Research (exploratory; the AI discovers subtasks as it goes)
 
-### Research Task Example (open-ended exploration)
+Shows an exploratory task: the exact steps are not known upfront. The initial list is only a starting point - the LLM adds subtasks or restructures the plan as it learns.
 
-For tasks where you don't know the exact steps upfront — the LLM discovers and
-adds subtasks as it goes.
+#### 1. Create `./todo.md`
 
 ```markdown
 # Rust Crate Analysis
@@ -97,6 +120,12 @@ Compare `anyhow` and `eyre` error-handling crates.
 - Status: In Progress
 - Final Conclusion: 
 - Key Findings / Results:
+```
+
+#### 2. Run
+
+```bash
+cargo run -- -t 2
 ```
 
 The LLM may add more subtasks or restructure the plan as it learns.
