@@ -539,7 +539,8 @@ async fn run_todo_loop_mode2(
         let new_unchecked = count_unchecked(&updated);
         if new_unchecked >= prev_unchecked {
             replan_stalls += 1;
-            if replan_stalls >= config.max_replan_attempts {
+            // 0 = unlimited (never stop on replan stalls).
+            if config.max_replan_attempts > 0 && replan_stalls >= config.max_replan_attempts {
                 println!(
                     "\n{}--- [TODO LOOP] Replan stalled ({} attempts without reducing unchecked tasks). Stopping. ---{}",
                     startup::C_YELLOW,

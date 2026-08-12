@@ -57,7 +57,7 @@ The plan is a living document. You write a goal and an initial task list (it may
 
 - Replanning runs before each task as a lightweight 1-turn review.
 - The loop ends when the Conclusion says `Status: Completed` **and** no `- [ ]` tasks remain.
-- Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3), the agent stops.
+- Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the agent stops.
 
 ### Example 1: Missing Task Discovery (plan is incomplete; the AI fills the gap)
 

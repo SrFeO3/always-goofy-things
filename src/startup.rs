@@ -161,6 +161,7 @@ pub struct Config {
 
     /// Maximum consecutive replan attempts without reducing unchecked tasks (Mode 2).
     /// When the replan loop fails to decrease `- [ ]` count this many times, the agent stops.
+    /// `0` = unlimited (never stop on replan stalls).
     #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
     pub max_replan_attempts: u32,
 
