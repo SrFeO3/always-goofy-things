@@ -2,13 +2,17 @@
 
 When a job is too large for a single LLM context, the agent breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
 
+Both modes share the same handover rules:
+- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there and names the file (write the name in `## Handover Notes` for a fixed name).
+- The last task's final message becomes the job's final answer (stdout in batch mode, or the `-o` file).
+
 ## The Two Modes at a Glance
 
 | | Mode 1: Static Plan | Mode 2: Dynamic Replan |
 |---|---|---|
 | Startup flag (`-t`) | `1` | `2` |
 | Plan author | You - the complete plan is written upfront | The LLM - starting from your goal and initial tasks |
-| Who updates `todo.md` | The agent program - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and writes the Conclusion |
+| Who updates `todo.md` | The agent program - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and sets `Status: Completed` in the `## Status` section |
 | Use when | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
 
 ## Mode 1: Static Plan (Plan-Exec-Static)
@@ -53,10 +57,10 @@ What happens:
 
 ## Mode 2: Dynamic Replan (Plan-Exec-Dynamic)
 
-The plan is a living document. You write a goal and an initial task list (it may be incomplete or wrong); before each task the LLM reviews `./todo.md` and rewrites it - adding, removing, reordering, or splitting tasks - and after each task it updates the file itself: marking tasks `[x]` and writing `## Conclusion` with `Status: Completed` once the goal is reached.
+The plan is a living document. You write a goal and an initial task list (it may be incomplete or wrong); before each task the LLM reviews `./todo.md` and rewrites it - adding, removing, reordering, or splitting tasks - and after each task it updates the file itself: marking tasks `[x]` and writing `## Status` with `Status: Completed` once the goal is reached.
 
-- Replanning runs before each task as a lightweight 1-turn review.
-- The loop ends when the Conclusion says `Status: Completed` **and** no `- [ ]` tasks remain.
+- Replanning runs before each task as a fresh planner session: a full reasoning loop that may inspect `artifacts/` with tools and writes the updated plan to `./todo.md`.
+- The loop ends when `## Status` says `Status: Completed` **and** no `- [ ]` tasks remain.
 - Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the agent stops.
 
 ### Example 1: Missing Task Discovery (plan is incomplete; the AI fills the gap)
@@ -76,11 +80,6 @@ Create one.txt with "hello" and two.txt with "world".
 
 ## Handover Notes
 - Nothing executed yet. Note: two.txt task is missing from the plan.
-
-## Conclusion
-- Status: In Progress
-- Final Conclusion: 
-- Key Findings / Results:
 ```
 
 #### 2. Run
@@ -106,7 +105,7 @@ Shows an exploratory task: the exact steps are not known upfront. The initial li
 # Rust Crate Analysis
 
 ## Goal
-Compare `anyhow` and `eyre` error-handling crates.
+Compare `anyhow` and `eyre` error-handling crates and save the comparison report to `artifacts/comparison.md`.
 
 ## Tasks
 - [ ] Read anyhow docs and summarize key features
@@ -115,11 +114,6 @@ Compare `anyhow` and `eyre` error-handling crates.
 
 ## Handover Notes
 - Start by researching anyhow first.
-
-## Conclusion
-- Status: In Progress
-- Final Conclusion: 
-- Key Findings / Results:
 ```
 
 #### 2. Run

@@ -236,7 +236,8 @@ pub fn system_message_with_todo(todo_md: &str) -> crate::model::Message {
             - Your context just reset. Do ONLY the given task, then stop.\n\
             - If you need context from previous work, check `artifacts/`.\n\
             - Report what you did when finished. The agent marks the task as done.\n\
-            - Save your outputs to `artifacts/`.\n\n\
+            - Your final message is this task's final answer. If it is the last task in the plan, it is the job's final answer: summarize the overall result.\n\
+            - Save your outputs to `artifacts/`; the last task also saves the job's final result there (the plan may name the file) and reports the file path in its final answer.\n\n\
             {}",
             base.content, todo_md
         ),
@@ -244,9 +245,31 @@ pub fn system_message_with_todo(todo_md: &str) -> crate::model::Message {
     }
 }
 
+/// Build a system message for the Mode 2 replan session.
+/// The replan agent (planner role) only updates the plan; it never executes
+/// the tasks themselves.
+pub fn system_message_with_replan() -> crate::model::Message {
+    let base = system_message();
+    crate::model::Message {
+        role: "system".to_string(),
+        content: format!(
+            "{}\n\n\
+            ## 5. Replan Context (Plan-Exec-Dynamic Mode)\n\
+            - Your context just reset. You are the task planner: review the plan and update it.\n\
+            - Inspect `artifacts/` and the workspace with tools (e.g. `list_directory`, `read_file`) to verify what previous tasks produced before marking tasks `[x]`.\n\
+            - Use the `write_file` tool to save the updated plan to `./todo.md`; responding with text alone does not update the plan.\n\
+            - Do NOT execute the tasks themselves; only update the plan.\n\
+            - Your final message is a short summary of the plan changes.",
+            base.content
+        ),
+        ..Default::default()
+    }
+}
+
 /// Build a system message for Mode 2 (Plan-Exec-Dynamic) sessions.
 /// Instructs the LLM to update todo.md via write_file, including marking
-/// tasks as done and writing the Conclusion when all tasks are complete.
+/// tasks as done and setting `Status: Completed` in the `## Status` section
+/// when all tasks are complete.
 pub fn system_message_with_todo_mode2(todo_md: &str) -> crate::model::Message {
     let base = system_message();
     crate::model::Message {
@@ -254,13 +277,16 @@ pub fn system_message_with_todo_mode2(todo_md: &str) -> crate::model::Message {
         content: format!(
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec-Dynamic Mode)\n\
-            - Your context just reset. Do ONLY the given task, then stop.\n\
+            - Your context just reset. Do ONLY the single task described in the user message, then stop.\n\
+            - Do NOT execute any other tasks from todo.md, even though the full plan is listed below.\n\
+            - Finish the task completely (create its output files) before you stop; do not stop after only inspecting or reading files.\n\
             - If you need context from previous work, check `artifacts/`.\n\
             - After completing, use `write_file` to update `./todo.md`:\n\
-              * Mark your task as `[x]`.\n\
-              * If all tasks are done, update `## Conclusion` with `Status: Completed`.\n\
+              * Mark ONLY your own task as `[x]` (not other tasks).\n\
+              * If ALL tasks are `[x]` AND the Goal is achieved, add or update a `## Status` section with `Status: Completed`.\n\
               * If you discovered new subtasks, add them to `## Tasks`.\n\
-            - Save your outputs to `artifacts/`.\n\n\
+            - Your final message is this task's final answer. If it is the last task in the plan, it is the job's final answer: summarize the overall result.\n\
+            - Save your outputs to `artifacts/`; the last task also saves the job's final result there (the plan may name the file) and reports the file path in its final answer.\n\n\
             {}",
             base.content, todo_md
         ),

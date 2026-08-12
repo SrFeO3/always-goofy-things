@@ -10,19 +10,24 @@
 //! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
 //! 2. [Todo Loop]      : Recursive cycle through unchecked tasks until all are complete.
 //!    - Parse State    : Identify the next unchecked task.
-//!    - Reasoning Loop : Recursive cycle for this task (LLM Call -> Tool Exec -> Feedback).
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback).
 //!    - Store State    : Update todo.md (mark [x]) and reset LLM context.
 //! 3. [Final Answer]   : Notify the user that all tasks are complete.
 //!
 //! ## Mode 2 (Plan-Exec-Dynamic)
 //!
 //! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
-//! 2. [Todo Loop]      : Recursive cycle until the LLM declares completion.
+//! 2. [Todo Loop]      : Replan, then execute one task per fresh context until
+//!                       `## Status` says `Status: Completed`.
 //!    - Parse State    : Read todo.md to get current tasks and progress.
-//!    - Replan         : LLM reviews and rewrites todo.md if needed (lightweight, 1 turn).
-//!    - Reasoning Loop : Recursive cycle for this task (LLM Call -> Tool Exec -> Feedback & Reflection/Completion Check).
-//!    - Store State    : Update todo.md (LLM rewrites with results) and reset LLM context.
-//! 3. [Final Answer]   : Present the final conclusion to the user.
+//!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback).
+//!                       Inspects artifacts/, then updates todo.md ([x] marks,
+//!                       task changes, completion status).
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback).
+//!                       Runs the single task from the user message only.
+//!    - Store State    : The task LLM updates todo.md via write_file; the agent
+//!                       program resets the LLM context.
+//! 3. [Final Answer]   : Present the final answer to the user.
 
 use anyhow::{Context, Result};
 
@@ -30,7 +35,7 @@ use crate::attach::AttachedFile;
 use crate::compat_provider::LlmProvider;
 use crate::model::{Message, Metrics, Session, Settings};
 use crate::persistence;
-use crate::reasoning::{call_llm, run_reasoning_loop};
+use crate::reasoning::run_reasoning_loop;
 use crate::startup;
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
@@ -206,28 +211,31 @@ fn mark_task_done(task_index: usize, notes: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check if the `## Conclusion` section declares completion (Mode 2).
+/// Check if the `## Status` section declares completion (Mode 2).
 ///
 /// Returns `true` when both:
-/// 1. `Status:` starts with `Completed` (case-insensitive)
+/// 1. A `Status:` line contains `Completed` (case-insensitive; the leading
+///    `-` of the markdown list form is optional)
 /// 2. No unchecked `- [ ]` tasks remain
-fn check_conclusion(todo_md: &str) -> bool {
-    let mut in_conclusion = false;
+fn check_completion(todo_md: &str) -> bool {
+    let mut in_status_section = false;
     let mut status_completed = false;
 
     for line in todo_md.lines() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("## Conclusion") {
-            in_conclusion = true;
+        if trimmed == "## Status" {
+            in_status_section = true;
             continue;
         }
-        if in_conclusion && trimmed.starts_with("##") {
+        if in_status_section && trimmed.starts_with("##") {
             break;
         }
-        if in_conclusion {
+        if in_status_section {
             let lower = trimmed.to_lowercase();
-            if lower.starts_with("- status:") && lower.contains("completed") {
+            // Accept both the plain form the prompt asks for (`Status: Completed`)
+            // and the markdown list form (`- Status: Completed`).
+            if lower.contains("status:") && lower.contains("completed") {
                 status_completed = true;
             }
         }
@@ -236,59 +244,51 @@ fn check_conclusion(todo_md: &str) -> bool {
     status_completed && count_unchecked(todo_md) == 0
 }
 
-/// Lightweight replan phase (Mode 2): ask the LLM to review and update todo.md.
+/// Replan phase (Mode 2): the planner reviews and updates todo.md.
 ///
-/// Calls `call_llm` directly (1 turn), executes `write_file` for `./todo.md`
-/// without confirmation, and returns the updated todo.md content.
+/// Runs a full reasoning loop in a fresh planner session: the planner may
+/// inspect the workspace with tools and saves the updated plan to ./todo.md
+/// via write_file. Returns the todo.md content after the loop.
 async fn run_replan_loop(
     config: &startup::Config,
     settings: &mut Settings,
     provider: LlmProvider,
+    metrics: &mut Metrics,
+    gui_log: &mut Session,
     todo_content: &str,
 ) -> Result<String> {
     let replan_prompt = format!(
         "You are a task planner. Review the current todo.md below.\n\n\
         ## Instructions\n\
         - If any task in `## Tasks` is completed (e.g., its output file exists), mark it as `[x]`.\n\
-        - If ALL tasks are `[x]` AND the Goal is achieved, update `## Conclusion`:\n\
-          `Status: Completed (No further investigation needed)`.\n\
+        - If ALL tasks are `[x]` AND the Goal is achieved, add or update a `## Status` section with `Status: Completed`.\n\
         - If more work is needed, update `## Tasks`: add, remove, reorder, or split tasks.\n\
-        - Use `write_file` to save `./todo.md`. Return ONLY the updated file -- no explanation.\n\n\
+        - You may inspect the workspace with tools (e.g. `list_directory`, `read_file`) to verify what previous tasks produced.\n\
+        - Save the updated plan with the `write_file` tool to `./todo.md`; responding with text alone does not update the plan.\n\
+        - Finish with a short summary of what you changed.\n\n\
         ## Current todo.md\n\n{}",
         todo_content
     );
 
-    let messages = vec![Message {
-        role: "user".to_string(),
-        content: replan_prompt,
-        ..Default::default()
-    }];
+    let system_msg = startup::system_message_with_replan();
+    let mut replan_session = Session::new(format!("{}_replan", config.session_label), system_msg);
+    run_reasoning_loop(
+        config,
+        provider,
+        &mut replan_session,
+        settings,
+        metrics,
+        replan_prompt,
+        Vec::new(),
+    )
+    .await?;
 
-    let (assistant_msg, _usage) = call_llm(config, settings, provider, &messages).await?;
-
-    // Execute write_file for ./todo.md without confirmation (internal bookkeeping)
-    if let Some(tool_calls) = &assistant_msg.tool_calls {
-        for call in tool_calls {
-            if call.function.name == "write_file" {
-                let args = &call.function.arguments;
-                // Normalize: OpenAI wraps args in a JSON string
-                let args_val: &serde_json::Value = args;
-                let path = args_val.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if (path == "./todo.md" || path == "todo.md")
-                    && let Some(content) = args_val.get("content").and_then(|v| v.as_str())
-                {
-                    std::fs::write("./todo.md", content)
-                        .context("Failed to write ./todo.md during replan")?;
-                    println!(
-                        "{}[Replan] ./todo.md updated.{}",
-                        startup::C_DIM_GRAY,
-                        startup::RESET
-                    );
-                }
-            }
-        }
+    // Push the planner's conversation to the GUI log for visibility.
+    for msg in replan_session.messages.iter().skip(1) {
+        gui_log.messages.push(msg.clone());
     }
 
+    // The planner updates ./todo.md via write_file during the loop; read it back.
     std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md after replan")
 }
 
@@ -370,7 +370,7 @@ async fn run_todo_loop_mode1(
 ) -> Result<String> {
     let pending_count = pending.len();
     let mut completed = 0usize;
-    let mut last_conclusion = String::new();
+    let mut last_answer = String::new();
 
     for task in &pending {
         let task_num = completed + 1;
@@ -426,11 +426,11 @@ async fn run_todo_loop_mode1(
 
             mark_task_done(0, &note)?;
 
-            // Capture LLM's final message as conclusion
+            // Capture LLM's final message as the final answer
             if let Some(msg) = task_session.messages.last()
                 && !msg.content.trim().is_empty()
             {
-                last_conclusion = msg.content.clone();
+                last_answer = msg.content.clone();
             }
 
             persistence::archive_todo_session(&task_label, task.index)?;
@@ -466,8 +466,8 @@ async fn run_todo_loop_mode1(
     }
 
     Ok(if completed == pending_count {
-        if !last_conclusion.is_empty() {
-            last_conclusion
+        if !last_answer.is_empty() {
+            last_answer
         } else {
             format!("All {} tasks completed successfully.", pending_count)
         }
@@ -491,17 +491,17 @@ async fn run_todo_loop_mode2(
     let mut completed = 0usize;
     let mut replan_stalls = 0u32;
     let mut task_index = 0usize;
-    let mut last_conclusion = String::new();
+    let mut last_answer = String::new();
 
     loop {
         task_index += 1;
         let todo_content =
             std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
 
-        // Check if already concluded
-        if check_conclusion(&todo_content) {
+        // Check if the completion status is already set
+        if check_completion(&todo_content) {
             println!(
-                "{}--- [TODO LOOP] Conclusion reached. Exiting. ---{}",
+                "{}--- [TODO LOOP] Completion reached. Exiting. ---{}",
                 startup::C_CYAN,
                 startup::RESET
             );
@@ -513,7 +513,16 @@ async fn run_todo_loop_mode2(
         #[cfg(feature = "gui")]
         push_system_msg(gui_log, "--- [Replan] ---");
         let prev_unchecked = count_unchecked(&todo_content);
-        let updated = match run_replan_loop(config, settings, provider, &todo_content).await {
+        let updated = match run_replan_loop(
+            config,
+            settings,
+            provider,
+            metrics,
+            gui_log,
+            &todo_content,
+        )
+        .await
+        {
             Ok(u) => u,
             Err(e) => {
                 println!(
@@ -527,9 +536,9 @@ async fn run_todo_loop_mode2(
             }
         };
 
-        if check_conclusion(&updated) {
+        if check_completion(&updated) {
             println!(
-                "{}--- [TODO LOOP] Conclusion reached during replan. Exiting. ---{}",
+                "{}--- [TODO LOOP] Completion reached during replan. Exiting. ---{}",
                 startup::C_CYAN,
                 startup::RESET
             );
@@ -581,23 +590,29 @@ async fn run_todo_loop_mode2(
         let task_label = format!("{}_task{}", config.session_label, task_index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
 
+        // Single-task boundary: the user message names exactly one task and
+        // forbids working on the other tasks listed in the system prompt.
+        let task_prompt = format!(
+            "Execute ONLY this task, then update ./todo.md and stop:\n\n{}",
+            task.description
+        );
         let done = run_reasoning_loop(
             config,
             provider,
             &mut task_session,
             settings,
             metrics,
-            task.description.clone(),
+            task_prompt,
             attached_files.clone(),
         )
         .await?;
 
         if done {
-            // Capture LLM's final message as conclusion
+            // Capture LLM's final message as the final answer
             if let Some(msg) = task_session.messages.last()
                 && !msg.content.trim().is_empty()
             {
-                last_conclusion = msg.content.clone();
+                last_answer = msg.content.clone();
             }
             persistence::archive_todo_session(&task_label, task_index)?;
 
@@ -631,13 +646,13 @@ async fn run_todo_loop_mode2(
         }
     }
 
-    // Final check: did the LLM write a Conclusion?
+    // Final check: did the LLM set the completion status?
     let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
-    if check_conclusion(&final_todo) {
-        if last_conclusion.is_empty() {
-            Ok("All tasks completed (Conclusion reached).".to_string())
+    if check_completion(&final_todo) {
+        if last_answer.is_empty() {
+            Ok("All tasks completed (Status: Completed).".to_string())
         } else {
-            Ok(last_conclusion)
+            Ok(last_answer)
         }
     } else if completed > 0 {
         Ok(format!(
@@ -648,3 +663,7 @@ async fn run_todo_loop_mode2(
         Ok("No tasks completed. Check ./todo.md for pending items.".to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/todo_test.rs"]
+mod tests;
