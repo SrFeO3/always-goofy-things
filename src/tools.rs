@@ -11,7 +11,8 @@
 //!
 //! # Available Tools
 //!
-//! - `read_file`: Read a text or binary file's content. Text files support line ranges.
+//! - `read_file`: Read a text or binary file's content. start/end select a
+//!   1-based range (lines for text, pages for PDF).
 //! - `write_file`: Create a new file or overwrite an existing one with full content.
 //! - `str_replace_editor`: Replace specific text blocks in a file for code modification.
 //! - `grep_search`: Search for text patterns across files in the workspace.
@@ -162,13 +163,13 @@ pub fn get_tool_definitions(db_type: Option<&str>) -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file, including images, audio, and PDFs. For text files, optionally specify a line range. Use this tool before editing files or investigating code.",
+                "description": "Read the contents of a file, including text, images, audio, and PDFs. start/end form a 1-based inclusive range: line numbers for text files, page numbers for PDF files. Omit start/end to read the whole file. Use this tool before editing files or investigating code.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Path relative to the workspace root. Do not start with '/' or '../'." },
-                        "start_line": { "type": "integer", "description": "Optional starting line number (1-based)." },
-                        "end_line": { "type": "integer", "description": "Optional ending line number (inclusive)." }
+                        "start": { "type": "integer", "description": "Optional 1-based range start: line number for text files, page number for PDF files." },
+                        "end": { "type": "integer", "description": "Optional 1-based range end (inclusive): line number for text files, page number for PDF files." }
                     },
                     "required": ["path"]
                 }
@@ -446,34 +447,36 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             let lines: Vec<&str> = content.lines().collect();
             let total_lines = lines.len();
 
-            let start = args["start_line"]
+            // start/end are 1-based inclusive; invalid ranges are rejected
+            // (never clamped) so the LLM can correct them instead of getting
+            // a silently widened or empty slice.
+            let start = args["start"].as_u64().map(|v| v as usize).unwrap_or(1);
+            let end = args["end"]
                 .as_u64()
-                .map(|v| (v as usize).saturating_sub(1))
-                .unwrap_or(0);
-            let end = args["end_line"]
-                .as_u64()
-                .map(|v| (v as usize).min(total_lines))
+                .map(|v| v as usize)
                 .unwrap_or(total_lines);
-            if start > end || start >= total_lines {
+            if start < 1 || start > end || start > total_lines || end > total_lines {
                 return Err(anyhow!(
-                    "[INVALID_ARGUMENTS] Invalid line range (total lines: {})",
+                    "[INVALID_ARGUMENTS] Invalid line range: start/end must satisfy 1 <= start <= end <= total (total lines: {})",
                     total_lines
                 ));
             }
 
-            let sliced_content = lines[start..end].join("\n");
-            let truncated = start > 0 || end < total_lines;
+            let sliced_content = lines[(start - 1)..end].join("\n");
+            let truncated = start > 1 || end < total_lines;
 
             Ok(json!({
                 "path": path,
-                "start_line": start + 1,
-                "end_line": end,
-                "total_lines": total_lines,
+                "start": start,
+                "end": end,
+                "total": total_lines,
+                "unit": "lines",
                 "content": sliced_content,
                 "truncated": truncated
             }))
         }
         FileType::Image { mime } => {
+            reject_range(args)?;
             let data_url = file::convert_image_to_data_url(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
             Ok(json!({
@@ -484,6 +487,7 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             }))
         }
         FileType::Audio { format } => {
+            reject_range(args)?;
             let (_format, b64) = file::convert_audio_to_base64(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
             let mime = audio_format_to_mime(&format);
@@ -494,7 +498,31 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
                 "content": b64
             }))
         }
+        FileType::Document { mime } if mime == "application/pdf" => {
+            let total = crate::file_pdf::pdf_page_count(path)
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
+            let start = args["start"].as_u64().map(|v| v as usize).unwrap_or(1);
+            let end = args["end"].as_u64().map(|v| v as usize).unwrap_or(total);
+            if start < 1 || start > end || start > total || end > total {
+                return Err(anyhow!(
+                    "[INVALID_ARGUMENTS] Invalid page range: start/end must satisfy 1 <= start <= end <= total (total pages: {})",
+                    total
+                ));
+            }
+            let result = crate::file_pdf::extract_text_from_pdf(path, Some((start, end)))
+                .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
+            Ok(json!({
+                "path": path,
+                "start": result.start,
+                "end": result.end,
+                "total": result.page_count,
+                "unit": "pages",
+                "content": result.text,
+                "truncated": result.start > 1 || result.end < result.page_count
+            }))
+        }
         FileType::Document { mime } => {
+            reject_range(args)?;
             let bytes = fs::read(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -506,6 +534,17 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             }))
         }
     }
+}
+
+/// Reject start/end for file types without a range concept: images, audio,
+/// and non-PDF documents are always read in full.
+fn reject_range(args: &serde_json::Value) -> Result<(), anyhow::Error> {
+    if args.get("start").is_some() || args.get("end").is_some() {
+        return Err(anyhow!(
+            "[INVALID_ARGUMENTS] start/end only apply to text and PDF files; this file is read in full"
+        ));
+    }
+    Ok(())
 }
 
 fn audio_format_to_mime(format: &str) -> &str {

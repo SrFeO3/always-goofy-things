@@ -119,6 +119,7 @@ Prepend `@file` paths to attach files, or `@@file` to force text extraction (use
 |--------|-----------|
 | `@` | Send files (text, images, audio, PDF). Non-text is base64-encoded. |
 | `@@` | Converts PDF to Markdown; saved as `{file}_converted_for_llm.txt`. |
+| `@@f:3-7` | Converts only pages 3-7 (1-based, inclusive; `@@f:3` = page 3). Saved as `{file}_converted_for_llm_p3-p7.txt`. |
 
 Ollama requires `@@` for PDF (no native document support).
 
@@ -134,6 +135,7 @@ Ollama requires `@@` for PDF (no native document support).
 - "Find the Python script in the workspace and translate its output messages into Shakespearean English."
 - "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
 - "@@spec.pdf Fix this broken http server based on the specification."
+- "@@spec.pdf:3-7 Review the page numbers and headers on these pages."
 
 **Long complex tasks - too large for a single LLM context. Use todo mode:**
 

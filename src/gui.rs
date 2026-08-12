@@ -756,10 +756,10 @@ impl GuiApp {
         }
 
         // @file attachments.
-        let (query_text, raw_paths, parse_mode) = attach::parse_attached_files(&input);
-        let attached_files = if !raw_paths.is_empty() {
-            match attach::validate_files(&raw_paths) {
-                Ok(()) => match attach::read_attached_files(&raw_paths, parse_mode) {
+        let (query_text, specs, parse_mode) = attach::parse_attached_files(&input);
+        let attached_files = if !specs.is_empty() {
+            match attach::validate_files(&specs) {
+                Ok(()) => match attach::read_attached_files(&specs, parse_mode) {
                     Ok(files) => files,
                     Err(e) => {
                         self.conversation.push_str(&format!("\n[Error] {}\n", e));

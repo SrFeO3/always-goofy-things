@@ -27,18 +27,123 @@ fn test_read_file() {
         "path": path_str,
     });
     let val = execute_read_file(&args).unwrap();
-    assert_eq!(val["total_lines"], 4);
+    assert_eq!(val["total"], 4);
+    assert_eq!(val["unit"], "lines");
     assert!(val["content"].as_str().unwrap().contains("line4"));
 
     // Test specific line range read (lines 2-3)
     let args = json!({
         "path": path_str,
-        "start_line":Some(2),
-        "end_line":Some(3)
+        "start": Some(2),
+        "end": Some(3)
     });
     let val = execute_read_file(&args).unwrap();
     assert_eq!(val["content"], "line2\nline3");
+    assert_eq!(val["start"], 2);
+    assert_eq!(val["end"], 3);
     assert!(val["truncated"].as_bool().unwrap());
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_read_file_text_range_errors() {
+    let path = get_temp_path("read_errors");
+    fs::write(&path, "line1\nline2\nline3\nline4").unwrap();
+    let path_str = path.to_str().unwrap();
+
+    // start=0 violates 1-based numbering.
+    let args = json!({ "path": path_str, "start": 0, "end": 2 });
+    let err = execute_read_file(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("[INVALID_ARGUMENTS]"), "{}", msg);
+    assert!(msg.contains("1 <= start <= end <= total"), "{}", msg);
+    assert!(msg.contains("total lines: 4"), "{}", msg);
+
+    // start > end (including end=0).
+    let args = json!({ "path": path_str, "start": 3, "end": 2 });
+    assert!(
+        execute_read_file(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("[INVALID_ARGUMENTS]")
+    );
+    let args = json!({ "path": path_str, "start": 1, "end": 0 });
+    assert!(
+        execute_read_file(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("[INVALID_ARGUMENTS]")
+    );
+
+    // Out of bounds: never clamped, always an error.
+    let args = json!({ "path": path_str, "start": 1, "end": 99 });
+    let err = execute_read_file(&args).unwrap_err();
+    assert!(err.to_string().contains("total lines: 4"), "{}", err);
+    let args = json!({ "path": path_str, "start": 99, "end": 100 });
+    assert!(
+        execute_read_file(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("[INVALID_ARGUMENTS]")
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_read_file_rejects_range_on_image() {
+    // classify_file keys off the extension; a dummy file suffices.
+    let path = get_temp_path("read_img");
+    fs::write(&path, "not really a png").unwrap();
+    let mut img_path = path.clone();
+    img_path.set_extension("png");
+    fs::rename(&path, &img_path).unwrap();
+    let img_str = img_path.to_str().unwrap();
+
+    // A range on an image is rejected with guidance, not silently ignored.
+    let args = json!({ "path": img_str, "start": 1, "end": 2 });
+    let err = execute_read_file(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("[INVALID_ARGUMENTS]"), "{}", msg);
+    assert!(msg.contains("only apply to text and PDF"), "{}", msg);
+
+    // Without a range the image is read normally.
+    let args = json!({ "path": img_str });
+    assert!(execute_read_file(&args).is_ok());
+
+    fs::remove_file(img_path).ok();
+}
+
+#[test]
+fn test_read_file_pdf_pages() {
+    use pdf_oxide::api::Pdf;
+
+    let path = std::env::temp_dir().join(format!("read_file_pdf_{}.pdf", std::process::id()));
+    let mut pdf =
+        Pdf::from_markdown("# One\n\nBody one.\n\n## Two\n\nBody two.").expect("create pdf");
+    pdf.save(&path).expect("save pdf");
+    let path_str = path.to_string_lossy().to_string();
+
+    // Full read: pages unit, review text as content.
+    let args = json!({ "path": path_str });
+    let val = execute_read_file(&args).unwrap();
+    assert_eq!(val["unit"], "pages");
+    assert!(val["total"].as_u64().unwrap() >= 1);
+    assert!(val["content"].as_str().unwrap().contains("[pdf-review]"));
+    assert!(val["content"].as_str().unwrap().contains("--- page 1 ---"));
+
+    // Page range read.
+    let args = json!({ "path": path_str, "start": 1, "end": 1 });
+    let val = execute_read_file(&args).unwrap();
+    assert_eq!(val["start"], 1);
+    assert_eq!(val["end"], 1);
+    assert!(val["content"].as_str().unwrap().contains("extracted p.1"));
+
+    // Invalid page range.
+    let args = json!({ "path": path_str, "start": 99, "end": 100 });
+    let err = execute_read_file(&args).unwrap_err();
+    assert!(err.to_string().contains("[INVALID_ARGUMENTS]"), "{}", err);
 
     fs::remove_file(path).ok();
 }
@@ -336,12 +441,8 @@ fn test_list_directory() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(entries.iter().any(|n| *n == "src"));
-    assert!(
-        entries
-            .iter()
-            .any(|n| *n == "Cargo.toml" || *n == "Cargo.lock")
-    );
+    assert!(entries.contains(&"src"));
+    assert!(entries.contains(&"Cargo.toml") || entries.contains(&"Cargo.lock"));
 }
 
 #[test]

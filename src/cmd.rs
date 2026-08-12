@@ -586,8 +586,12 @@ pub(crate) fn handle_restore(
                 let path_str = f.path;
                 let fallback_type = f.attach_type;
                 if Path::new(&path_str).exists() {
+                    let spec = attach::AttachedSpec {
+                        path: path_str.clone(),
+                        page_range: None,
+                    };
                     match attach::read_attached_files(
-                        std::slice::from_ref(&path_str),
+                        std::slice::from_ref(&spec),
                         attach::AttachMode::Raw,
                     ) {
                         Ok(mut entries) => {
@@ -605,6 +609,7 @@ pub(crate) fn handle_restore(
                                 path: path_str.clone(),
                                 content: String::new(),
                                 attach_type: fallback_type.clone(),
+                                page_range: None,
                             });
                             missing_paths.push(path_str);
                         }
@@ -618,6 +623,7 @@ pub(crate) fn handle_restore(
                         path: path_str.clone(),
                         content: String::new(),
                         attach_type: fallback_type,
+                        page_range: None,
                     });
                     missing_paths.push(path_str);
                 }

@@ -509,9 +509,10 @@ pub fn gui_pretty_result(ui: &mut egui::Ui, name: &str, result: &Value, args_jso
     match name {
         "read_file" => {
             let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            let total = obj.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
-            let start = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
-            let end = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = obj.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+            let start = obj.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
+            let end = obj.get("end").and_then(|v| v.as_u64()).unwrap_or(0);
+            let unit = obj.get("unit").and_then(|v| v.as_str()).unwrap_or("lines");
             let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let bytes = content.len() as u64;
             let trimmed = content.trim();
@@ -520,11 +521,16 @@ pub fn gui_pretty_result(ui: &mut egui::Ui, name: &str, result: &Value, args_jso
                 let lines: Vec<&str> = trimmed.lines().collect();
                 truncate_str(lines.last().unwrap_or(&"").trim_end_matches('\n'), 20)
             };
+            let (prefix, total_label) = if unit == "pages" {
+                ("P", "pages")
+            } else {
+                ("L", "lines")
+            };
             ui.colored_label(
                 C_GRAY,
                 format!(
-                    "[{} bytes, L{}-L{} (file total: {} lines) ({})] {} ... {}",
-                    bytes, start, end, total, path, first, last
+                    "[{} bytes, {}{}-{}{} (file total: {} {}) ({})] {} ... {}",
+                    bytes, prefix, start, prefix, end, total, total_label, path, first, last
                 ),
             );
         }

@@ -173,13 +173,13 @@ async fn main() -> Result<()> {
         let query_text;
         let attached_files: Vec<AttachedFile>;
         {
-            let (clean, raw_paths, parse_mode) = attach::parse_attached_files(&input);
-            if !raw_paths.is_empty() {
-                match attach::validate_files(&raw_paths) {
+            let (clean, specs, parse_mode) = attach::parse_attached_files(&input);
+            if !specs.is_empty() {
+                match attach::validate_files(&specs) {
                     Ok(()) => {
                         // Check for oversized files (> 1 MiB)
                         let oversized =
-                            attach::check_oversized_files(&raw_paths, attach::OVERLOADED_BYTES);
+                            attach::check_oversized_files(&specs, attach::OVERLOADED_BYTES);
                         if !oversized.is_empty() {
                             for (path, size) in &oversized {
                                 let size_str = attach::format_file_size(*size);
@@ -212,13 +212,19 @@ async fn main() -> Result<()> {
                         }
 
                         // All files exist - read them
-                        match attach::read_attached_files(&raw_paths, parse_mode) {
+                        match attach::read_attached_files(&specs, parse_mode) {
                             Ok(files) => {
                                 for f in &files {
                                     let is_converted_pdf = f.path.to_lowercase().ends_with(".pdf")
                                         && matches!(f.attach_type, FileType::Text);
                                     let label = if is_converted_pdf {
-                                        format!("Markdown extracted from {}", f.path)
+                                        match f.page_range {
+                                            Some((s, e)) => format!(
+                                                "Markdown extracted from {} (p.{}-p.{})",
+                                                f.path, s, e
+                                            ),
+                                            None => format!("Markdown extracted from {}", f.path),
+                                        }
                                     } else {
                                         let size_str =
                                             attach::format_file_size(f.content.len() as u64);
