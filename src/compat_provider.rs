@@ -727,7 +727,7 @@ pub(crate) fn accumulate_usage(json: &serde_json::Value, current: &mut Option<Us
 }
 
 /// Converts Anthropic stream events into an OpenAI-compatible JSON format
-/// for the existing agent pipeline.
+/// for the existing pipeline.
 pub fn convert_anth_to_openai_format(
     anth: serde_json::Value,
     tool_index: &mut usize,
