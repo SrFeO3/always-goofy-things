@@ -143,7 +143,7 @@ pub struct Config {
     pub tool_result_format: ToolResultFormat,
 
     /// Batch query: run once non-interactively and print result to stdout.
-    /// When set, the agent runs in batch mode and exits after completion.
+    /// When set, the application runs in batch mode and exits after completion.
     #[arg(short = 'q', long)]
     pub query: Option<String>,
 
@@ -160,7 +160,7 @@ pub struct Config {
     pub max_reasoning_turns: u32,
 
     /// Maximum consecutive replan attempts without reducing unchecked tasks (Mode 2).
-    /// When the replan loop fails to decrease `- [ ]` count this many times, the agent stops.
+    /// When the replan loop fails to decrease `- [ ]` count this many times, the application stops.
     /// `0` = unlimited (never stop on replan stalls).
     #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
     pub max_replan_attempts: u32,
@@ -224,41 +224,44 @@ pub fn system_message() -> crate::model::Message {
     }
 }
 
-/// Build a system message for todo-mode sessions.
-/// Embeds the immutable workspace rules plus the full todo.md content.
-pub fn system_message_with_todo(todo_md: &str) -> crate::model::Message {
+/// Build a system message for Mode 1 (Plan-Exec-Static) task sessions.
+/// The plan is read from ./todo.md with read_file; the task LLM executes the
+/// single task named in the user message.
+pub fn system_message_mode1_task_loop() -> crate::model::Message {
     let base = system_message();
     crate::model::Message {
         role: "system".to_string(),
         content: format!(
             "{}\n\n\
-            ## 5. Todo Context (Plan-Exec Mode)\n\
-            - Your context just reset. Do ONLY the given task, then stop.\n\
-            - If you need context from previous work, check `artifacts/`.\n\
-            - Report what you did when finished. The agent marks the task as done.\n\
-            - Your final message is this task's final answer. If it is the last task in the plan, it is the job's final answer: summarize the overall result.\n\
-            - Save your outputs to `artifacts/`; the last task also saves the job's final result there (the plan may name the file) and reports the file path in its final answer.\n\n\
-            {}",
-            base.content, todo_md
+            ## 5. Todo Context (Plan-Exec Task Loop)\n\
+            - Read `./todo.md` FIRST with read_file; it is the plan. Follow its Goal and Handover Notes.\n\
+            - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
+            - Finish the task completely (create its outputs) before stopping.\n\
+            - Report what you did when finished.\n\
+            - Check `artifacts/` for previous work; save your outputs there.\n\
+            - Your final message is a short report of what you did, what you produced, and where.\n\
+            - If this is the last task in `./todo.md`, also confirm that the whole plan is complete and give the result file path.",
+            base.content
         ),
         ..Default::default()
     }
 }
 
-/// Build a system message for the Mode 2 replan session.
-/// The replan agent (planner role) only updates the plan; it never executes
-/// the tasks themselves.
-pub fn system_message_with_replan() -> crate::model::Message {
+/// Build a system message for Mode 2 (Plan-Exec-Dynamic) replan sessions.
+/// The replan session (planner role) only updates the plan; it never executes
+/// the tasks.
+pub fn system_message_mode2_replan() -> crate::model::Message {
     let base = system_message();
     crate::model::Message {
         role: "system".to_string(),
         content: format!(
             "{}\n\n\
-            ## 5. Replan Context (Plan-Exec-Dynamic Mode)\n\
-            - Your context just reset. You are the task planner: review the plan and update it.\n\
-            - Inspect `artifacts/` and the workspace with tools (e.g. `list_directory`, `read_file`) to verify what previous tasks produced before marking tasks `[x]`.\n\
-            - Use the `write_file` tool to save the updated plan to `./todo.md`; responding with text alone does not update the plan.\n\
-            - Do NOT execute the tasks themselves; only update the plan.\n\
+            ## 5. Todo Context (Plan-Exec-Dynamic Replan)\n\
+            - You are the task planner.\n\
+            - Read `./todo.md` FIRST with read_file; it is the current plan.\n\
+            - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks; when ALL tasks are `[x]` and the Goal is achieved, add a `## Status` section with `Status: Completed`.\n\
+            - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
+            - Do NOT execute the tasks; only update the plan.\n\
             - Your final message is a short summary of the plan changes.",
             base.content
         ),
@@ -266,29 +269,24 @@ pub fn system_message_with_replan() -> crate::model::Message {
     }
 }
 
-/// Build a system message for Mode 2 (Plan-Exec-Dynamic) sessions.
-/// Instructs the LLM to update todo.md via write_file, including marking
-/// tasks as done and setting `Status: Completed` in the `## Status` section
-/// when all tasks are complete.
-pub fn system_message_with_todo_mode2(todo_md: &str) -> crate::model::Message {
+/// Build a system message for Mode 2 (Plan-Exec-Dynamic) task sessions.
+/// The plan is read from ./todo.md with read_file; the task LLM executes the
+/// single task named in the user message and updates the plan on completion.
+pub fn system_message_mode2_task_loop() -> crate::model::Message {
     let base = system_message();
     crate::model::Message {
         role: "system".to_string(),
         content: format!(
             "{}\n\n\
-            ## 5. Todo Context (Plan-Exec-Dynamic Mode)\n\
-            - Your context just reset. Do ONLY the single task described in the user message, then stop.\n\
-            - Do NOT execute any other tasks from todo.md, even though the full plan is listed below.\n\
-            - Finish the task completely (create its output files) before you stop; do not stop after only inspecting or reading files.\n\
-            - If you need context from previous work, check `artifacts/`.\n\
-            - After completing, use `write_file` to update `./todo.md`:\n\
-              * Mark ONLY your own task as `[x]` (not other tasks).\n\
-              * If ALL tasks are `[x]` AND the Goal is achieved, add or update a `## Status` section with `Status: Completed`.\n\
-              * If you discovered new subtasks, add them to `## Tasks`.\n\
-            - Your final message is this task's final answer. If it is the last task in the plan, it is the job's final answer: summarize the overall result.\n\
-            - Save your outputs to `artifacts/`; the last task also saves the job's final result there (the plan may name the file) and reports the file path in its final answer.\n\n\
-            {}",
-            base.content, todo_md
+            ## 5. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
+            - Read `./todo.md` FIRST with read_file; it is the plan. Follow its Goal and Handover Notes.\n\
+            - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
+            - Finish the task completely (create its outputs) before stopping.\n\
+            - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; when ALL tasks are `[x]` and the Goal is achieved, add a `## Status` section with `Status: Completed`; add new subtasks to `## Tasks`.\n\
+            - Check `artifacts/` for previous work; save your outputs there.\n\
+            - Your final message is a short report of what you did, what you produced, and where.\n\
+            - If this is the last task in `./todo.md`, also confirm that the whole plan is complete and give the result file path.",
+            base.content
         ),
         ..Default::default()
     }

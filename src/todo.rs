@@ -8,25 +8,23 @@
 //! ## Mode 1 (Plan-Exec-Static)
 //!
 //! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
-//! 2. [Todo Loop]      : Recursive cycle through unchecked tasks until all are complete.
+//! 2. [Todo Loop]      : Recursive cycle through unchecked tasks, one per fresh context.
 //!    - Parse State    : Identify the next unchecked task.
-//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback).
-//!    - Store State    : Update todo.md (mark [x]) and reset LLM context.
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task from the user message only.
+//!    - Store State    : The application updates todo.md (mark [x]) and resets the LLM context.
 //! 3. [Final Answer]   : Notify the user that all tasks are complete.
 //!
 //! ## Mode 2 (Plan-Exec-Dynamic)
 //!
 //! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
-//! 2. [Todo Loop]      : Replan, then execute one task per fresh context until
-//!                       `## Status` says `Status: Completed`.
+//! 2. [Todo Loop]      : Recursive cycle: replan, then execute one task per fresh context.
 //!    - Parse State    : Read todo.md to get current tasks and progress.
 //!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback).
-//!                       Inspects artifacts/, then updates todo.md ([x] marks,
-//!                       task changes, completion status).
-//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback).
-//!                       Runs the single task from the user message only.
-//!    - Store State    : The task LLM updates todo.md via write_file; the agent
-//!                       program resets the LLM context.
+//!      Inspects artifacts/, then updates todo.md ([x] marks,
+//!      task changes, completion status).
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task from the user message only.
+//!    - Store State    : The task LLM updates todo.md via write_file; the application
+//!      resets the LLM context.
 //! 3. [Final Answer]   : Present the final answer to the user.
 
 use anyhow::{Context, Result};
@@ -246,31 +244,29 @@ fn check_completion(todo_md: &str) -> bool {
 
 /// Replan phase (Mode 2): the planner reviews and updates todo.md.
 ///
-/// Runs a full reasoning loop in a fresh planner session: the planner may
-/// inspect the workspace with tools and saves the updated plan to ./todo.md
-/// via write_file. Returns the todo.md content after the loop.
+/// Runs a full reasoning loop in a fresh planner session: the planner reads
+/// ./todo.md with read_file, may inspect artifacts/ with tools, and saves the
+/// updated plan to ./todo.md via write_file. Returns the todo.md content
+/// after the loop.
 async fn run_replan_loop(
     config: &startup::Config,
     settings: &mut Settings,
     provider: LlmProvider,
     metrics: &mut Metrics,
     gui_log: &mut Session,
-    todo_content: &str,
+    user_input: &str,
 ) -> Result<String> {
-    let replan_prompt = format!(
-        "You are a task planner. Review the current todo.md below.\n\n\
-        ## Instructions\n\
-        - If any task in `## Tasks` is completed (e.g., its output file exists), mark it as `[x]`.\n\
-        - If ALL tasks are `[x]` AND the Goal is achieved, add or update a `## Status` section with `Status: Completed`.\n\
-        - If more work is needed, update `## Tasks`: add, remove, reorder, or split tasks.\n\
-        - You may inspect the workspace with tools (e.g. `list_directory`, `read_file`) to verify what previous tasks produced.\n\
-        - Save the updated plan with the `write_file` tool to `./todo.md`; responding with text alone does not update the plan.\n\
-        - Finish with a short summary of what you changed.\n\n\
-        ## Current todo.md\n\n{}",
-        todo_content
-    );
+    let q = user_input.trim();
+    let replan_prompt = if q.is_empty() {
+        "Review and update `./todo.md` per the system instructions.".to_string()
+    } else {
+        format!(
+            "Review and update `./todo.md` per the system instructions.\n\nAdditional user instructions: {}",
+            q
+        )
+    };
 
-    let system_msg = startup::system_message_with_replan();
+    let system_msg = startup::system_message_mode2_replan();
     let mut replan_session = Session::new(format!("{}_replan", config.session_label), system_msg);
     run_reasoning_loop(
         config,
@@ -299,7 +295,7 @@ pub(crate) async fn run_todo_loop(
     settings: &mut Settings,
     metrics: &mut Metrics,
     gui_log: &mut Session,
-    _user_input: String,
+    user_input: String,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
     if !std::path::Path::new(TODO_MD_PATH).exists() {
@@ -343,7 +339,16 @@ pub(crate) async fn run_todo_loop(
     push_system_msg_blank(gui_log, &exec_line, false);
 
     if config.todo_mode == 2 {
-        run_todo_loop_mode2(config, provider, settings, metrics, gui_log, attached_files).await
+        run_todo_loop_mode2(
+            config,
+            provider,
+            settings,
+            metrics,
+            gui_log,
+            &user_input,
+            attached_files,
+        )
+        .await
     } else {
         run_todo_loop_mode1(
             config,
@@ -351,6 +356,7 @@ pub(crate) async fn run_todo_loop(
             settings,
             metrics,
             gui_log,
+            &user_input,
             attached_files,
             pending,
         )
@@ -358,13 +364,28 @@ pub(crate) async fn run_todo_loop(
     }
 }
 
-/// Mode 1: Static sequential execution with agent-side `[x]` marking.
+/// Build the task user message: the task description plus the `-q` addendum
+/// (if any). The system prompt binds this to ./todo.md.
+fn task_prompt(description: &str, user_input: &str) -> String {
+    let q = user_input.trim();
+    if q.is_empty() {
+        format!("Task: {}", description)
+    } else {
+        format!(
+            "Task: {}\n\nAdditional user instructions: {}",
+            description, q
+        )
+    }
+}
+
+/// Mode 1: Static sequential execution with application-side `[x]` marking.
 async fn run_todo_loop_mode1(
     config: &startup::Config,
     provider: LlmProvider,
     settings: &mut Settings,
     metrics: &mut Metrics,
     gui_log: &mut Session,
+    user_input: &str,
     attached_files: Vec<AttachedFile>,
     pending: Vec<&TaskItem>,
 ) -> Result<String> {
@@ -392,9 +413,7 @@ async fn run_todo_loop_mode1(
             ),
         );
 
-        let todo_content =
-            std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
-        let system_msg = startup::system_message_with_todo(&todo_content);
+        let system_msg = startup::system_message_mode1_task_loop();
 
         let task_label = format!("{}_task{}", config.session_label, task.index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
@@ -405,7 +424,7 @@ async fn run_todo_loop_mode1(
             &mut task_session,
             settings,
             metrics,
-            task.description.clone(),
+            task_prompt(&task.description, user_input),
             attached_files.clone(),
         )
         .await?;
@@ -486,6 +505,7 @@ async fn run_todo_loop_mode2(
     settings: &mut Settings,
     metrics: &mut Metrics,
     gui_log: &mut Session,
+    user_input: &str,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
     let mut completed = 0usize;
@@ -513,28 +533,20 @@ async fn run_todo_loop_mode2(
         #[cfg(feature = "gui")]
         push_system_msg(gui_log, "--- [Replan] ---");
         let prev_unchecked = count_unchecked(&todo_content);
-        let updated = match run_replan_loop(
-            config,
-            settings,
-            provider,
-            metrics,
-            gui_log,
-            &todo_content,
-        )
-        .await
-        {
-            Ok(u) => u,
-            Err(e) => {
-                println!(
-                    "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
-                    startup::C_RED,
-                    e,
-                    startup::RESET
-                );
-                // Continue with current todo.md
-                todo_content.clone()
-            }
-        };
+        let updated =
+            match run_replan_loop(config, settings, provider, metrics, gui_log, user_input).await {
+                Ok(u) => u,
+                Err(e) => {
+                    println!(
+                        "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
+                        startup::C_RED,
+                        e,
+                        startup::RESET
+                    );
+                    // Continue with current todo.md
+                    todo_content.clone()
+                }
+            };
 
         if check_completion(&updated) {
             println!(
@@ -584,25 +596,19 @@ async fn run_todo_loop_mode2(
             &format!("--- [Task {}] {} ---", task_index, task.description),
         );
 
-        // Mode 2 system message: full todo.md + instruction to update it via write_file
-        let system_msg = startup::system_message_with_todo_mode2(&updated);
+        // Mode 2 system message: plan read via read_file, updated via write_file
+        let system_msg = startup::system_message_mode2_task_loop();
 
         let task_label = format!("{}_task{}", config.session_label, task_index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
 
-        // Single-task boundary: the user message names exactly one task and
-        // forbids working on the other tasks listed in the system prompt.
-        let task_prompt = format!(
-            "Execute ONLY this task, then update ./todo.md and stop:\n\n{}",
-            task.description
-        );
         let done = run_reasoning_loop(
             config,
             provider,
             &mut task_session,
             settings,
             metrics,
-            task_prompt,
+            task_prompt(&task.description, user_input),
             attached_files.clone(),
         )
         .await?;

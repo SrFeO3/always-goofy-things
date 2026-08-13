@@ -36,7 +36,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM API traffic verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
-| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
+| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. In todo mode (`-t`), the query is appended to every replan and task session's user message as additional instructions. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
 | `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |

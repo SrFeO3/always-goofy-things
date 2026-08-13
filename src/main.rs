@@ -105,7 +105,9 @@ async fn main() -> Result<()> {
 
     // Main conversation loop
     let mut batch_input: Option<String> = if config.todo_mode > 0 {
-        Some(String::from("")) // dummy: todo.md is the real input
+        // In todo mode, -q is an additional instruction for every replan and
+        // task session (appended to the user message); todo.md is the plan.
+        Some(config.query.clone().unwrap_or_default())
     } else {
         config.query.clone()
     };

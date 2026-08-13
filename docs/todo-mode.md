@@ -1,10 +1,11 @@
 # Todo Mode (Plan-Execute with Handover)
 
-When a job is too large for a single LLM context, the agent breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
+When a job is too large for a single LLM context, the application breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
 
 Both modes share the same handover rules:
-- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there and names the file (write the name in `## Handover Notes` for a fixed name).
+- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there and names the file (write the name in the Goal for a fixed name).
 - The last task's final message becomes the job's final answer (stdout in batch mode, or the `-o` file).
+- In todo mode, the `-q` query is appended to every replan and task session's user message as additional instructions.
 
 ## The Two Modes at a Glance
 
@@ -12,12 +13,12 @@ Both modes share the same handover rules:
 |---|---|---|
 | Startup flag (`-t`) | `1` | `2` |
 | Plan author | You - the complete plan is written upfront | The LLM - starting from your goal and initial tasks |
-| Who updates `todo.md` | The agent program - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and sets `Status: Completed` in the `## Status` section |
+| Who updates `todo.md` | The application - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and sets `Status: Completed` in the `## Status` section |
 | Use when | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
 
 ## Mode 1: Static Plan (Plan-Exec-Static)
 
-The plan is fixed before execution starts. You write the complete `./todo.md`; the agent executes the tasks strictly in order, one per fresh LLM context, and the agent program marks each task `[x]` (appending a short handover note) when it finishes. The AI never changes the plan itself. If execution is interrupted, rerunning `-t 1` resumes from the first unchecked task.
+The plan is fixed before execution starts. You write the complete `./todo.md`; the application executes the tasks strictly in order, one per fresh LLM context, and the application marks each task `[x]` (appending a short handover note) when it finishes. The AI never changes the plan itself. If execution is interrupted, rerunning `-t 1` resumes from the first unchecked task.
 
 ### Example: Fixed Sequence (all steps known in advance)
 
@@ -48,7 +49,7 @@ cargo run -- -t 1
 
 What happens:
 
-1. The agent reads `./todo.md` and picks the first unchecked task.
+1. The application reads `./todo.md` and picks the first unchecked task.
 2. It executes that task with a fresh LLM context, then marks it `[x]` and appends a summary to `## Handover Notes`.
 3. It repeats for the next task, until all three are `[x]`.
 4. It reports that all tasks are complete and exits.
@@ -61,7 +62,7 @@ The plan is a living document. You write a goal and an initial task list (it may
 
 - Replanning runs before each task as a fresh planner session: a full reasoning loop that may inspect `artifacts/` with tools and writes the updated plan to `./todo.md`.
 - The loop ends when `## Status` says `Status: Completed` **and** no `- [ ]` tasks remain.
-- Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the agent stops.
+- Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the application stops.
 
 ### Example 1: Missing Task Discovery (plan is incomplete; the AI fills the gap)
 
