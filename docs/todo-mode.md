@@ -2,9 +2,11 @@
 
 When a job is too large for a single LLM context, the application breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
 
-Both modes share the same handover rules:
-- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there and names the file (write the name in the Goal for a fixed name).
-- The last task's final message becomes the job's final answer (stdout in batch mode, or the `-o` file).
+Both modes share the same file conventions:
+- `./todo.md` is strictly structured: a title, a `## Goal`, and a `## Tasks` list (`- [ ]` / `- [x]`). Nothing else belongs in it; the format is enforced by the prompts.
+- `artifacts/handover.md` is the free-form handover log. Every session reads it together with `./todo.md` first. The application creates it with a short template when it does not exist, appends each task's final report to it, and (Mode 2) the replan planner writes its notes there.
+- Every task session ends with a structured Handover Report - `Status / Output / Findings / Next` - which becomes both the entry appended to `artifacts/handover.md` and (for the last task) the job's final answer.
+- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there (write the file name in the Goal for a fixed name).
 - In todo mode, the `-q` query is appended to every replan and task session's user message as additional instructions.
 
 ## The Two Modes at a Glance
@@ -13,12 +15,13 @@ Both modes share the same handover rules:
 |---|---|---|
 | Startup flag (`-t`) | `1` | `2` |
 | Plan author | You - the complete plan is written upfront | The LLM - starting from your goal and initial tasks |
-| Who updates `todo.md` | The application - after each task, it marks the task `[x]` | The LLM - it marks `[x]`, adds / removes / reorders / splits tasks, and sets `Status: Completed` in the `## Status` section |
+| Who updates `todo.md` | The application - after each task, it marks the task `[x]` | The LLM - it marks `[x]` and adds / removes / reorders / splits tasks |
+| Who writes `artifacts/handover.md` | The application (task reports) | The application (task reports) and the replan planner (notes) |
 | Use when | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
 
 ## Mode 1: Static Plan (Plan-Exec-Static)
 
-The plan is fixed before execution starts. You write the complete `./todo.md`; the application executes the tasks strictly in order, one per fresh LLM context, and the application marks each task `[x]` (appending a short handover note) when it finishes. The AI never changes the plan itself. If execution is interrupted, rerunning `-t 1` resumes from the first unchecked task.
+The plan is fixed before execution starts. You write the complete `./todo.md`; the application executes the tasks strictly in order, one per fresh LLM context, and marks each task `[x]` when it finishes, appending the task's final report to `artifacts/handover.md`. The AI never changes the plan itself. If execution is interrupted, rerunning `-t 1` resumes from the first unchecked task.
 
 ### Example: Fixed Sequence (all steps known in advance)
 
@@ -36,9 +39,6 @@ Count from 1 to 3, recording each number into count.txt.
 - [ ] Write "1" to count.txt
 - [ ] Append "2" to count.txt
 - [ ] Append "3" to count.txt
-
-## Handover Notes
-- Nothing executed yet.
 ```
 
 #### 2. Run
@@ -49,8 +49,8 @@ cargo run -- -t 1
 
 What happens:
 
-1. The application reads `./todo.md` and picks the first unchecked task.
-2. It executes that task with a fresh LLM context, then marks it `[x]` and appends a summary to `## Handover Notes`.
+1. The application reads `./todo.md` (and `artifacts/handover.md`, creating it if missing) and picks the first unchecked task.
+2. It executes that task with a fresh LLM context, then marks it `[x]` and appends the task's Handover Report to `artifacts/handover.md`.
 3. It repeats for the next task, until all three are `[x]`.
 4. It reports that all tasks are complete and exits.
 
@@ -58,10 +58,10 @@ What happens:
 
 ## Mode 2: Dynamic Replan (Plan-Exec-Dynamic)
 
-The plan is a living document. You write a goal and an initial task list (it may be incomplete or wrong); before each task the LLM reviews `./todo.md` and rewrites it - adding, removing, reordering, or splitting tasks - and after each task it updates the file itself: marking tasks `[x]` and writing `## Status` with `Status: Completed` once the goal is reached.
+The plan is a living document. You write a goal and an initial task list (it may be incomplete or wrong); before each task the LLM reviews `./todo.md` and rewrites it - adding, removing, reordering, or splitting tasks - and after each task it updates the file itself: marking its task `[x]` (it may add subtasks). All notes, status, and reasoning go to `artifacts/handover.md`, never into `./todo.md`.
 
-- Replanning runs before each task as a fresh planner session: a full reasoning loop that may inspect `artifacts/` with tools and writes the updated plan to `./todo.md`.
-- The loop ends when `## Status` says `Status: Completed` **and** no `- [ ]` tasks remain.
+- Replanning runs before each task as a fresh planner session: a full reasoning loop that reads `./todo.md` and `artifacts/handover.md`, may inspect `artifacts/` with tools, writes the updated plan to `./todo.md`, and writes its notes to `artifacts/handover.md`.
+- Completion: when all tasks are `[x]`, the application runs one final replan so the planner can add tasks if the Goal is not yet achieved; the loop exits only when the plan is still all-`[x]` after that final replan.
 - Safety: if replanning fails to reduce the unchecked-task count for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the application stops.
 
 ### Example 1: Missing Task Discovery (plan is incomplete; the AI fills the gap)
@@ -78,9 +78,6 @@ Create one.txt with "hello" and two.txt with "world".
 
 ## Tasks
 - [ ] Create one.txt with content "hello"
-
-## Handover Notes
-- Nothing executed yet. Note: two.txt task is missing from the plan.
 ```
 
 #### 2. Run
@@ -92,8 +89,8 @@ cargo run -- -t 2
 The LLM will:
 
 1. Replan - notice `two.txt` is missing, add it to Tasks
-2. Execute - create both files, update `./todo.md`
-3. Replan - mark both `[x]`, write `Status: Completed`
+2. Execute - create both files and mark its task `[x]` in `./todo.md`
+3. Replan - all tasks `[x]`; the final replan confirms the Goal is reached
 4. Exit
 
 ### Example 2: Open-Ended Research (exploratory; the AI discovers subtasks as it goes)
@@ -112,8 +109,13 @@ Compare `anyhow` and `eyre` error-handling crates and save the comparison report
 - [ ] Read anyhow docs and summarize key features
 - [ ] Read eyre docs and summarize key features
 - [ ] Read both summaries and write a comparison report
+```
 
-## Handover Notes
+If the plan needs starting notes, put them in the handover log (created automatically if missing):
+
+```markdown
+# artifacts/handover.md
+
 - Start by researching anyhow first.
 ```
 

@@ -140,24 +140,22 @@ fn count_unchecked(todo_md: &str) -> usize {
     count
 }
 
-/// Mark the nth unchecked task as done by replacing `- [ ]` with `- [x]`
-/// and appending notes to the Handover Notes section.
-fn mark_task_done(task_index: usize, notes: &str) -> Result<()> {
+/// Mark the nth unchecked task as done by replacing `- [ ]` with `- [x]`.
+///
+/// Only the checkbox is flipped; prose no longer belongs in todo.md (the
+/// executor's report goes to `artifacts/handover.md` via `append_handover`).
+fn mark_task_done(task_index: usize) -> Result<()> {
     let content = std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
 
     let mut new_lines: Vec<String> = Vec::new();
     let mut in_tasks_section = false;
     let mut unchecked_found: usize = 0;
-    let mut in_handover_section = false;
-    let mut notes_appended = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
 
         if trimmed.starts_with("## Tasks") {
             in_tasks_section = true;
-            new_lines.push(line.to_string());
-            continue;
         }
         if in_tasks_section && trimmed.starts_with("##") && !trimmed.starts_with("## Tasks") {
             in_tasks_section = false;
@@ -172,58 +170,108 @@ fn mark_task_done(task_index: usize, notes: &str) -> Result<()> {
             unchecked_found += 1;
         }
 
-        if trimmed.starts_with("## Handover Notes") {
-            in_handover_section = true;
-            new_lines.push(line.to_string());
-            continue;
-        }
-        if in_handover_section
-            && trimmed.starts_with("##")
-            && !trimmed.starts_with("## Handover Notes")
-        {
-            if !notes_appended && !notes.trim().is_empty() {
-                new_lines.push(format!("- {}", notes));
-                notes_appended = true;
-            }
-            in_handover_section = false;
-        }
-
         new_lines.push(line.to_string());
-    }
-
-    if in_handover_section && !notes_appended && !notes.trim().is_empty() {
-        new_lines.push(format!("- {}", notes));
-        notes_appended = true;
-    }
-    if !notes_appended && !notes.trim().is_empty() {
-        new_lines.push(String::new());
-        new_lines.push("## Handover Notes".to_string());
-        new_lines.push(format!("- {}", notes));
     }
 
     let mut new_content = new_lines.join("\n");
     new_content.push('\n');
 
     std::fs::write(TODO_MD_PATH, &new_content).context("Failed to write ./todo.md")?;
-
     Ok(())
 }
 
-/// Check if the `## Status` section declares completion (Mode 2).
-///
-/// Returns `true` when both:
-/// 1. A `Status:` line contains `Completed` (case-insensitive; the leading
-///    `-` of the markdown list form is optional)
-/// 2. No unchecked `- [ ]` tasks remain
-fn check_completion(todo_md: &str) -> bool {
-    let mut in_status_section = false;
-    let mut status_completed = false;
+/// Path of the free-form handover log (inside `artifacts/`, never parsed).
+pub(crate) const HANDOVER_MD_PATH: &str = "./artifacts/handover.md";
 
+/// Create `artifacts/handover.md` with a short template when it does not exist,
+/// so LLM sessions always have a concrete file to read, and a guide to what
+/// belongs there (the executor report format and the planner note order).
+fn seed_handover() -> Result<()> {
+    if std::path::Path::new(HANDOVER_MD_PATH).exists() {
+        return Ok(());
+    }
+    append_handover(
+        "# Handover Log\n\
+         \n\
+         Notes for the next LLM session. Read this file together with ./todo.md at\n\
+         the start of every session. The application appends each task's final\n\
+         report here, in this format:\n\
+         - Task N: - Status: done / blocked - Output: <paths> - Findings: <facts> - Next: <pointer>\n\
+         The replan planner writes its plan-update notes here, in this order:\n\
+         Status / Progress / Decisions / Next.\n",
+    )
+}
+
+/// Append one entry to `artifacts/handover.md` (the free-form handover log).
+/// The `artifacts/` directory is created if missing; the file is appended,
+/// never rewritten, so earlier entries survive across sessions.
+///
+/// Loose dedup: when the file already contains an entry with the same
+/// `- Task N:` marker (e.g. the executor wrote its own report during the
+/// session), the append is skipped. Exactness is not required; this only
+/// prevents obvious double records.
+fn append_handover(entry: &str) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(HANDOVER_MD_PATH).parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let existing = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+
+    let marker = entry
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if marker.starts_with("- Task ")
+        && existing
+            .lines()
+            .any(|l| l.trim_start().starts_with(&marker))
+    {
+        return Ok(());
+    }
+
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(entry);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    std::fs::write(HANDOVER_MD_PATH, content).context("Failed to write ./artifacts/handover.md")?;
+    Ok(())
+}
+
+/// Collapse a report to a single line (max 300 chars) for handover logging.
+fn one_line_report(raw: &str) -> String {
+    let note: String = raw.replace('\n', " ").chars().take(300).collect();
+    if raw.chars().count() > 300 {
+        format!("{}...", note)
+    } else {
+        note
+    }
+}
+
+/// Check whether the plan is complete (Mode 2).
+///
+/// The strict plan format has no `## Status` section: completion is simply
+/// "no unchecked `- [ ]` tasks remain". Legacy plans may still carry a
+/// `## Status` section with `Status: Completed`; if such a section exists,
+/// it is honored as well.
+fn check_completion(todo_md: &str) -> bool {
+    if count_unchecked(todo_md) > 0 {
+        return false;
+    }
+
+    let mut in_status_section = false;
+    let mut has_status_section = false;
+    let mut status_completed = false;
     for line in todo_md.lines() {
         let trimmed = line.trim();
 
         if trimmed == "## Status" {
             in_status_section = true;
+            has_status_section = true;
             continue;
         }
         if in_status_section && trimmed.starts_with("##") {
@@ -231,15 +279,17 @@ fn check_completion(todo_md: &str) -> bool {
         }
         if in_status_section {
             let lower = trimmed.to_lowercase();
-            // Accept both the plain form the prompt asks for (`Status: Completed`)
-            // and the markdown list form (`- Status: Completed`).
+            // Accept both the plain form (`Status: Completed`) and the
+            // markdown list form (`- Status: Completed`).
             if lower.contains("status:") && lower.contains("completed") {
                 status_completed = true;
             }
         }
     }
 
-    status_completed && count_unchecked(todo_md) == 0
+    // Strict format (no Status section): complete. Legacy format: require
+    // the Status section to declare completion.
+    !has_status_section || status_completed
 }
 
 /// Replan phase (Mode 2): the planner reviews and updates todo.md.
@@ -286,6 +336,43 @@ async fn run_replan_loop(
 
     // The planner updates ./todo.md via write_file during the loop; read it back.
     std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md after replan")
+}
+
+/// Completion gate for Mode 2: when all tasks are `[x]`, run ONE final replan
+/// so the planner can add tasks if the Goal is not yet achieved (task-adding
+/// continuation pattern), then re-check. Returns `true` when the plan is
+/// still complete after that final replan.
+async fn final_replan_confirms_completion(
+    config: &startup::Config,
+    settings: &mut Settings,
+    provider: LlmProvider,
+    metrics: &mut Metrics,
+    gui_log: &mut Session,
+    user_input: &str,
+) -> Result<bool> {
+    println!(
+        "{}--- [Replan] (final: all tasks done - planner may add tasks) ---{}",
+        startup::C_CYAN,
+        startup::RESET
+    );
+    #[cfg(feature = "gui")]
+    push_system_msg(
+        gui_log,
+        "--- [Replan] (final: all tasks done - planner may add tasks) ---",
+    );
+    match run_replan_loop(config, settings, provider, metrics, gui_log, user_input).await {
+        Ok(updated) => Ok(check_completion(&updated)),
+        Err(e) => {
+            println!(
+                "\n{}[Replan] LLM error: {}. Finishing with the current plan.{}",
+                startup::C_RED,
+                e,
+                startup::RESET
+            );
+            // The plan on disk is all-`[x]`; finish without another replan.
+            Ok(true)
+        }
+    }
 }
 
 /// Run the Plan-Exec todo loop for Mode 1 and Mode 2.
@@ -337,6 +424,10 @@ pub(crate) async fn run_todo_loop(
     println!("\n{}{}{}\n", startup::C_CYAN, exec_line, startup::RESET);
     #[cfg(feature = "gui")]
     push_system_msg_blank(gui_log, &exec_line, false);
+
+    // Ensure the free-form handover log exists (seeded with a template), so
+    // every session can read it together with todo.md.
+    seed_handover()?;
 
     if config.todo_mode == 2 {
         run_todo_loop_mode2(
@@ -435,15 +526,14 @@ async fn run_todo_loop_mode1(
                 .last()
                 .map(|m| m.content.as_str())
                 .unwrap_or("Task completed.");
-            // Collapse to single line: truncate to 300 chars, replace newlines
-            let note: String = raw_note.replace('\n', " ").chars().take(300).collect();
-            let note = if raw_note.chars().count() > 300 {
-                format!("{}...", note)
-            } else {
-                note
-            };
+            let note = one_line_report(raw_note);
 
-            mark_task_done(0, &note)?;
+            mark_task_done(0)?;
+            // Hand the executor's final report over to the free-form log.
+            // Uses the stable task index (not the per-run counter) so that
+            // resumed runs never collide with earlier entries of the same
+            // task number.
+            append_handover(&format!("- Task {}: {}", task.index + 1, note))?;
 
             // Capture LLM's final message as the final answer
             if let Some(msg) = task_session.messages.last()
@@ -518,14 +608,25 @@ async fn run_todo_loop_mode2(
         let todo_content =
             std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
 
-        // Check if the completion status is already set
+        // Completion gate: when all tasks are `[x]`, run ONE final replan so
+        // the planner can add tasks if the Goal is not yet achieved; exit
+        // only when the plan is still complete after that final replan.
         if check_completion(&todo_content) {
-            println!(
-                "{}--- [TODO LOOP] Completion reached. Exiting. ---{}",
-                startup::C_CYAN,
-                startup::RESET
-            );
-            break;
+            if final_replan_confirms_completion(
+                config, settings, provider, metrics, gui_log, user_input,
+            )
+            .await?
+            {
+                println!(
+                    "{}--- [TODO LOOP] Completion reached. Exiting. ---{}",
+                    startup::C_CYAN,
+                    startup::RESET
+                );
+                break;
+            }
+            // The final replan added tasks: continue with a fresh iteration.
+            replan_stalls = 0;
+            continue;
         }
 
         // --- Replan ---
@@ -549,12 +650,21 @@ async fn run_todo_loop_mode2(
             };
 
         if check_completion(&updated) {
-            println!(
-                "{}--- [TODO LOOP] Completion reached during replan. Exiting. ---{}",
-                startup::C_CYAN,
-                startup::RESET
-            );
-            break;
+            if final_replan_confirms_completion(
+                config, settings, provider, metrics, gui_log, user_input,
+            )
+            .await?
+            {
+                println!(
+                    "{}--- [TODO LOOP] Completion reached during replan. Exiting. ---{}",
+                    startup::C_CYAN,
+                    startup::RESET
+                );
+                break;
+            }
+            // The final replan added tasks: continue with a fresh iteration.
+            replan_stalls = 0;
+            continue;
         }
 
         let new_unchecked = count_unchecked(&updated);
@@ -620,6 +730,20 @@ async fn run_todo_loop_mode2(
             {
                 last_answer = msg.content.clone();
             }
+            // Record the executor's handover report (its final message) so
+            // the next replan has a record of what this task reported.
+            let report = task_session
+                .messages
+                .last()
+                .map(|m| one_line_report(&m.content))
+                .unwrap_or_default();
+            let report = if report.trim().is_empty() {
+                "Status: (no report)".to_string()
+            } else {
+                report
+            };
+            append_handover(&format!("- Task {}: {}", task_index, report))?;
+
             persistence::archive_todo_session(&task_label, task_index)?;
 
             // Push task's LLM conversation to GUI log
@@ -656,7 +780,7 @@ async fn run_todo_loop_mode2(
     let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
     if check_completion(&final_todo) {
         if last_answer.is_empty() {
-            Ok("All tasks completed (Status: Completed).".to_string())
+            Ok("All tasks completed.".to_string())
         } else {
             Ok(last_answer)
         }

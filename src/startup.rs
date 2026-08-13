@@ -234,13 +234,16 @@ pub fn system_message_mode1_task_loop() -> crate::model::Message {
         content: format!(
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec Task Loop)\n\
-            - Read `./todo.md` FIRST with read_file; it is the plan. Follow its Goal and Handover Notes.\n\
+            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
             - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
             - Finish the task completely (create its outputs) before stopping.\n\
-            - Report what you did when finished.\n\
             - Check `artifacts/` for previous work; save your outputs there.\n\
-            - Your final message is a short report of what you did, what you produced, and where.\n\
-            - If this is the last task in `./todo.md`, also confirm that the whole plan is complete and give the result file path.",
+            - Your final message must be a Handover Report in exactly this format:\n\
+              - Status: done / blocked\n\
+              - Output: <file paths created or updated, or \"none\">\n\
+              - Findings: <facts you observed, in one or two sentences>\n\
+              - Next: <what the next task should watch out for, or \"none\">\n\
+            Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
             base.content
         ),
         ..Default::default()
@@ -258,8 +261,10 @@ pub fn system_message_mode2_replan() -> crate::model::Message {
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec-Dynamic Replan)\n\
             - You are the task planner.\n\
-            - Read `./todo.md` FIRST with read_file; it is the current plan.\n\
-            - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks; when ALL tasks are `[x]` and the Goal is achieved, add a `## Status` section with `Status: Completed`.\n\
+            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the notes and task reports from previous sessions.\n\
+            - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
+            - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
+            - Write ALL notes, status, and reasoning to `artifacts/handover.md` in this order: Status / Progress / Decisions / Next (write or append freely).\n\
             - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
             - Do NOT execute the tasks; only update the plan.\n\
             - Your final message is a short summary of the plan changes.",
@@ -279,13 +284,17 @@ pub fn system_message_mode2_task_loop() -> crate::model::Message {
         content: format!(
             "{}\n\n\
             ## 5. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
-            - Read `./todo.md` FIRST with read_file; it is the plan. Follow its Goal and Handover Notes.\n\
+            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
             - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
             - Finish the task completely (create its outputs) before stopping.\n\
-            - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; when ALL tasks are `[x]` and the Goal is achieved, add a `## Status` section with `Status: Completed`; add new subtasks to `## Tasks`.\n\
+            - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
             - Check `artifacts/` for previous work; save your outputs there.\n\
-            - Your final message is a short report of what you did, what you produced, and where.\n\
-            - If this is the last task in `./todo.md`, also confirm that the whole plan is complete and give the result file path.",
+            - Your final message must be a Handover Report in exactly this format:\n\
+              - Status: done / blocked\n\
+              - Output: <file paths created or updated, or \"none\">\n\
+              - Findings: <facts you observed, in one or two sentences>\n\
+              - Next: <what the next task should watch out for, or \"none\">\n\
+            Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
             base.content
         ),
         ..Default::default()
