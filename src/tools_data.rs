@@ -1,16 +1,27 @@
 //! Database query tools: data_search, data_schema.
 //!
-//! Provides read-only data retrieval from remote databases via REST API.
-//! Supports GreptimeDB, ClickHouse, and InfluxDB v3, with Prometheus,
-//! Elasticsearch, and Splunk planned for future releases.
+//! Implements capabilities such as read-only data retrieval and schema
+//! discovery for remote databases via REST API.
 //!
-//! # Safety
+//! # Safety Warning
 //!
-//! All queries are validated against a read-only whitelist (SELECT, SHOW,
-//! DESCRIBE, EXPLAIN, WITH). Destructive operations such as INSERT, UPDATE,
-//! DROP, and ALTER are blocked before reaching the database.
+//! These tools query external databases and may leak sensitive data or corrupt
+//! contents if misconfigured. Use only with trusted, isolated databases.
+//!
+//! A simple prefix check allows only read-only queries
+//! (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH).
+//!
+//! # Available Tools
+//!
+//! - `data_search`: Execute read-only queries against the connected database
+//!   to search, analyze, and retrieve data (metrics, logs, or event data).
+//! - `data_schema`: Discover the schema of the connected database. List all
+//!   tables or describe a specific table's columns, types, and sample values.
 //!
 //! # Supported Databases
+//!
+//! GreptimeDB, ClickHouse, and InfluxDB v3 are currently supported, with
+//! Prometheus, Elasticsearch, and Splunk planned for future releases.
 //!
 //! | db_type      | Default URL                 | Auth            |
 //! |-------------|----------------------------|-----------------|

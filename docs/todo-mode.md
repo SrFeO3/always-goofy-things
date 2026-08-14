@@ -93,21 +93,33 @@ The LLM will:
 3. Replan - all tasks `[x]`; the final replan confirms the Goal is reached
 4. Exit
 
-### Example 2: Open-Ended Research (exploratory; the AI discovers subtasks as it goes)
+### Example 2: Offline Open-Ended Research (exploratory; the AI discovers subtasks as it goes, no external access)
 
-Shows an exploratory task: the exact steps are not known upfront. The initial list is only a starting point - the LLM adds subtasks or restructures the plan as it learns.
+Shows an exploratory task: the exact steps are not known upfront. The initial list is only a starting point - the LLM adds subtasks or restructures the plan as it learns. The corpus is downloaded once beforehand and read from disk, so the run itself needs no network access. Every claim in the final report must cite the local file it came from: this prevents the LLM from writing the report from memory and lets you verify the result against the corpus.
 
-#### 1. Create `./todo.md`
+#### 1. Download the docs (one-time, with network access)
+
+```bash
+mkdir -p research/anyhow research/eyre
+curl -fsSL -o research/anyhow/README.md https://raw.githubusercontent.com/dtolnay/anyhow/master/README.md
+curl -fsSL -o research/anyhow/lib.rs https://raw.githubusercontent.com/dtolnay/anyhow/master/src/lib.rs
+curl -fsSL -o research/eyre/README.md https://raw.githubusercontent.com/yaahc/eyre/master/README.md
+curl -fsSL -o research/eyre/lib.rs https://raw.githubusercontent.com/yaahc/eyre/master/eyre/src/lib.rs
+```
+
+Any local copy works - docs.rs HTML, `cargo doc` output, or the crate sources - the test only requires the corpus to be on disk. The READMEs are small enough to read in full; the `lib.rs` files are large, so the LLM is expected to grep them for the relevant sections.
+
+#### 2. Create `./todo.md`
 
 ```markdown
-# Rust Crate Analysis
+# Offline Crate Research
 
 ## Goal
-Compare `anyhow` and `eyre` error-handling crates and save the comparison report to `artifacts/comparison.md`.
+Compare `anyhow` and `eyre` error-handling crates using the local docs under research/ and save the comparison report to artifacts/comparison.md. Every claim must cite the local file it comes from.
 
 ## Tasks
-- [ ] Read anyhow docs and summarize key features
-- [ ] Read eyre docs and summarize key features
+- [ ] Read the anyhow docs under research/anyhow/ and summarize key features
+- [ ] Read the eyre docs under research/eyre/ and summarize key features
 - [ ] Read both summaries and write a comparison report
 ```
 
@@ -116,13 +128,26 @@ If the plan needs starting notes, put them in the handover log (created automati
 ```markdown
 # artifacts/handover.md
 
+- All docs are local under research/. Do not fetch anything from the web; ground every claim in the local files.
 - Start by researching anyhow first.
 ```
 
-#### 2. Run
+#### 3. Run
 
 ```bash
-cargo run -- -t 2
+cargo run -- -t 2 -q "Use the local docs under research/ only; do not fetch anything from the web."
 ```
 
-The LLM may add more subtasks or restructure the plan as it learns.
+The `-q` query is appended to every replan and task session - it keeps the LLM on the local corpus even on systems where web access is allowed.
+
+The LLM will:
+
+1. Replan - keep the plan; decide whether the initial tasks are enough or add subtasks (e.g., comparing feature flags or the `Context` / `Report` APIs)
+2. Execute - list research/anyhow/, grep and read the docs, and summarize key features; the summary lands in `artifacts/handover.md` and the task is marked `[x]`
+3. Execute - do the same for eyre; mark the task `[x]`
+4. Replan - restructure the plan based on what was learned (add, split, or reorder tasks)
+5. Execute - read both summaries from the handover and write `artifacts/comparison.md`, citing `research/` files for every claim; mark the task `[x]`
+6. Replan - all tasks `[x]`; the final replan confirms the Goal is reached
+7. Exit
+
+Steps 2-5 each run in a fresh context, and step 5 has to work from the handover summaries - this is the replan + reset behavior under test, exercised on a real corpus instead of web pages. Verify the result by reading `artifacts/comparison.md` and spot-checking a few citations against the files under `research/`. The LLM may add more subtasks or restructure the plan as it learns.
