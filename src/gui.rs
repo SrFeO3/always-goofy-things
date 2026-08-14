@@ -60,7 +60,7 @@ struct PendingConfirm {
 
 impl GuiApp {
     fn new(config: Config, provider: LlmProvider) -> Self {
-        let system_msg = startup::system_message();
+        let system_msg = startup::system_message(&config);
         let label = config.session_label.clone();
         let session = Session::new(label, system_msg);
         let settings = Settings::from_config(&config);

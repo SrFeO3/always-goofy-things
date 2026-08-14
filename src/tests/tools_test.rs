@@ -599,6 +599,65 @@ fn test_tab_skip_blank_with_mixed_whitespace_indent() {
 }
 
 #[test]
+fn test_get_tool_definitions_filters_disabled() {
+    let defs = get_tool_definitions(None, |n| n != "execute_bash" && n != "fetch_web");
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"write_file"));
+    assert!(!names.contains(&"execute_bash"));
+    assert!(!names.contains(&"fetch_web"));
+}
+
+#[test]
+fn test_get_tool_definitions_only_data_tools_with_db_type() {
+    let defs = get_tool_definitions(Some("greptimedb"), |n| {
+        n == "data_search" || n == "data_schema"
+    });
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["data_search", "data_schema"]);
+}
+
+#[tokio::test]
+async fn test_execute_tool_rejects_disabled() {
+    let res = execute_tool("execute_bash", &json!({ "command": "ls" }), None, |_| false).await;
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("[TOOL_DISABLED]"),
+        "expected [TOOL_DISABLED] error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
+    // Batch mode + disabled tool: must be rejected as a system error
+    // before any stdin interaction or auto-confirm logic runs.
+    let decision = confirm_execute_tool(
+        "execute_bash",
+        &json!({ "command": "ls" }),
+        true, // unsafe_reflex would normally auto-confirm -- must NOT apply
+        false,
+        true, // batch
+        |_| false,
+    )
+    .await;
+    assert!(!decision.proceed);
+    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
+    let reason = decision.reason.unwrap();
+    assert!(
+        reason.contains("[TOOL_DISABLED]"),
+        "expected [TOOL_DISABLED] reason, got: {}",
+        reason
+    );
+}
+
+#[test]
 fn test_full_skip_blank_replace() {
     // Scenario where blank line tolerance rescues a match that
     // full_fuzzy (Stage 4) would fail on due to extra blank line.

@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
+use clap::ValueEnum;
 use regex::Regex;
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
@@ -93,6 +94,39 @@ static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=
 static PATH_TRAVERSAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
 
+/// Canonical names of all AI tools. Used by `--only-tools`, tool definition
+/// filtering, and startup display so the list stays in one place.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum ToolName {
+    ListDirectory,
+    ReadFile,
+    WriteFile,
+    StrReplaceEditor,
+    GrepSearch,
+    ExecuteBash,
+    FetchWeb,
+    DataSearch,
+    DataSchema,
+}
+
+impl ToolName {
+    /// The tool name as it appears in tool definitions and LLM calls.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolName::ListDirectory => "list_directory",
+            ToolName::ReadFile => "read_file",
+            ToolName::WriteFile => "write_file",
+            ToolName::StrReplaceEditor => "str_replace_editor",
+            ToolName::GrepSearch => "grep_search",
+            ToolName::ExecuteBash => "execute_bash",
+            ToolName::FetchWeb => "fetch_web",
+            ToolName::DataSearch => "data_search",
+            ToolName::DataSchema => "data_schema",
+        }
+    }
+}
+
 /// Records how a tool execution was approved (or denied).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolRunDecisionKind {
@@ -143,7 +177,12 @@ pub(crate) enum ToolInteractMsg {
 /// Tool definitions sent to the LLM API.
 /// Order matters: `compat::infer_tool_name_from_args` picks the first
 /// highest-scoring match, so list more generic tools earlier.
-pub fn get_tool_definitions(db_type: Option<&str>) -> Vec<serde_json::Value> {
+/// Tools for which `is_enabled` returns false are omitted entirely, so the
+/// LLM never learns about (and normally never calls) disabled tools.
+pub fn get_tool_definitions(
+    db_type: Option<&str>,
+    is_enabled: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
     let mut tools = vec![
         serde_json::json!({
             "type": "function",
@@ -259,6 +298,13 @@ pub fn get_tool_definitions(db_type: Option<&str>) -> Vec<serde_json::Value> {
         tools.push(tools_data::build_data_schema_def());
     }
 
+    // Hide disabled tools from the LLM.
+    tools.retain(|def| {
+        def.get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .is_some_and(&is_enabled)
+    });
     tools
 }
 
@@ -266,7 +312,16 @@ pub async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     db_ctx: Option<&tools_data::DbContext>,
+    is_enabled: impl Fn(&str) -> bool,
 ) -> Result<serde_json::Value> {
+    // Refuse disabled tools even if the LLM calls them anyway (defense in depth).
+    if !is_enabled(name) {
+        return Err(anyhow!(
+            "[TOOL_DISABLED] Tool '{}' is disabled in this configuration.",
+            name
+        ));
+    }
+
     // Path security check for tools that take 'path'
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
@@ -341,7 +396,21 @@ pub async fn confirm_execute_tool(
     unsafe_reflex: bool,
     db_unsafe_reflex: bool,
     batch: bool,
+    is_enabled: impl Fn(&str) -> bool,
 ) -> ToolRunDecision {
+    // Disabled tools are rejected before any prompt or auto-confirm:
+    // no user interaction, just a system error result fed back to the LLM.
+    if !is_enabled(name) {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some(format!(
+                "[TOOL_DISABLED] Tool '{}' is disabled in this configuration.",
+                name
+            )),
+        };
+    }
+
     // Auto-confirm data tools when --db-unsafe-reflex is set.
     // Data tools (data_search, data_schema) are read-only queries against
     // external databases -- inherently safe to auto-execute.

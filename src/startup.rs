@@ -10,6 +10,7 @@ use clap::Parser;
 
 use crate::compat_provider::LlmProvider;
 use crate::compat_resilience::ToolResultFormat;
+use crate::tools::ToolName;
 
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
@@ -142,6 +143,14 @@ pub struct Config {
     #[arg(short = 'R', long, env = "TOOL_RESULT_FORMAT", value_enum, default_value_t = ToolResultFormat::JsonString)]
     pub tool_result_format: ToolResultFormat,
 
+    /// Only these AI tools are enabled (repeatable / comma-separated).
+    /// When unset, all tools are enabled. Disabled tools are hidden from the
+    /// LLM and refuse to execute even if called.
+    /// Note: todo modes (-t/--todo) require `read_file`, and mode 2 also
+    /// requires `write_file`; disabling them breaks the todo workflow.
+    #[arg(long = "only-tools", env = "ONLY_TOOLS", value_delimiter = ',')]
+    pub only_tools: Vec<ToolName>,
+
     /// Batch query: run once non-interactively and print result to stdout.
     /// When set, the application runs in batch mode and exits after completion.
     #[arg(short = 'q', long)]
@@ -196,29 +205,137 @@ pub struct Config {
     pub db_unsafe_reflex: bool,
 }
 
+impl Config {
+    /// Whether a tool (by its canonical name) is enabled.
+    /// `--only-tools` unset means all tools are enabled (previous behavior).
+    pub fn is_tool_enabled(&self, name: &str) -> bool {
+        self.only_tools.is_empty() || self.only_tools.iter().any(|t| t.as_str() == name)
+    }
+}
+
 /// Build the initial system message describing immutable workspace rules.
 /// Used as `messages[0]` for every new session.
-pub fn system_message() -> crate::model::Message {
+/// Sections that reference disabled tools are omitted, so the LLM only sees
+/// guidance for tools it can actually call.
+pub fn system_message(config: &Config) -> crate::model::Message {
+    build_system_message(base_system_sections(|n| config.is_tool_enabled(n)))
+}
+
+/// Base sections shared by all system messages.
+/// Section numbers are FIXED: disabling a tool only removes its own line,
+/// leaving the other numbers unchanged. Missing numbers (gaps) are
+/// intentional when tools are disabled.
+/// - ## 1 / ## 3: always present
+/// - ## 2: umbrella for tool sections, present only when at least one tool
+///   is enabled; ## 2-1 / ## 2-2 / ## 2-3 are the fixed tool categories
+/// - ## 4: Todo Context (appended by the todo-mode builders)
+fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut sections = vec![
+        "## 1. Workspace Context\n\
+         - Current Working Directory: Your root is ./ (the current directory).\n\
+         - Relative Paths Only: You MUST use relative paths (e.g., file.txt, ./src/) for all operations.\n\
+         - Prohibitions: NEVER use absolute paths starting with /. NEVER use ../ to escape the directory."
+            .to_string(),
+    ];
+
+    // Tool categories live under the fixed umbrella ## 2; each category and
+    // each tool line keeps a fixed position, so toggling a tool never shifts
+    // the numbers of the remaining lines (gaps are fine).
+    let mut tool_sections: Vec<String> = Vec::new();
+
+    if is_enabled("execute_bash") {
+        tool_sections.push(format!(
+            "## 2-1. Command Execution (execute_bash)\n\
+             - Allowed command patterns: [{}]\n\
+             - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.",
+            crate::tools::ALLOW_COMMAND_LIST.join(", ")
+        ));
+    }
+
+    let mut file_names: Vec<&str> = Vec::new();
+    let mut file_lines: Vec<&str> = Vec::new();
+    if is_enabled("read_file") {
+        file_names.push("read_file");
+        file_lines.push(
+            "- read_file: Read file contents; start/end form a 1-based inclusive range (lines for text files, pages for PDFs).",
+        );
+    }
+    if is_enabled("str_replace_editor") {
+        file_names.push("str_replace_editor");
+        file_lines.push(
+            "- str_replace_editor: Replace one exact string block; prefer it over write_file for partial edits. old_string must match the file exactly, including whitespace and indentation.",
+        );
+    }
+    if is_enabled("write_file") {
+        file_names.push("write_file");
+        file_lines.push(
+            "- write_file: Create a new file or fully replace an existing one; for new files and full rewrites only.",
+        );
+    }
+    if !file_names.is_empty() {
+        tool_sections.push(format!(
+            "## 2-2. File Operations ({})\n{}",
+            file_names.join(", "),
+            file_lines.join("\n")
+        ));
+    }
+
+    let mut retrieval_names: Vec<&str> = Vec::new();
+    let mut retrieval_lines: Vec<&str> = Vec::new();
+    if is_enabled("list_directory") {
+        retrieval_names.push("list_directory");
+        retrieval_lines.push(
+            "- list_directory: List files and directories (non-recursive) to explore the project structure.",
+        );
+    }
+    if is_enabled("grep_search") {
+        retrieval_names.push("grep_search");
+        retrieval_lines
+            .push("- grep_search: Search for text patterns across workspace files to locate code.");
+    }
+    if is_enabled("fetch_web") {
+        retrieval_names.push("fetch_web");
+        retrieval_lines.push(
+            "- fetch_web: Supports only http/https. Access to private or local networks is strictly prohibited.",
+        );
+    }
+    if is_enabled("data_search") || is_enabled("data_schema") {
+        retrieval_names.push("data_search, data_schema");
+        retrieval_lines.push(
+            "- data_search / data_schema: Query the configured database (requires --db-type).",
+        );
+    }
+    if !retrieval_names.is_empty() {
+        tool_sections.push(format!(
+            "## 2-3. Information Retrieval ({})\n{}",
+            retrieval_names.join(", "),
+            retrieval_lines.join("\n")
+        ));
+    }
+
+    if !tool_sections.is_empty() {
+        sections.push(format!(
+            "## 2. Tools (your interface to the workspace and the outside world)\n{}",
+            tool_sections.join("\n\n")
+        ));
+    }
+
+    sections.push(
+        "## 3. Response Style\n\
+         - Briefly explain the purpose of a tool before calling it.\n\
+         - Maintain system rules at the top of the context for inference efficiency."
+            .to_string(),
+    );
+    sections
+}
+
+/// Join the pre-numbered sections and wrap them in the standard preamble.
+fn build_system_message(sections: Vec<String>) -> crate::model::Message {
     crate::model::Message {
         role: "system".to_string(),
         content: format!(
-            "You are an expert software engineering assistant. Follow these immutable rules:\n\n\
-            ## 0. Workspace Context\n\
-            - Current Working Directory: Your root is ./ (the current directory).\n\
-            - Relative Paths Only: You MUST use relative paths (e.g., file.txt, ./src/) for all operations.\n\
-            - Prohibitions: NEVER use absolute paths starting with /. NEVER use ../ to escape the directory.\n\n\
-            ## 1. Command Execution (bash)\n\
-            - Allowed command patterns: [{}]\n\
-            - Interactive commands (e.g., nano, vim, top, ssh) are strictly forbidden. Always check the whitelist.\n\n\
-            ## 2. File Editing (str_replace_editor, write_file)\n\
-            - str_replace_editor: Provide 'old_string' exactly as it appears in the file, including all whitespace and indentation.\n\
-            - write_file: Use this to create new files or overwrite existing files entirely.\n\n\
-            ## 3. Information Retrieval (fetch_web)\n\
-            - Supports only http/https. Access to private or local networks is strictly prohibited.\n\n\
-            ## 4. Response Style\n\
-            - Briefly explain the purpose of a tool before calling it.\n\
-            - Maintain system rules at the top of the context for inference efficiency.",
-            crate::tools::ALLOW_COMMAND_LIST.join(", ")
+            "You are an expert software engineering assistant. Follow these immutable rules:\n\n{}",
+            sections.join("\n\n")
         ),
         ..Default::default()
     }
@@ -227,78 +344,66 @@ pub fn system_message() -> crate::model::Message {
 /// Build a system message for Mode 1 (Plan-Exec-Static) task sessions.
 /// The plan is read from ./todo.md with read_file; the task LLM executes the
 /// single task named in the user message.
-pub fn system_message_mode1_task_loop() -> crate::model::Message {
-    let base = system_message();
-    crate::model::Message {
-        role: "system".to_string(),
-        content: format!(
-            "{}\n\n\
-            ## 5. Todo Context (Plan-Exec Task Loop)\n\
-            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
-            - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
-            - Finish the task completely (create its outputs) before stopping.\n\
-            - Check `artifacts/` for previous work; save your outputs there.\n\
-            - Your final message must be a Handover Report in exactly this format:\n\
-              - Status: done / blocked\n\
-              - Output: <file paths created or updated, or \"none\">\n\
-              - Findings: <facts you observed, in one or two sentences>\n\
-              - Next: <what the next task should watch out for, or \"none\">\n\
-            Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
-            base.content
-        ),
-        ..Default::default()
-    }
+pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message {
+    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
+    sections.push(
+        "## 4. Todo Context (Plan-Exec Task Loop)\n\
+         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
+         - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
+         - Finish the task completely (create its outputs) before stopping.\n\
+         - Check `artifacts/` for previous work; save your outputs there.\n\
+         - Your final message must be a Handover Report in exactly this format:\n\
+           - Status: done / blocked\n\
+           - Output: <file paths created or updated, or \"none\">\n\
+           - Findings: <facts you observed, in one or two sentences>\n\
+           - Next: <what the next task should watch out for, or \"none\">\n\
+         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself."
+            .to_string(),
+    );
+    build_system_message(sections)
 }
 
 /// Build a system message for Mode 2 (Plan-Exec-Dynamic) replan sessions.
 /// The replan session (planner role) only updates the plan; it never executes
 /// the tasks.
-pub fn system_message_mode2_replan() -> crate::model::Message {
-    let base = system_message();
-    crate::model::Message {
-        role: "system".to_string(),
-        content: format!(
-            "{}\n\n\
-            ## 5. Todo Context (Plan-Exec-Dynamic Replan)\n\
-            - You are the task planner.\n\
-            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the notes and task reports from previous sessions.\n\
-            - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
-            - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
-            - Write ALL notes, status, and reasoning to `artifacts/handover.md` in this order: Status / Progress / Decisions / Next (write or append freely).\n\
-            - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
-            - Do NOT execute the tasks; only update the plan.\n\
-            - Your final message is a short summary of the plan changes.",
-            base.content
-        ),
-        ..Default::default()
-    }
+pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
+    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
+    sections.push(
+        "## 4. Todo Context (Plan-Exec-Dynamic Replan)\n\
+         - You are the task planner.\n\
+         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the notes and task reports from previous sessions.\n\
+         - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
+         - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
+         - Write ALL notes, status, and reasoning to `artifacts/handover.md` in this order: Status / Progress / Decisions / Next (write or append freely).\n\
+         - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
+         - Do NOT execute the tasks; only update the plan.\n\
+         - Your final message is a short summary of the plan changes."
+            .to_string(),
+    );
+    build_system_message(sections)
 }
 
 /// Build a system message for Mode 2 (Plan-Exec-Dynamic) task sessions.
 /// The plan is read from ./todo.md with read_file; the task LLM executes the
 /// single task named in the user message and updates the plan on completion.
-pub fn system_message_mode2_task_loop() -> crate::model::Message {
-    let base = system_message();
-    crate::model::Message {
-        role: "system".to_string(),
-        content: format!(
-            "{}\n\n\
-            ## 5. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
-            - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
-            - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
-            - Finish the task completely (create its outputs) before stopping.\n\
-            - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
-            - Check `artifacts/` for previous work; save your outputs there.\n\
-            - Your final message must be a Handover Report in exactly this format:\n\
-              - Status: done / blocked\n\
-              - Output: <file paths created or updated, or \"none\">\n\
-              - Findings: <facts you observed, in one or two sentences>\n\
-              - Next: <what the next task should watch out for, or \"none\">\n\
-            Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
-            base.content
-        ),
-        ..Default::default()
-    }
+pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message {
+    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
+    sections.push(
+        "## 4. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
+         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
+         - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
+         - Finish the task completely (create its outputs) before stopping.\n\
+         - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
+         - Check `artifacts/` for previous work; save your outputs there.\n\
+         - Your final message must be a Handover Report in exactly this format:\n\
+           - Status: done / blocked\n\
+           - Output: <file paths created or updated, or \"none\">\n\
+           - Findings: <facts you observed, in one or two sentences>\n\
+           - Next: <what the next task should watch out for, or \"none\">\n\
+         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself."
+            .to_string(),
+    );
+    build_system_message(sections)
 }
 
 /// Print the startup banner and configuration summary.
@@ -352,6 +457,31 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
     println!("  session-label      : {}", config.session_label);
 
+    // --- Tool enablement ---
+    if config.only_tools.is_empty() {
+        println!("  only-tools         : all (default)");
+    } else {
+        println!(
+            "  only-tools         : {}",
+            config
+                .only_tools
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if config
+            .only_tools
+            .iter()
+            .any(|t| matches!(t, ToolName::DataSearch | ToolName::DataSchema))
+            && config.db_type.is_none()
+        {
+            println!(
+                "{C_YELLOW}[Warning] data_search/data_schema require --db-type; they stay disabled without it.{RESET}"
+            );
+        }
+    }
+
     // --- Database configuration ---
     if let Some(db_type) = config.db_type.as_deref() {
         // Validate: db_type requires db_url
@@ -395,3 +525,7 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
 
     Ok(current_dir)
 }
+
+#[cfg(test)]
+#[path = "tests/startup_test.rs"]
+mod tests;

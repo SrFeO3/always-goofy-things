@@ -316,7 +316,7 @@ async fn run_replan_loop(
         )
     };
 
-    let system_msg = startup::system_message_mode2_replan();
+    let system_msg = startup::system_message_mode2_replan(config);
     let mut replan_session = Session::new(format!("{}_replan", config.session_label), system_msg);
     run_reasoning_loop(
         config,
@@ -504,7 +504,7 @@ async fn run_todo_loop_mode1(
             ),
         );
 
-        let system_msg = startup::system_message_mode1_task_loop();
+        let system_msg = startup::system_message_mode1_task_loop(config);
 
         let task_label = format!("{}_task{}", config.session_label, task.index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
@@ -707,7 +707,7 @@ async fn run_todo_loop_mode2(
         );
 
         // Mode 2 system message: plan read via read_file, updated via write_file
-        let system_msg = startup::system_message_mode2_task_loop();
+        let system_msg = startup::system_message_mode2_task_loop(config);
 
         let task_label = format!("{}_task{}", config.session_label, task_index);
         let mut task_session = Session::new(task_label.clone(), system_msg);

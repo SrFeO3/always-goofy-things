@@ -97,7 +97,10 @@ async fn main() -> Result<()> {
     }
 
     // Initial session: system message + label + turn 1.
-    let mut session = Session::new(config.session_label.clone(), startup::system_message());
+    let mut session = Session::new(
+        config.session_label.clone(),
+        startup::system_message(&config),
+    );
     // On startup: move meaningful last_session -> previous_session if it exists
     persistence::init_session(&session.label)?;
     // Save system message as the first line of the new session

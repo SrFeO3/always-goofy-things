@@ -303,6 +303,7 @@ pub(crate) async fn run_reasoning_loop(
                     config.unsafe_reflex,
                     config.db_unsafe_reflex,
                     is_batch,
+                    |name| config.is_tool_enabled(name),
                 )
                 .await;
                 let tool_call_decision_reason = tool_call_decision.reason.as_deref().unwrap_or("");
@@ -365,7 +366,11 @@ pub(crate) async fn run_reasoning_loop(
 
                     // execute tool and get tool_result json for following steps
                     let db_ctx = tools_data::db_context_from_config(config);
-                    match tools::execute_tool(&call.function.name, &args, db_ctx.as_ref()).await {
+                    match tools::execute_tool(&call.function.name, &args, db_ctx.as_ref(), |name| {
+                        config.is_tool_enabled(name)
+                    })
+                    .await
+                    {
                         Ok(res) => {
                             println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                             tool_result = res;
@@ -420,7 +425,8 @@ pub(crate) async fn call_llm(
     messages: &[Message],
 ) -> Result<(Message, Option<Usage>)> {
     let client = reqwest::Client::new();
-    let tools = tools::get_tool_definitions(config.db_type.as_deref());
+    let tools =
+        tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n));
     let messages_vec = messages.to_vec();
 
     let req = ChatRequest {
@@ -736,7 +742,7 @@ pub(crate) async fn call_llm(
     if let Some(tool_calls) = &mut full_message.tool_calls {
         post_process_tool_calls(
             tool_calls,
-            &tools::get_tool_definitions(config.db_type.as_deref()),
+            &tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n)),
         );
         // If all tool calls were filtered out, set back to None
         // to avoid serializing an empty array which APIs reject.
