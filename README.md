@@ -33,6 +33,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
+| `--only-tools <NAMES>` | `ONLY_TOOLS` | Only these AI tools are enabled (comma-separated or repeated). Unset = all tools. Disabled tools are hidden from the LLM and refuse to execute. | (all) |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM API traffic verbosity (`0`-`4`). | `1` |
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
@@ -57,6 +58,20 @@ Controls how tool results are structured when sent back to the LLM.
 - `json_string` (default): escaped JSON string.
 - `text`: plain text.
 - `json_structured`: JSON object.
+
+### Tool Restrictions (`--only-tools`)
+
+Restricts which AI tools the LLM can use. When unset, all tools are enabled. When set (comma-separated or repeated), **only** the listed tools are enabled; disabled tools are hidden from the LLM and refuse to execute even if called.
+
+Available names: `list_directory`, `read_file`, `write_file`, `str_replace_editor`, `grep_search`, `execute_bash`, `fetch_web`, `data_search`, `data_schema`.
+
+```bash
+# Read-only exploration session
+cargo run -- --only-tools read_file,list_directory,grep_search
+```
+
+- `data_search` / `data_schema` additionally require `--db-type`.
+- Todo modes require `read_file` (and `write_file` in mode 2) to read and update `./todo.md`; disabling them breaks the todo workflow.
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
 
