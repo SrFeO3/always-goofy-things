@@ -244,6 +244,14 @@ pub fn run(config: Config, provider: LlmProvider) {
         return;
     }
 
+    // Register the workspace root and tool execution limits for path
+    // validation and child-process hardening.
+    crate::tools::set_workspace_root(cwd.clone());
+    crate::tools_process::set_tool_limits(crate::tools_process::ToolLimits {
+        max_output_bytes: config.max_tool_output_bytes,
+        tool_timeout_secs: config.tool_timeout_secs,
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 600.0])

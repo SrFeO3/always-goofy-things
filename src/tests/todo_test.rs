@@ -1,4 +1,37 @@
 use super::*;
+use std::sync::Mutex;
+
+/// Serializes tests that mutate the real `./artifacts/handover.md`.
+/// (append_handover is hardwired to the CWD-relative HANDOVER_MD_PATH, so
+/// these tests run in the project directory instead of chdir-ing the whole
+/// test process, which raced with every other CWD-relative test.)
+static HANDOVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Backup of `./artifacts/handover.md`, restored on drop (panic-safe).
+struct HandoverBackup(Option<String>);
+
+impl HandoverBackup {
+    fn capture() -> Self {
+        let backup = std::fs::read_to_string(HANDOVER_MD_PATH).ok();
+        let _ = std::fs::remove_file(HANDOVER_MD_PATH);
+        std::fs::create_dir_all("./artifacts").unwrap();
+        Self(backup)
+    }
+}
+
+impl Drop for HandoverBackup {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(content) => {
+                let _ = std::fs::create_dir_all("./artifacts");
+                let _ = std::fs::write(HANDOVER_MD_PATH, content);
+            }
+            None => {
+                let _ = std::fs::remove_file(HANDOVER_MD_PATH);
+            }
+        }
+    }
+}
 
 #[test]
 fn test_check_completion_plain_line() {
@@ -61,27 +94,15 @@ fn test_check_completion_legacy_status_in_progress_blocks() {
 
 #[test]
 fn test_append_handover_creates_and_appends() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "agt_handover_test_{}_{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let orig = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&dir).unwrap();
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = HandoverBackup::capture();
 
     let r1 = append_handover("- Task 1: hello");
     let r2 = append_handover("- Task 2: world");
 
-    std::env::set_current_dir(&orig).unwrap();
-
     assert!(r1.is_ok() && r2.is_ok());
-    let content = std::fs::read_to_string(dir.join("artifacts/handover.md")).unwrap();
+    let content = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap();
     assert_eq!(content, "- Task 1: hello\n- Task 2: world\n");
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -101,16 +122,8 @@ fn test_one_line_report_short() {
 
 #[test]
 fn test_append_handover_dedup_same_task_marker() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "agt_dedup_test_{}_{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let orig = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&dir).unwrap();
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = HandoverBackup::capture();
 
     let r1 = append_handover("- Task 3: first report text");
     // Same task marker (e.g. the executor already wrote its own report):
@@ -122,38 +135,23 @@ fn test_append_handover_dedup_same_task_marker() {
     // Non-task entries (e.g. the seed template) are never deduped.
     let r4 = append_handover("# Handover Log");
 
-    std::env::set_current_dir(&orig).unwrap();
-
     assert!(r1.is_ok() && r2.is_ok() && r3.is_ok() && r4.is_ok());
-    let content = std::fs::read_to_string(dir.join("artifacts/handover.md")).unwrap();
+    let content = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap();
     assert_eq!(
         content,
         "- Task 3: first report text\n- Task 4: another report\n# Handover Log\n"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn test_seed_handover_creates_once() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "agt_seed_test_{}_{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let orig = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&dir).unwrap();
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = HandoverBackup::capture();
 
     let r1 = seed_handover();
     let seeded = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap();
     let r2 = seed_handover(); // second call must be a no-op
     let after = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap();
-
-    std::env::set_current_dir(&orig).unwrap();
-    std::fs::remove_dir_all(&dir).ok();
 
     assert!(r1.is_ok() && r2.is_ok());
     assert!(seeded.starts_with("# Handover Log"));

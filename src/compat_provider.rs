@@ -467,9 +467,17 @@ fn render_tool_text(result: &Value, tool_name: &str) -> Option<String> {
             Some(text)
         }
         "grep_search" => {
+            let truncated = result
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let matches = result.get("matches").and_then(|v| v.as_array())?;
             if matches.is_empty() {
-                return Some("No matches found.".to_string());
+                return Some(if truncated {
+                    "Matches were truncated (the kept tail has none); narrow the query or scope the path.".to_string()
+                } else {
+                    "No matches found.".to_string()
+                });
             }
             let mut text = String::new();
             for m in matches {
@@ -479,6 +487,9 @@ fn render_tool_text(result: &Value, tool_name: &str) -> Option<String> {
                 text.push_str(&format!("{}:{}:{}\n", p, l, t));
             }
             text.push_str(&format!("\u{2192} {} matches", matches.len()));
+            if truncated {
+                text.push_str(" (truncated; narrow the query or scope the path)");
+            }
             Some(text)
         }
         "list_directory" => {

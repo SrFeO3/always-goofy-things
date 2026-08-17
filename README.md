@@ -32,6 +32,8 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
+| `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured per output stream (stdout/stderr) for `execute_bash` / `grep_search`; excess output keeps the tail (`0` = unlimited). | `1048576` |
+| `--tool-timeout-secs <NUM>` | `TOOL_TIMEOUT_SECS` | Wall-clock timeout in seconds for `execute_bash` / `grep_search` (`0` = unlimited). | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `--only-tools <NAMES>` | `ONLY_TOOLS` | Only these AI tools are enabled (comma-separated or repeated). Unset = all tools. Disabled tools are hidden from the LLM and refuse to execute. | (all) |
 | `-v, --verbose-level <LEVEL>` | `VERBOSE_LEVEL` | LLM API traffic verbosity (`0`-`4`). | `1` |

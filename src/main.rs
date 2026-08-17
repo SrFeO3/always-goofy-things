@@ -49,6 +49,7 @@ mod todo;
 mod tools;
 mod tools_data;
 mod tools_fuzzy;
+mod tools_process;
 
 use attach::AttachedFile;
 use compat_provider::LlmProvider;

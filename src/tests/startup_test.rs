@@ -22,6 +22,8 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         output_file: None,
         max_reasoning_turns: 30,
         max_replan_attempts: 3,
+        max_tool_output_bytes: 1048576,
+        tool_timeout_secs: 30,
         db_type: None,
         db_url: None,
         db_auth_key: None,

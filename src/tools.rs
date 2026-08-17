@@ -24,17 +24,19 @@ use std::fs;
 #[cfg(not(feature = "gui"))]
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 #[cfg(feature = "gui")]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use clap::ValueEnum;
 use regex::Regex;
+use reqwest::redirect;
 use serde_json::json;
-use tokio::process::Command as TokioCommand;
 #[cfg(feature = "gui")]
 use tokio::sync::{mpsc, oneshot};
 
@@ -93,6 +95,19 @@ static ABSOLUTE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[\s=
 
 static PATH_TRAVERSAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[\s=])\.\.($|[\s/])|/\.\.($|[\s/])").unwrap());
+
+/// Canonicalized workspace root, registered once at startup (CLI / GUI).
+static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_workspace_root(root: PathBuf) {
+    let _ = WORKSPACE_ROOT.set(root);
+}
+
+fn workspace_root() -> &'static PathBuf {
+    WORKSPACE_ROOT
+        .get()
+        .expect("workspace root not set: set_workspace_root must be called at startup")
+}
 
 /// Canonical names of all AI tools. Used by `--only-tools`, tool definition
 /// filtering, and startup display so the list stays in one place.
@@ -331,7 +346,7 @@ pub async fn execute_tool(
         "read_file" => execute_read_file(args),
         "write_file" => execute_write_file(args),
         "str_replace_editor" => execute_str_replace(args),
-        "grep_search" => execute_grep_search(args),
+        "grep_search" => execute_grep_search(args).await,
         "list_directory" => execute_list_directory(args),
         "execute_bash" => execute_bash(args).await,
         "fetch_web" => execute_fetch_web(args).await,
@@ -360,6 +375,9 @@ pub async fn execute_tool(
     }
 }
 
+/// Validate a path stays inside the workspace: lexical fast reject, then
+/// canonicalize (resolving symlinks; parent for not-yet-existing paths) and
+/// check against the workspace root.
 fn validate_path(path: &str) -> Result<()> {
     let mut depth: i32 = 0;
     for component in std::path::Path::new(path).components() {
@@ -382,6 +400,28 @@ fn validate_path(path: &str) -> Result<()> {
                 "[SECURITY_VIOLATION] Directory traversal outside workspace is forbidden."
             ));
         }
+    }
+
+    let p = Path::new(path);
+    let resolved = match fs::canonicalize(p) {
+        Ok(r) => r,
+        Err(_) => {
+            let Some(parent) = p.parent().filter(|pp| !pp.as_os_str().is_empty()) else {
+                return Ok(()); // bare filename, under CWD
+            };
+            match fs::canonicalize(parent) {
+                Ok(parent_resolved) => parent_resolved.join(p.file_name().unwrap_or_default()),
+                Err(_) => return Ok(()), // no existing ancestor: lexically safe
+            }
+        }
+    };
+
+    // Both sides are canonicalized, so on Windows the casing matches as well.
+    if !resolved.starts_with(workspace_root()) {
+        return Err(anyhow!(
+            "[SECURITY_VIOLATION] Path resolves outside the workspace: '{}'",
+            path
+        ));
     }
     Ok(())
 }
@@ -632,9 +672,7 @@ fn execute_write_file(args: &serde_json::Value) -> Result<serde_json::Value> {
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] content is required"))?;
 
-    if let Err(e) = validate_path(path) {
-        return Err(anyhow!("[OUTSIDE_WORKSPACE] {}", e));
-    }
+    validate_path(path)?;
 
     if content.len() as u64 > MAX_FILE_SIZE {
         return Err(anyhow!("[FILE_TOO_LARGE] File content exceeds 10MB limit"));
@@ -847,9 +885,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] new_string is required"))?;
 
-    if let Err(e) = validate_path(path) {
-        return Err(anyhow!("[OUTSIDE_WORKSPACE] {}", e));
-    }
+    validate_path(path)?;
 
     let metadata = fs::metadata(path)
         .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not stat '{}': {}", path, e))?;
@@ -1036,22 +1072,19 @@ fn execute_list_directory(args: &serde_json::Value) -> Result<serde_json::Value>
     Ok(json!({ "path": path, "entries": entries }))
 }
 
-fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Value> {
+async fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Value> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] query is required"))?;
     let search_path = args["path"].as_str().unwrap_or(".");
-    let output = std::process::Command::new("grep")
-        .arg("-rnE")
-        .arg(query)
-        .arg(search_path)
-        .output()
-        .map_err(|e| anyhow!("[GREP_EXECUTION_FAILED] grep command failed: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let output =
+        crate::tools_process::run_captured("grep", &["-rnE", query, search_path], "GREP").await?;
+    // Exit code 1 means "no matches" (not an error); output is parsed below.
+
     let mut matches = Vec::new();
 
-    for line in stdout.lines() {
+    for line in output.stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
         if parts.len() == 3
             && let Ok(line_num) = parts[1].parse::<usize>()
@@ -1064,11 +1097,19 @@ fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Value> {
         }
     }
 
-    Ok(json!({
-        "matches": matches,
-        "total_matches": matches.len(),
-        "truncated": false
-    }))
+    let total_matches = matches.len();
+    let mut result = serde_json::Map::new();
+    result.insert("matches".to_string(), json!(matches));
+    result.insert("total_matches".to_string(), json!(total_matches));
+    result.insert("truncated".to_string(), json!(output.stdout_truncated));
+    if output.stdout_truncated {
+        // Exact byte count discarded by the cap (lower bound on drain abort).
+        result.insert(
+            "output_bytes_omitted".to_string(),
+            json!(output.stdout_omitted),
+        );
+    }
+    Ok(json!(result))
 }
 
 async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
@@ -1104,41 +1145,42 @@ async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
         ));
     }
 
-    let cmd_process = TokioCommand::new("bash").arg("-c").arg(cmd_trim).output();
+    let output = crate::tools_process::run_captured("bash", &["-c", cmd_trim], "BASH").await?;
+    let stdout_raw = output.stdout;
+    let stderr_raw = output.stderr;
+    let exit_code = output.exit_code;
+    let signal = output.signal;
 
-    let output = match tokio::time::timeout(Duration::from_secs(30), cmd_process).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(anyhow!(
-                "[BASH_EXECUTION_FAILED] Bash execution error: {}",
-                e
-            ));
-        }
-        Err(_) => {
-            return Err(anyhow!(
-                "[BASH_TIMED_OUT] Command timed out after 30 seconds."
-            ));
-        }
-    };
-
-    let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(1);
-
-    // Optimized Truncation: Keep the end of output as per spec
+    // Optimized Truncation: Keep the end of output as per spec. When the
+    // capture layer cut the stream (cap overflow, or a background grandchild
+    // held the pipe open) but the visible tail is short, say so instead of
+    // looking like a clean EOF.
     let stdout = if stdout_raw.len() > 4096 {
         format!(
             "[... Output truncated ...]\n{}",
             &stdout_raw[stdout_raw.len() - 4000..]
         )
+    } else if output.stdout_truncated {
+        format!("[... Output truncated ...]\n{}", stdout_raw)
     } else {
         stdout_raw
+    };
+    let stderr = if stderr_raw.len() > 4096 {
+        format!(
+            "[... stderr truncated ...]\n{}",
+            &stderr_raw[stderr_raw.len() - 4000..]
+        )
+    } else if output.stderr_truncated {
+        format!("[... stderr truncated ...]\n{}", stderr_raw)
+    } else {
+        stderr_raw
     };
 
     Ok(json!({
         "stdout": stdout,
         "stderr": stderr,
-        "exit_code": exit_code
+        "exit_code": exit_code,
+        "signal": signal,
     }))
 }
 
@@ -1146,10 +1188,31 @@ async fn execute_fetch_web(args: &serde_json::Value) -> Result<serde_json::Value
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] url is required"))?;
-    validate_url(url)?;
+    validate_url_deep(url).await?;
+
+    // Re-validate every redirect hop instead of following blindly.
+    // Policy::none() is not used because docs.rs crate links redirect to
+    // the latest version (https://docs.rs/<crate> -> /<crate>/latest/<crate>/).
+    let redirect_policy = redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.stop(); // hop cap
+        }
+        let target = attempt.url();
+        if let Some(prev) = attempt.previous().last()
+            && prev.scheme() == "https"
+            && target.scheme() == "http"
+        {
+            return attempt.stop(); // no https -> http downgrade
+        }
+        match validate_url_sync(target) {
+            Ok(()) => attempt.follow(),
+            Err(_) => attempt.stop(),
+        }
+    });
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(redirect_policy)
         .build()
         .map_err(|e| {
             anyhow!(
@@ -1194,33 +1257,115 @@ async fn execute_fetch_web(args: &serde_json::Value) -> Result<serde_json::Value
     }))
 }
 
-fn validate_url(url: &str) -> Result<()> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+/// Scheme and host-level SSRF checks without DNS. Used at entry and for each
+/// redirect hop.
+fn validate_url_sync(url: &reqwest::Url) -> Result<()> {
+    if url.scheme() != "http" && url.scheme() != "https" {
         return Err(anyhow!(
-            "[INVALID_URL] Invalid scheme. Only http/https allowed."
+            "[INVALID_URL] Invalid scheme '{}'. Only http/https allowed.",
+            url.scheme()
         ));
     }
-    let host_port = url.split('/').nth(2).unwrap_or("");
-    let host = host_port.split(':').next().unwrap_or("");
-
-    if host.to_lowercase() == "localhost" {
-        return Err(anyhow!(
-            "[SECURITY_VIOLATION] Access to localhost is forbidden."
-        ));
+    // Use the typed host (url::Host), not host_str(): the url crate stores
+    // IPv6 hosts in bracketed canonical form ("[::ffff:7f00:1]"), which
+    // IpAddr cannot parse and which is_ip_literal_form misses.
+    let host = url
+        .host()
+        .ok_or_else(|| anyhow!("[INVALID_URL] Missing host: {}", url))?;
+    match host {
+        url::Host::Ipv4(v4) => reject_blocked_ip(&IpAddr::V4(v4))?,
+        url::Host::Ipv6(v6) => reject_blocked_ip(&IpAddr::V6(v6))?,
+        url::Host::Domain(domain) => {
+            // Decimal / octal / hex / short IP notations that IpAddr cannot parse
+            // (e.g. 2130706433, 0177.0.0.1, 0x7f.0.0.1, 127.1) all resolve to
+            // loopback or private addresses; reject them outright.
+            if is_ip_literal_form(domain) {
+                return Err(anyhow!(
+                    "[SECURITY_VIOLATION] IP literal host is not allowed: {}",
+                    domain
+                ));
+            }
+        }
     }
+    Ok(())
+}
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        let is_private = match ip {
-            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00, // Unique Local Address (fc00::/7)
-        };
-        if is_private {
+/// validate_url_sync plus a DNS pre-resolution check (DNS rebinding mitigation;
+/// a full fix requires a network namespace / proxy).
+async fn validate_url_deep(url: &str) -> Result<()> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| anyhow!("[INVALID_URL] Malformed URL: {}", url))?;
+    validate_url_sync(&parsed)?;
+
+    // Literal hosts (IPv4, IPv6, and mapped IPv6) were fully checked by
+    // validate_url_sync; only domain names need a DNS pre-resolution check.
+    let url::Host::Domain(domain) = parsed
+        .host()
+        .ok_or_else(|| anyhow!("[INVALID_URL] Missing host: {}", url))?
+    else {
+        return Ok(());
+    };
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let addrs = tokio::net::lookup_host((domain, port)).await.map_err(|e| {
+        anyhow!(
+            "[NETWORK_REQUEST_FAILED] DNS resolution failed for '{}': {}",
+            domain,
+            e
+        )
+    })?;
+    for addr in addrs {
+        if is_blocked_ip(&addr.ip()) {
             return Err(anyhow!(
-                "[SECURITY_VIOLATION] Access to private network is forbidden."
+                "[SECURITY_VIOLATION] '{}' resolves to a private/local address.",
+                domain
             ));
         }
     }
     Ok(())
+}
+
+fn reject_blocked_ip(ip: &IpAddr) -> Result<()> {
+    if is_blocked_ip(ip) {
+        return Err(anyhow!(
+            "[SECURITY_VIOLATION] Access to private/local network is forbidden."
+        ));
+    }
+    Ok(())
+}
+
+fn is_blocked_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (::ffff:127.0.0.1 etc.) must be checked as IPv4:
+            // it is neither loopback nor ULA in v6 terms but connects to the
+            // mapped IPv4 address.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified();
+            }
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// True when the host looks like an IP literal in an unusual notation that
+/// `IpAddr` cannot parse (decimal / octal / hex / short form). Note that this
+/// also matches short all-hex hostnames (rare, and rejected by design).
+fn is_ip_literal_form(host: &str) -> bool {
+    !host.is_empty()
+        && host.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X')
+        })
 }
 
 fn strip_html_tags(html: &str) -> String {

@@ -3,6 +3,11 @@ use std::fs;
 
 // Helper to generate a unique temporary path for testing (relative path)
 fn get_temp_path(name: &str) -> std::path::PathBuf {
+    // Tests run with CWD = package root; register it as the workspace root
+    // so path validation (validate_path) works (OnceLock: first call wins).
+    crate::tools::set_workspace_root(
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    );
     fs::create_dir_all("./tmp").ok();
     let mut path = std::path::Path::new("./tmp").to_path_buf();
     path.push(format!(
@@ -445,11 +450,12 @@ fn test_list_directory() {
     assert!(entries.contains(&"Cargo.toml") || entries.contains(&"Cargo.lock"));
 }
 
-#[test]
-fn test_grep_search() {
+#[tokio::test]
+async fn test_grep_search() {
     // Search for a function definition within the project source
     let res =
         execute_grep_search(&json!({ "query": "pub fn get_tool_definitions", "path": "src" }))
+            .await
             .unwrap();
     let matches: Vec<&str> = res["matches"]
         .as_array()
@@ -459,6 +465,43 @@ fn test_grep_search() {
         .collect();
     assert!(matches.iter().any(|p| p.contains("tools.rs")));
     assert!(res["total_matches"].as_u64().unwrap() > 0);
+    assert_eq!(res["truncated"], false);
+    assert!(
+        res.get("output_bytes_omitted").is_none(),
+        "normal results must not carry the omitted field"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_search_large_output_reports_truncated() {
+    // Backed by more than the default output cap (1 MiB; the test binary
+    // never overrides ToolLimits) so the tail is kept and the result must
+    // say truncated = true instead of silently dropping the head.
+    let path = get_temp_path("grep_trunc");
+    fs::create_dir_all(&path).unwrap();
+    let data_file = path.join("data.txt");
+    let mut big = String::with_capacity(1_300_000);
+    for i in 0..30_000 {
+        big.push_str(&format!("match_line_{:06}\n", i));
+    }
+    fs::write(&data_file, &big).unwrap();
+
+    // Search a directory so grep emits `path:linenum:text` lines that the
+    // tool parses deterministically.
+    let res =
+        execute_grep_search(&json!({ "query": "match_line_", "path": path.to_str().unwrap() }))
+            .await
+            .unwrap();
+    assert_eq!(res["truncated"], true);
+    let omitted = res["output_bytes_omitted"].as_u64().unwrap();
+    assert!(omitted > 0, "omitted byte count must be reported");
+    let matches = res["matches"].as_array().unwrap();
+    assert!(
+        !matches.is_empty(),
+        "tail must still yield complete match lines"
+    );
+
+    fs::remove_dir_all(path).ok();
 }
 
 #[tokio::test]
@@ -490,6 +533,132 @@ async fn test_fetch_web_validation() {
     let res = execute_fetch_web(&json!({ "url": "http://127.0.0.1/admin" })).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("forbidden"));
+
+    // Stage 1 SSRF: bracketed IPv6 (previously bypassed the naive host parse)
+    let res = execute_fetch_web(&json!({ "url": "http://[::1]:8080/admin" })).await;
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("forbidden"), "got: {}", err);
+
+    // Stage 1 SSRF: userinfo trick (previously bypassed the naive host parse)
+    let res = execute_fetch_web(&json!({ "url": "http://evil@127.0.0.1/admin" })).await;
+    assert!(res.is_err());
+
+    // Stage 1 SSRF: decimal / hex / short IP notations (previously unparseable)
+    let res = execute_fetch_web(&json!({ "url": "http://2130706433/admin" })).await;
+    assert!(res.is_err());
+    let res = execute_fetch_web(&json!({ "url": "http://0x7f.0.0.1/admin" })).await;
+    assert!(res.is_err());
+    let res = execute_fetch_web(&json!({ "url": "http://127.1/admin" })).await;
+    assert!(res.is_err());
+
+    // Stage 1 SSRF: IPv4-mapped IPv6 (::ffff:127.0.0.1 == 127.0.0.1) must
+    // be rejected as IPv4, not slip through the IPv6 checks.
+    let res = execute_fetch_web(&json!({ "url": "http://[::ffff:127.0.0.1]/admin" })).await;
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("forbidden"), "got: {}", err);
+    let res = execute_fetch_web(&json!({ "url": "http://[::ffff:0a00:0001]/admin" })).await;
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("forbidden"), "got: {}", err);
+}
+
+#[tokio::test]
+async fn test_execute_bash_env_scrubbed() {
+    // A secret set in the agent's own environment must NOT reach the child.
+    unsafe {
+        std::env::set_var("AGT_TEST_SECRET_KEY", "hunter2");
+    }
+
+    let res = execute_bash(&json!({ "command": "echo $AGT_TEST_SECRET_KEY" }))
+        .await
+        .unwrap();
+    let stdout = res["stdout"].as_str().unwrap();
+    assert!(
+        !stdout.contains("hunter2"),
+        "secret leaked into bash env: {}",
+        stdout
+    );
+
+    // Control: PATH is still passed through, so ordinary commands work.
+    let res = execute_bash(&json!({ "command": "echo ok" }))
+        .await
+        .unwrap();
+    assert_eq!(res["exit_code"], 0);
+    assert!(res["stdout"].as_str().unwrap().contains("ok"));
+    assert_eq!(res["signal"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_execute_bash_output_capped() {
+    // Generate a large output file in the workspace (tmp/), then cat it:
+    // the tool result must be bounded and keep the tail.
+    let path = get_temp_path("big_output");
+    let big = "x".repeat(200_000);
+    fs::write(&path, &big).unwrap();
+
+    let res = execute_bash(&json!({ "command": format!("cat {}", path.display()) }))
+        .await
+        .unwrap();
+    let stdout = res["stdout"].as_str().unwrap();
+    assert!(
+        stdout.contains("[... Output truncated ...]"),
+        "expected truncation marker, got {} bytes",
+        stdout.len()
+    );
+    assert!(stdout.ends_with("xxx"), "tail must be kept");
+    assert!(stdout.len() <= 4096, "visible output must stay bounded");
+
+    fs::remove_file(path).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_validate_path_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    // Scratch dir under ./tmp; the workspace root is the package root (see
+    // get_temp_path), so the outside-pointing symlink must be rejected while
+    // inside-pointing ones stay allowed.
+    let ws = get_temp_path("ws");
+    fs::create_dir_all(&ws).unwrap();
+
+    // A symlink inside the workspace pointing outside must be rejected.
+    let link = ws.join("evil_link");
+    symlink("/etc/passwd", &link).unwrap();
+    let link_str = link.to_str().unwrap();
+    assert!(validate_path(link_str).is_err());
+
+    // A symlink pointing inside the workspace is allowed.
+    let target = ws.join("real.txt");
+    fs::write(&target, "data").unwrap();
+    let inner_link = ws.join("inner_link");
+    symlink(&target, &inner_link).unwrap();
+    assert!(validate_path(inner_link.to_str().unwrap()).is_ok());
+
+    // Regular paths: existing file and a not-yet-existing subpath both pass.
+    assert!(validate_path(target.to_str().unwrap()).is_ok());
+    assert!(validate_path(ws.join("new_dir/file.txt").to_str().unwrap()).is_ok());
+
+    // The same escape through the dispatch path (execute_tool).
+    let blocked = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(execute_tool(
+            "read_file",
+            &json!({ "path": link_str }),
+            None,
+            |_| true,
+        ));
+    assert!(blocked.is_err());
+    assert!(
+        blocked
+            .unwrap_err()
+            .to_string()
+            .contains("SECURITY_VIOLATION")
+    );
+
+    fs::remove_file(&link).ok();
+    fs::remove_file(&target).ok();
+    fs::remove_file(&inner_link).ok();
+    fs::remove_dir_all(&ws).ok();
 }
 
 #[test]

@@ -174,6 +174,15 @@ pub struct Config {
     #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
     pub max_replan_attempts: u32,
 
+    /// Maximum bytes captured per output stream (stdout / stderr) for
+    /// execute_bash / grep_search; excess output keeps the tail (0 = unlimited).
+    #[arg(long, env = "MAX_TOOL_OUTPUT_BYTES", default_value_t = 1048576)]
+    pub max_tool_output_bytes: usize,
+
+    /// Wall-clock timeout in seconds for execute_bash / grep_search (0 = unlimited).
+    #[arg(long, env = "TOOL_TIMEOUT_SECS", default_value_t = 30)]
+    pub tool_timeout_secs: u64,
+
     /// Database type for data_search / data_schema tools.
     /// Supported: greptimedb, clickhouse, influxdb.
     /// When set, the data tools are enabled.
@@ -413,6 +422,14 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         .map_err(|e| anyhow!("Invalid working directory '{}': {}", config.working_dir, e))?;
     env::set_current_dir(&current_dir)?;
 
+    // Register the workspace root and tool execution limits for path
+    // validation and child-process hardening.
+    crate::tools::set_workspace_root(current_dir.clone());
+    crate::tools_process::set_tool_limits(crate::tools_process::ToolLimits {
+        max_output_bytes: config.max_tool_output_bytes,
+        tool_timeout_secs: config.tool_timeout_secs,
+    });
+
     println!(
         "The {APP_NAME} v{}\nCopyright (C) 2026 SrFeO3. All rights reserved.\n{}\n",
         env!("CARGO_PKG_VERSION"),
@@ -455,6 +472,8 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     );
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
+    println!("  max-tool-output-bytes: {}", config.max_tool_output_bytes);
+    println!("  tool-timeout-secs   : {}", config.tool_timeout_secs);
     println!("  session-label      : {}", config.session_label);
 
     // --- Tool enablement ---
