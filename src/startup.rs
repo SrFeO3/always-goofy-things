@@ -381,13 +381,14 @@ pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
     sections.push(format!(
         "## 4. Todo Context (Plan-Exec-Dynamic Replan)\n\
-         - You are the task planner. Do NOT execute the tasks; only update the plan.\n\
+         - You are the task planner. Do NOT execute the tasks in `## Tasks`; a separate task session executes them after your replan.\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the task reports and planner notes from previous sessions (each task report is followed by an `outputs:` line listing the artifact paths that task declared).\n\
          - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
-         - Mark completed tasks `[x]` (verify the files named in their `outputs:` lines exist in `artifacts/`), and add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
-         - Write, in this order:\n\
+         - Mark completed tasks `[x]` (verify the files named in their `outputs:` lines exist in `artifacts/` with read_file / list_directory), and add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
+         - Write ONLY these two files, in this order:\n\
            1. `./todo.md` - the updated plan; text alone does not update the plan.\n\
            2. `./next-task.md` (write_file; overwrite it every time) - the brief for the IMMEDIATELY NEXT task: its scope, the files it must read (mark each one must-read or optional), the previous task's `outputs:`, and warnings.\n\
+           Writing any other file - including everything under `artifacts/` - is forbidden.\n\
          - Your final message must be your plan-update notes for the next planner session: anything it must know that does not fit in `./todo.md` or `./next-task.md`, in exactly this format:\n\
            - Status: <overall state of the job>\n\
            - Progress: <what the completed tasks achieved>\n\

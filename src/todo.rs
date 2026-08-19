@@ -436,9 +436,9 @@ pub(crate) async fn run_todo_loop(
         "Plan-Exec-Static"
     };
 
-    if pending.is_empty() {
-        // Resumed run: nothing left to do. Surface the Goal artifact when
-        // the Goal names one (fall back to a plain notice).
+    // Resumed run: Mode 1 finishes with the Goal answer; Mode 2 falls through
+    // so the loop's final-replan completion gate still runs.
+    if pending.is_empty() && config.todo_mode != 2 {
         let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
         return Ok(llm_guard_final_answer(
             &content,

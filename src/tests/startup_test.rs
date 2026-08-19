@@ -217,8 +217,15 @@ fn system_message_mode2_uses_next_task_brief() {
         replan.content
     );
     assert!(
-        replan.content.contains("Write, in this order:"),
+        replan
+            .content
+            .contains("Write ONLY these two files, in this order:"),
         "replan message must list its outputs in order: {}",
+        replan.content
+    );
+    assert!(
+        replan.content.contains("is forbidden"),
+        "replan message must forbid writing any other file: {}",
         replan.content
     );
     assert!(
