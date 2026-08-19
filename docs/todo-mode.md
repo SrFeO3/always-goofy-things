@@ -1,12 +1,12 @@
 # Todo Mode (Plan-Execute with Handover)
 
-When a job is too large for a single LLM context, the application breaks it into a plan of tasks: it reads the plan from `./todo.md`, executes the tasks one-by-one with a fresh context each time, and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the AI rewrites the plan as it works. (The default single-loop mode is called ReAct.)
+When a job is too large for a single LLM context, split it into a plan of tasks in `./todo.md`: the application executes the tasks one-by-one with a fresh context each time and carries state forward through the file. `-t` modes run immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the LLM rewrites the plan as it works. (The default single-loop mode is called ReAct.)
 
 Both modes share the same file conventions:
 - `./todo.md` is strictly structured: a title, a `## Goal`, and a `## Tasks` list (`- [ ]` / `- [x]`). Nothing else belongs in it; the format is enforced by the prompts.
-- `artifacts/handover.md` is the free-form handover log. Every session reads it together with `./todo.md` first. The application creates it with a short template when it does not exist, appends each task's final report to it, and (Mode 2) the replan planner writes its notes there.
-- Every task session ends with a structured Handover Report - `Status / Output / Findings / Next` - which becomes both the entry appended to `artifacts/handover.md` and (for the last task) the job's final answer.
-- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there (write the file name in the Goal for a fixed name).
+- `artifacts/handover.md` is the free-form handover log. Every session reads it together with `./todo.md` first. The application creates it with a short template when it does not exist, appends each task's final report to it (followed by an `outputs:` line listing the task's declared artifact paths, never truncated), and (Mode 2) the replan planner writes its notes there.
+- Every task session ends with a structured Handover Report - `Status / Output / Findings / Next` - which the application appends to `artifacts/handover.md`. The application verifies that the paths declared in `Output:` actually exist; missing ones are warned about (Mode 1) or reported to the next replan so the planner can add a fix task (Mode 2).
+- Every task saves its outputs to `artifacts/`; the last task also saves the job's final result there. Write that file's name in the Goal: at completion the application reads the Goal-named `artifacts/...` file and returns its content as the job's final answer (falling back to the last task's report, then a completion notice). When the Goal names several `artifacts/...` files, the last one named (the final deliverable) is returned.
 - In todo mode, the `-q` query is appended to every replan and task session's user message as additional instructions.
 
 ## The Two Modes at a Glance
@@ -33,12 +33,12 @@ A typical Mode 1 case: a simple, fully-specified workflow with no unknowns.
 # Counter Test
 
 ## Goal
-Count from 1 to 3, recording each number into count.txt.
+Count from 1 to 3, recording each number into artifacts/count.txt.
 
 ## Tasks
-- [ ] Write "1" to count.txt
-- [ ] Append "2" to count.txt
-- [ ] Append "3" to count.txt
+- [ ] Write "1" to artifacts/count.txt
+- [ ] Append "2" to artifacts/count.txt
+- [ ] Append "3" to artifacts/count.txt
 ```
 
 #### 2. Run
@@ -52,7 +52,7 @@ What happens:
 1. The application reads `./todo.md` (and `artifacts/handover.md`, creating it if missing) and picks the first unchecked task.
 2. It executes that task with a fresh LLM context, then marks it `[x]` and appends the task's Handover Report to `artifacts/handover.md`.
 3. It repeats for the next task, until all three are `[x]`.
-4. It reports that all tasks are complete and exits.
+4. It returns the content of the Goal artifact `artifacts/count.txt` (`1`, `2`, `3`) as the job's final answer and exits.
 
 ---
 
@@ -74,10 +74,10 @@ Shows the replan step in action: the Goal requires two files, but the Tasks list
 # Two-File Creation
 
 ## Goal
-Create one.txt with "hello" and two.txt with "world".
+Create artifacts/one.txt with "hello" and artifacts/two.txt with "world".
 
 ## Tasks
-- [ ] Create one.txt with content "hello"
+- [ ] Create artifacts/one.txt with content "hello"
 ```
 
 #### 2. Run
@@ -88,14 +88,14 @@ cargo run -- -t 2
 
 The LLM will:
 
-1. Replan - notice `two.txt` is missing, add it to Tasks
+1. Replan - notice `artifacts/two.txt` is missing, add it to Tasks
 2. Execute - create both files and mark its task `[x]` in `./todo.md`
 3. Replan - all tasks `[x]`; the final replan confirms the Goal is reached
 4. Exit
 
 ### Example 2: Offline Open-Ended Research (exploratory; the AI discovers subtasks as it goes, no external access)
 
-Shows an exploratory task: the exact steps are not known upfront. The initial list is only a starting point - the LLM adds subtasks or restructures the plan as it learns. The corpus is downloaded once beforehand and read from disk, so the run itself needs no network access. Every claim in the final report must cite the local file it came from: this prevents the LLM from writing the report from memory and lets you verify the result against the corpus.
+Shows an exploratory job: the exact steps are not known upfront. The initial list is only a starting point - the LLM adds subtasks or restructures the plan as it learns. The corpus is downloaded once beforehand and read from disk, so the run itself needs no network access. Every claim in the final report must cite the local file it came from: this prevents the LLM from writing the report from memory and lets you verify the result against the corpus.
 
 #### 1. Download the docs (one-time, with network access)
 
@@ -121,15 +121,6 @@ Compare `anyhow` and `eyre` error-handling crates using the local docs under res
 - [ ] Read the anyhow docs under research/anyhow/ and summarize key features
 - [ ] Read the eyre docs under research/eyre/ and summarize key features
 - [ ] Read both summaries and write a comparison report
-```
-
-If the plan needs starting notes, put them in the handover log (created automatically if missing):
-
-```markdown
-# artifacts/handover.md
-
-- All docs are local under research/. Do not fetch anything from the web; ground every claim in the local files.
-- Start by researching anyhow first.
 ```
 
 #### 3. Run

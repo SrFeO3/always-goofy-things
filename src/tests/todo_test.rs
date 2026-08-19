@@ -106,21 +106,6 @@ fn test_append_handover_creates_and_appends() {
 }
 
 #[test]
-fn test_one_line_report_truncates() {
-    let long = "a".repeat(400);
-    let report = one_line_report(&format!("line1\nline2 {}", long));
-    assert!(report.ends_with("..."));
-    assert_eq!(report.chars().count(), 303); // 300 chars + "..."
-    assert!(!report.contains('\n'));
-}
-
-#[test]
-fn test_one_line_report_short() {
-    let report = one_line_report("Status: done\nOutput: a.md");
-    assert_eq!(report, "Status: done Output: a.md");
-}
-
-#[test]
 fn test_append_handover_dedup_same_task_marker() {
     let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
     let _backup = HandoverBackup::capture();

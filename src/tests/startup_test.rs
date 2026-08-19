@@ -190,3 +190,19 @@ fn system_message_mode2_sections_keep_fixed_numbers() {
             .contains("## 4. Todo Context (Plan-Exec-Dynamic Task Loop)")
     );
 }
+
+#[test]
+fn todo_system_messages_mention_outputs_lines() {
+    let config = cfg(vec![]);
+    for msg in [
+        system_message_mode1_task_loop(&config),
+        system_message_mode2_replan(&config),
+        system_message_mode2_task_loop(&config),
+    ] {
+        assert!(
+            msg.content.contains("`outputs:`"),
+            "todo system message must mention the outputs: line: {}",
+            msg.content
+        );
+    }
+}

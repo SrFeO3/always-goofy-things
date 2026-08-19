@@ -12,7 +12,7 @@
 //!    - Parse State    : Identify the next unchecked task from todo.md.
 //!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task.
 //!    - Store State    : The application updates todo.md (mark [x]) and artifacts/handover.md and resets the LLM context.
-//! 3. [Final Answer]   : Notify the user that all tasks are complete.
+//! 3. [Final Answer]   : Read the Goal artifact (an `artifacts/...` path named in the Goal) and present it; fall back to the last task's report, then a completion notice.
 //!
 //! ## Mode 2 (Plan-Exec-Dynamic)
 //!
@@ -22,7 +22,7 @@
 //!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback); inspects todo.md, handover.md, artifacts/, then updates todo.md, handover.md.
 //!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task and updates todo.md.
 //!    - Store State    : The application updates artifacts/handover.md and resets the LLM context.
-//! 3. [Final Answer]   : Present the final answer to the user.
+//! 3. [Final Answer]   : Read the Goal artifact (an `artifacts/...` path named in the Goal) and present it; fall back to the last task's report, then a completion notice.
 
 use anyhow::{Context, Result};
 
@@ -32,6 +32,10 @@ use crate::model::{Message, Metrics, Session, Settings};
 use crate::persistence;
 use crate::reasoning::run_reasoning_loop;
 use crate::startup;
+use crate::todo_guard::{
+    build_handover_entry, llm_guard_declared_outputs, llm_guard_final_answer,
+    llm_guard_handover_report,
+};
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
 
@@ -194,6 +198,7 @@ fn seed_handover() -> Result<()> {
          the start of every session. The application appends each task's final\n\
          report here, in this format:\n\
          - Task N: - Status: done / blocked - Output: <paths> - Findings: <facts> - Next: <pointer>\n\
+         A task entry may be followed by an `outputs:` line listing the files the task declared in Output (never truncated).\n\
          The replan planner writes its plan-update notes here, in this order:\n\
          Status / Progress / Decisions / Next.\n",
     )
@@ -237,69 +242,6 @@ fn append_handover(entry: &str) -> Result<()> {
     }
     std::fs::write(HANDOVER_MD_PATH, content).context("Failed to write ./artifacts/handover.md")?;
     Ok(())
-}
-
-/// Max chars of a task's handover report (prompt limit + truncation fallback).
-pub(crate) const HANDOVER_REPORT_MAX_CHARS: usize = 300;
-
-/// Session-context budget for the condensing retry (heuristic; no token counting).
-const LLM_GUARD_CONTEXT_CHARS: usize = 120_000;
-
-/// Collapse a report to a single line (max `HANDOVER_REPORT_MAX_CHARS`) for
-/// handover logging.
-fn one_line_report(raw: &str) -> String {
-    let note: String = raw
-        .replace('\n', " ")
-        .chars()
-        .take(HANDOVER_REPORT_MAX_CHARS)
-        .collect();
-    if raw.chars().count() > HANDOVER_REPORT_MAX_CHARS {
-        format!("{}...", note)
-    } else {
-        note
-    }
-}
-
-/// llm_guard_: when a task's final Handover Report exceeds the limit, ask the
-/// LLM once to rewrite it concisely (skipped when the session is near its
-/// budget; falls back to one_line_report truncation on failure).
-async fn llm_guard_handover_report(
-    config: &startup::Config,
-    provider: LlmProvider,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
-    task_session: &mut Session,
-) {
-    let ctx_chars: usize = task_session
-        .messages
-        .iter()
-        .map(|m| m.content.chars().count())
-        .sum();
-    let Some(last) = task_session.messages.last() else {
-        return;
-    };
-    if last.content.chars().count() <= HANDOVER_REPORT_MAX_CHARS
-        || ctx_chars >= LLM_GUARD_CONTEXT_CHARS
-    {
-        return;
-    }
-    let feedback = format!(
-        "Your Handover Report is too long ({} chars > {}). Rewrite it as ONE concise report within {} characters, keeping Status / Output / Findings / Next.",
-        last.content.chars().count(),
-        HANDOVER_REPORT_MAX_CHARS,
-        HANDOVER_REPORT_MAX_CHARS
-    );
-    // One retry at most; ignore errors (truncation fallback still applies).
-    let _ = run_reasoning_loop(
-        config,
-        provider,
-        task_session,
-        settings,
-        metrics,
-        feedback,
-        Vec::new(),
-    )
-    .await;
 }
 
 /// Check whether the plan is complete (Mode 2).
@@ -355,16 +297,18 @@ async fn run_replan_loop(
     metrics: &mut Metrics,
     gui_log: &mut Session,
     user_input: &str,
+    app_feedback: Option<&str>,
 ) -> Result<String> {
     let q = user_input.trim();
-    let replan_prompt = if q.is_empty() {
-        "Review and update `./todo.md` per the system instructions.".to_string()
-    } else {
-        format!(
-            "Review and update `./todo.md` per the system instructions.\n\nAdditional user instructions: {}",
-            q
-        )
-    };
+    let mut sections =
+        vec!["Review and update `./todo.md` per the system instructions.".to_string()];
+    if !q.is_empty() {
+        sections.push(format!("Additional user instructions: {}", q));
+    }
+    if let Some(feedback) = app_feedback {
+        sections.push(format!("Application feedback: {}", feedback));
+    }
+    let replan_prompt = sections.join("\n\n");
 
     let system_msg = startup::system_message_mode2_replan(config);
     let mut replan_session = Session::new(format!("{}_replan", config.session_label), system_msg);
@@ -399,6 +343,7 @@ async fn final_replan_confirms_completion(
     metrics: &mut Metrics,
     gui_log: &mut Session,
     user_input: &str,
+    app_feedback: Option<&str>,
 ) -> Result<bool> {
     println!(
         "{}--- [Replan] (final: all tasks done - planner may add tasks) ---{}",
@@ -410,7 +355,17 @@ async fn final_replan_confirms_completion(
         gui_log,
         "--- [Replan] (final: all tasks done - planner may add tasks) ---",
     );
-    match run_replan_loop(config, settings, provider, metrics, gui_log, user_input).await {
+    match run_replan_loop(
+        config,
+        settings,
+        provider,
+        metrics,
+        gui_log,
+        user_input,
+        app_feedback,
+    )
+    .await
+    {
         Ok(updated) => Ok(check_completion(&updated)),
         Err(e) => {
             println!(
@@ -463,7 +418,14 @@ pub(crate) async fn run_todo_loop(
     };
 
     if pending.is_empty() {
-        return Ok("All tasks already completed.".to_string());
+        // Resumed run: nothing left to do. Surface the Goal artifact when
+        // the Goal names one (fall back to a plain notice).
+        let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
+        return Ok(llm_guard_final_answer(
+            &content,
+            "",
+            "All tasks already completed.",
+        ));
     }
 
     let pending_count = pending.len();
@@ -578,14 +540,30 @@ async fn run_todo_loop_mode1(
                 .last()
                 .map(|m| m.content.as_str())
                 .unwrap_or("Task completed.");
-            let note = one_line_report(raw_note);
 
             mark_task_done(0)?;
             // Hand the executor's final report over to the free-form log.
             // Uses the stable task index (not the per-run counter) so that
             // resumed runs never collide with earlier entries of the same
-            // task number.
-            append_handover(&format!("- Task {}: {}", task.index + 1, note))?;
+            // task number. Declared Output paths are kept on an untruncated
+            // `outputs:` line (the one-liner may cut them).
+            append_handover(&build_handover_entry(
+                &format!("- Task {}", task.index + 1),
+                raw_note,
+            ))?;
+
+            // Mechanical check: every Output path the executor declared must
+            // exist on disk. Mode 1 has no planner to fix it, so warn.
+            let missing = llm_guard_declared_outputs(raw_note);
+            if !missing.is_empty() {
+                println!(
+                    "\n{}--- [App] Task {} declared Output paths that do not exist: {} ---{}",
+                    startup::C_YELLOW,
+                    task_num,
+                    missing.join(", "),
+                    startup::RESET
+                );
+            }
 
             // Capture LLM's final message as the final answer
             if let Some(msg) = task_session.messages.last()
@@ -627,11 +605,12 @@ async fn run_todo_loop_mode1(
     }
 
     Ok(if completed == pending_count {
-        if !last_answer.is_empty() {
-            last_answer
-        } else {
-            format!("All {} tasks completed successfully.", pending_count)
-        }
+        let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
+        llm_guard_final_answer(
+            &final_todo,
+            &last_answer,
+            &format!("All {} tasks completed successfully.", pending_count),
+        )
     } else {
         format!(
             "{} of {} tasks completed. Check ./todo.md for pending items.",
@@ -654,6 +633,9 @@ async fn run_todo_loop_mode2(
     let mut replan_stalls = 0u32;
     let mut task_index = 0usize;
     let mut last_answer = String::new();
+    // App-side reports (e.g. missing declared outputs) waiting to be shown
+    // to the planner; cleared once a replan succeeds.
+    let mut app_feedback: Vec<String> = Vec::new();
 
     loop {
         task_index += 1;
@@ -664,8 +646,19 @@ async fn run_todo_loop_mode2(
         // the planner can add tasks if the Goal is not yet achieved; exit
         // only when the plan is still complete after that final replan.
         if check_completion(&todo_content) {
+            let feedback = if app_feedback.is_empty() {
+                None
+            } else {
+                Some(app_feedback.join("\n"))
+            };
             if final_replan_confirms_completion(
-                config, settings, provider, metrics, gui_log, user_input,
+                config,
+                settings,
+                provider,
+                metrics,
+                gui_log,
+                user_input,
+                feedback.as_deref(),
             )
             .await?
             {
@@ -677,6 +670,7 @@ async fn run_todo_loop_mode2(
                 break;
             }
             // The final replan added tasks: continue with a fresh iteration.
+            app_feedback.clear();
             replan_stalls = 0;
             continue;
         }
@@ -686,24 +680,53 @@ async fn run_todo_loop_mode2(
         #[cfg(feature = "gui")]
         push_system_msg(gui_log, "--- [Replan] ---");
         let prev_unchecked = count_unchecked(&todo_content);
-        let updated =
-            match run_replan_loop(config, settings, provider, metrics, gui_log, user_input).await {
-                Ok(u) => u,
-                Err(e) => {
-                    println!(
-                        "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
-                        startup::C_RED,
-                        e,
-                        startup::RESET
-                    );
-                    // Continue with current todo.md
-                    todo_content.clone()
-                }
-            };
+        let feedback = if app_feedback.is_empty() {
+            None
+        } else {
+            Some(app_feedback.join("\n"))
+        };
+        let updated = match run_replan_loop(
+            config,
+            settings,
+            provider,
+            metrics,
+            gui_log,
+            user_input,
+            feedback.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => {
+                // The planner saw the pending app reports; drop them.
+                app_feedback.clear();
+                u
+            }
+            Err(e) => {
+                println!(
+                    "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
+                    startup::C_RED,
+                    e,
+                    startup::RESET
+                );
+                // Continue with current todo.md
+                todo_content.clone()
+            }
+        };
 
         if check_completion(&updated) {
+            let feedback = if app_feedback.is_empty() {
+                None
+            } else {
+                Some(app_feedback.join("\n"))
+            };
             if final_replan_confirms_completion(
-                config, settings, provider, metrics, gui_log, user_input,
+                config,
+                settings,
+                provider,
+                metrics,
+                gui_log,
+                user_input,
+                feedback.as_deref(),
             )
             .await?
             {
@@ -715,6 +738,7 @@ async fn run_todo_loop_mode2(
                 break;
             }
             // The final replan added tasks: continue with a fresh iteration.
+            app_feedback.clear();
             replan_stalls = 0;
             continue;
         }
@@ -786,17 +810,40 @@ async fn run_todo_loop_mode2(
             }
             // Record the executor's handover report (its final message) so
             // the next replan has a record of what this task reported.
-            let report = task_session
+            // Declared Output paths are kept on an untruncated `outputs:` line.
+            let raw_note = task_session
                 .messages
                 .last()
-                .map(|m| one_line_report(&m.content))
+                .map(|m| m.content.as_str())
                 .unwrap_or_default();
-            let report = if report.trim().is_empty() {
+            let report = if raw_note.trim().is_empty() {
                 "Status: (no report)".to_string()
             } else {
-                report
+                raw_note.to_string()
             };
-            append_handover(&format!("- Task {}: {}", task_index, report))?;
+            append_handover(&build_handover_entry(
+                &format!("- Task {}", task_index),
+                &report,
+            ))?;
+
+            // Mechanical check: every Output path the executor declared must
+            // exist on disk; missing ones are reported to the next replan so
+            // the planner can add a fix task.
+            let missing = llm_guard_declared_outputs(&report);
+            if !missing.is_empty() {
+                println!(
+                    "\n{}--- [App] Task {} declared Output paths that do not exist: {} ---{}",
+                    startup::C_YELLOW,
+                    task_index,
+                    missing.join(", "),
+                    startup::RESET
+                );
+                app_feedback.push(format!(
+                    "Task {} declared Output paths that do not exist: {}. Verify whether the task actually finished and add a fix task if needed.",
+                    task_index,
+                    missing.join(", ")
+                ));
+            }
 
             persistence::archive_todo_session(&task_label, task_index)?;
 
@@ -833,11 +880,11 @@ async fn run_todo_loop_mode2(
     // Final check: did the LLM set the completion status?
     let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
     if check_completion(&final_todo) {
-        if last_answer.is_empty() {
-            Ok("All tasks completed.".to_string())
-        } else {
-            Ok(last_answer)
-        }
+        Ok(llm_guard_final_answer(
+            &final_todo,
+            &last_answer,
+            "All tasks completed.",
+        ))
     } else if completed > 0 {
         Ok(format!(
             "{} task(s) completed. Check ./todo.md for progress.",

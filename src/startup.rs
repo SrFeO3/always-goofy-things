@@ -361,6 +361,7 @@ pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message 
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
          - Check `artifacts/` for previous work; save your outputs there.\n\
+         - Handover entries may be followed by an `outputs:` line listing the artifact paths the previous task created; read the listed files with read_file when your task needs them.\n\
          - Your final message must be a Handover Report in exactly this format:\n\
            - Status: done / blocked\n\
            - Output: <file paths created or updated, or \"none\">\n\
@@ -368,7 +369,7 @@ pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message 
            - Next: <what the next task should watch out for, or \"none\">\n\
          - Keep the entire report within {} characters.\n\
          Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
-        crate::todo::HANDOVER_REPORT_MAX_CHARS
+        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
     ));
     build_system_message(sections)
 }
@@ -384,6 +385,7 @@ pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the notes and task reports from previous sessions.\n\
          - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
          - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
+         - A task entry in `artifacts/handover.md` may be followed by an `outputs:` line listing the artifact paths that task declared; verify those files exist in `artifacts/` with tools.\n\
          - Write ALL notes, status, and reasoning to `artifacts/handover.md` in this order: Status / Progress / Decisions / Next (write or append freely).\n\
          - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
          - Do NOT execute the tasks; only update the plan.\n\
@@ -405,6 +407,7 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
          - Finish the task completely (create its outputs) before stopping.\n\
          - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
          - Check `artifacts/` for previous work; save your outputs there.\n\
+         - Handover entries may be followed by an `outputs:` line listing the artifact paths the previous task created; read the listed files with read_file when your task needs them.\n\
          - Your final message must be a Handover Report in exactly this format:\n\
            - Status: done / blocked\n\
            - Output: <file paths created or updated, or \"none\">\n\
@@ -412,7 +415,7 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
            - Next: <what the next task should watch out for, or \"none\">\n\
          - Keep the entire report within {} characters.\n\
          Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
-        crate::todo::HANDOVER_REPORT_MAX_CHARS
+        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
     ));
     build_system_message(sections)
 }

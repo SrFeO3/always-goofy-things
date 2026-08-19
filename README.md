@@ -44,9 +44,6 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |
 
-> [!NOTE]
-> **Renamed**: `MAX_EMPTY_RETRY` / `--max-empty-retry` was replaced by `MAX_REASONING_EMPTY_RESPONSES` / `--max-reasoning-empty-responses`. New semantics: `N` = stop after N consecutive empty responses (`1` = stop at the first empty response, `2` = retry once, `0` = unlimited). The previous default `1` (retry once) now corresponds to `2`. The old env var and flag names are **removed** and will not be recognized.
-
 ### LLM Provider (`LLM_PROVIDER`)
 
 Controls which provider-specific API format is used. If not set, the provider is auto-detected from LLM_URL.
@@ -92,11 +89,11 @@ Controls the visual styling and decorations applied to the terminal output.
 
 ### Todo Mode (`TODO_MODE`)
 
-Plan-and-Execute execution for complex multi-step tasks. Reads `./todo.md`, resets LLM context between steps, and carries state forward via the file.
+Plan-and-Execute execution for long jobs, split into tasks. Reads `./todo.md`, resets the LLM context between tasks, and carries state forward via the file.
 
 - `0` (default): Standard ReAct loop. Single-turn tasks.
 - `1`: Static sequential execution from a user-prepared plan. Known step-by-step workflows.
-- `2`: Dynamic AI-driven replanning. The AI rewrites `./todo.md` as it works. Exploratory / research tasks.
+- `2`: Dynamic AI-driven replanning. The AI rewrites `./todo.md` as it works. Exploratory / research jobs.
 
 See [docs/todo-mode.md](docs/todo-mode.md) for sample `./todo.md` files and quick-start guides.
 
@@ -155,11 +152,11 @@ Ollama requires `@@` for PDF (no native document support).
 - "@@spec.pdf Fix this broken http server based on the specification."
 - "@@spec.pdf:3-7 Review the page numbers and headers on these pages."
 
-**Long complex tasks - too large for a single LLM context. Use todo mode:**
+**Long complex jobs - too large for a single LLM context. Use todo mode:**
 
-Requires a `./todo.md` plan file instead of a typed query, and runs immediately.
+Split into tasks in a `./todo.md` plan instead of a typed query; runs immediately.
 
-Example tasks:
+Example jobs:
 - "Refactor this entire legacy codebase, writing unit tests for every module."
 - "Crawl the docs of a web framework and generate a migration guide for v2 to v3."
 - "Design a DB schema, write backend APIs, build frontend, and verify end-to-end."
