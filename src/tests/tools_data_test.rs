@@ -225,6 +225,60 @@ fn test_sanitize_leading_comment() {
 }
 
 // ---------------------------------------------------------------------------
+// Unit tests — DB error detail truncation (改善 4a: head-cap, DB-independent)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_truncate_error_body_short_unchanged() {
+    let body = "No field named computername";
+    assert_eq!(truncate_error_body(body), body);
+}
+
+#[test]
+fn test_truncate_error_body_exactly_at_cap_unchanged() {
+    let body = "x".repeat(DB_ERROR_DETAIL_MAX_CHARS);
+    assert_eq!(truncate_error_body(&body), body);
+}
+
+#[test]
+fn test_truncate_error_body_long_caps_head_keeps_cause() {
+    // Tail noise is trimmed; the head (cause) survives.
+    let body = format!("CAUSE-LINE {}\n{}", "x".repeat(30), "y".repeat(2000));
+    let out = truncate_error_body(&body);
+    let kept: String = out
+        .split("[DB_TRUNCATED]")
+        .next()
+        .unwrap()
+        .trim_end()
+        .to_string();
+    assert!(kept.starts_with("CAUSE-LINE "));
+    assert_eq!(kept.chars().count(), DB_ERROR_DETAIL_MAX_CHARS);
+    assert!(out.contains("[DB_TRUNCATED] Error detail truncated at"));
+}
+
+#[test]
+fn test_truncate_error_body_multibyte_safe() {
+    // The cap must not split a multi-byte char.
+    let body = format!("あ{}", "い".repeat(1000));
+    let out = truncate_error_body(&body);
+    let head: &str = out.lines().next().unwrap();
+    assert_eq!(head.chars().count(), DB_ERROR_DETAIL_MAX_CHARS);
+    assert!(head.starts_with('あ'));
+    assert!(head.ends_with('い'));
+}
+
+#[test]
+fn test_truncate_error_body_notice_passive() {
+    // Only states truncation + front kept: no success wording, no next-action push.
+    let body = format!("head\n{}", "z".repeat(1000));
+    let out = truncate_error_body(&body);
+    assert!(out.contains("(front kept)"));
+    assert!(!out.contains("Use tighter WHERE filters"));
+    assert!(!out.contains("data_schema"));
+    assert!(!out.contains("fix the query"));
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests — local GreptimeDB (no auth) at localhost:4000/v1/sql
 // ---------------------------------------------------------------------------
 

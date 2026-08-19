@@ -282,21 +282,21 @@ async fn check_http_response(response: reqwest::Response, db_url: &str) -> Resul
         ),
         400 => bail!(
             "[DB_SYNTAX_ERROR] Query syntax error from database: {}. Check your SQL syntax and try again.",
-            body.trim()
+            truncate_error_body(body.trim())
         ),
         404 => bail!(
             "[DB_EXEC_ERROR] Resource not found: {}. Verify table/column names exist (use data_schema to check).",
-            body.trim()
+            truncate_error_body(body.trim())
         ),
         500 => bail!(
             "[DB_EXEC_ERROR] Execution error: {}. Verify table/column names exist (use data_schema to check).",
-            body.trim()
+            truncate_error_body(body.trim())
         ),
         _ => bail!(
             "[DB_NETWORK_ERROR] Cannot reach database at {}. HTTP {}: {}. Verify the database is running and --db-url is correct.",
             db_url,
             status,
-            body.trim()
+            truncate_error_body(body.trim())
         ),
     }
 }
@@ -318,6 +318,25 @@ fn truncate_body(body: &str, max_bytes: usize, max_bytes_orig: usize) -> String 
     format!(
         "{}\n[DB_TRUNCATED] Result truncated at {} bytes. Use tighter WHERE filters, GROUP BY aggregation, or smaller LIMIT to retrieve complete data.",
         truncated, max_bytes_orig
+    )
+}
+
+/// Max chars of a DB error detail kept in an error message. Bodies can be
+/// huge (e.g. GreptimeDB lists every valid column); the cause is at the head,
+/// so a head cap keeps the useful part for any DB.
+const DB_ERROR_DETAIL_MAX_CHARS: usize = 500;
+
+/// Head-cap a DB error detail (char-boundary safe) with a truncation notice
+/// distinct from the success-oriented one in `truncate_body`.
+fn truncate_error_body(body: &str) -> String {
+    let chars: Vec<char> = body.chars().collect();
+    if chars.len() <= DB_ERROR_DETAIL_MAX_CHARS {
+        return body.to_string();
+    }
+    let head: String = chars[..DB_ERROR_DETAIL_MAX_CHARS].iter().collect();
+    format!(
+        "{}\n[DB_TRUNCATED] Error detail truncated at {} characters (front kept).",
+        head, DB_ERROR_DETAIL_MAX_CHARS
     )
 }
 
