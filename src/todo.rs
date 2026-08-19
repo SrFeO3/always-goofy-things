@@ -7,24 +7,21 @@
 //!
 //! ## Mode 1 (Plan-Exec-Static)
 //!
-//! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
+//! 1. [User Input]     : Read the task plan from todo.md.
 //! 2. [Todo Loop]      : Recursive cycle through unchecked tasks, one per fresh context.
-//!    - Parse State    : Identify the next unchecked task.
-//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task from the user message only.
-//!    - Store State    : The application updates todo.md (mark [x]) and resets the LLM context.
+//!    - Parse State    : Identify the next unchecked task from todo.md.
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task.
+//!    - Store State    : The application updates todo.md (mark [x]) and artifacts/handover.md and resets the LLM context.
 //! 3. [Final Answer]   : Notify the user that all tasks are complete.
 //!
 //! ## Mode 2 (Plan-Exec-Dynamic)
 //!
-//! 1. [User Input]     : Read the task plan from ./todo.md (error if missing).
+//! 1. [User Input]     : Read the task plan from todo.md.
 //! 2. [Todo Loop]      : Recursive cycle: replan, then execute one task per fresh context.
 //!    - Parse State    : Read todo.md to get current tasks and progress.
-//!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback).
-//!      Inspects artifacts/, then updates todo.md ([x] marks,
-//!      task changes, completion status).
-//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task from the user message only.
-//!    - Store State    : The task LLM updates todo.md via write_file; the application
-//!      resets the LLM context.
+//!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback); inspects todo.md, handover.md, artifacts/, then updates todo.md, handover.md.
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task and updates todo.md.
+//!    - Store State    : The application updates artifacts/handover.md and resets the LLM context.
 //! 3. [Final Answer]   : Present the final answer to the user.
 
 use anyhow::{Context, Result};
@@ -242,14 +239,67 @@ fn append_handover(entry: &str) -> Result<()> {
     Ok(())
 }
 
-/// Collapse a report to a single line (max 300 chars) for handover logging.
+/// Max chars of a task's handover report (prompt limit + truncation fallback).
+pub(crate) const HANDOVER_REPORT_MAX_CHARS: usize = 300;
+
+/// Session-context budget for the condensing retry (heuristic; no token counting).
+const LLM_GUARD_CONTEXT_CHARS: usize = 120_000;
+
+/// Collapse a report to a single line (max `HANDOVER_REPORT_MAX_CHARS`) for
+/// handover logging.
 fn one_line_report(raw: &str) -> String {
-    let note: String = raw.replace('\n', " ").chars().take(300).collect();
-    if raw.chars().count() > 300 {
+    let note: String = raw
+        .replace('\n', " ")
+        .chars()
+        .take(HANDOVER_REPORT_MAX_CHARS)
+        .collect();
+    if raw.chars().count() > HANDOVER_REPORT_MAX_CHARS {
         format!("{}...", note)
     } else {
         note
     }
+}
+
+/// llm_guard_: when a task's final Handover Report exceeds the limit, ask the
+/// LLM once to rewrite it concisely (skipped when the session is near its
+/// budget; falls back to one_line_report truncation on failure).
+async fn llm_guard_handover_report(
+    config: &startup::Config,
+    provider: LlmProvider,
+    settings: &mut Settings,
+    metrics: &mut Metrics,
+    task_session: &mut Session,
+) {
+    let ctx_chars: usize = task_session
+        .messages
+        .iter()
+        .map(|m| m.content.chars().count())
+        .sum();
+    let Some(last) = task_session.messages.last() else {
+        return;
+    };
+    if last.content.chars().count() <= HANDOVER_REPORT_MAX_CHARS
+        || ctx_chars >= LLM_GUARD_CONTEXT_CHARS
+    {
+        return;
+    }
+    let feedback = format!(
+        "Your Handover Report is too long ({} chars > {}). Rewrite it as ONE concise report within {} characters, keeping Status / Output / Findings / Next.",
+        last.content.chars().count(),
+        HANDOVER_REPORT_MAX_CHARS,
+        HANDOVER_REPORT_MAX_CHARS
+    );
+    // One retry at most; ignore errors (truncation fallback still applies).
+    let _ = run_reasoning_loop(
+        config,
+        provider,
+        task_session,
+        settings,
+        metrics,
+        feedback,
+        Vec::new(),
+    )
+    .await;
 }
 
 /// Check whether the plan is complete (Mode 2).
@@ -521,6 +571,8 @@ async fn run_todo_loop_mode1(
         .await?;
 
         if done {
+            // llm_guard_: condense an over-long handover report before logging.
+            llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
             let raw_note = task_session
                 .messages
                 .last()
@@ -724,6 +776,8 @@ async fn run_todo_loop_mode2(
         .await?;
 
         if done {
+            // llm_guard_: condense an over-long handover report before logging.
+            llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
             // Capture LLM's final message as the final answer
             if let Some(msg) = task_session.messages.last()
                 && !msg.content.trim().is_empty()

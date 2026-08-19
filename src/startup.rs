@@ -355,7 +355,7 @@ fn build_system_message(sections: Vec<String>) -> crate::model::Message {
 /// single task named in the user message.
 pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(
+    sections.push(format!(
         "## 4. Todo Context (Plan-Exec Task Loop)\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
@@ -366,9 +366,10 @@ pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message 
            - Output: <file paths created or updated, or \"none\">\n\
            - Findings: <facts you observed, in one or two sentences>\n\
            - Next: <what the next task should watch out for, or \"none\">\n\
-         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself."
-            .to_string(),
-    );
+         - Keep the entire report within {} characters.\n\
+         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
+        crate::todo::HANDOVER_REPORT_MAX_CHARS
+    ));
     build_system_message(sections)
 }
 
@@ -397,7 +398,7 @@ pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
 /// single task named in the user message and updates the plan on completion.
 pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(
+    sections.push(format!(
         "## 4. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
@@ -409,9 +410,10 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
            - Output: <file paths created or updated, or \"none\">\n\
            - Findings: <facts you observed, in one or two sentences>\n\
            - Next: <what the next task should watch out for, or \"none\">\n\
-         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself."
-            .to_string(),
-    );
+         - Keep the entire report within {} characters.\n\
+         Nothing else; do not add other sections. The application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
+        crate::todo::HANDOVER_REPORT_MAX_CHARS
+    ));
     build_system_message(sections)
 }
 
