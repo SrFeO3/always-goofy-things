@@ -206,3 +206,48 @@ fn todo_system_messages_mention_outputs_lines() {
         );
     }
 }
+
+#[test]
+fn system_message_mode2_uses_next_task_brief() {
+    let config = cfg(vec![]);
+    let replan = system_message_mode2_replan(&config);
+    assert!(
+        replan.content.contains("`./next-task.md`"),
+        "replan message must direct writing the per-task brief: {}",
+        replan.content
+    );
+    assert!(
+        replan.content.contains("Write, in this order:"),
+        "replan message must list its outputs in order: {}",
+        replan.content
+    );
+    assert!(
+        replan
+            .content
+            .contains("mark each one must-read or optional"),
+        "replan message must split the brief's files into must-read / optional: {}",
+        replan.content
+    );
+    let task = system_message_mode2_task_loop(&config);
+    assert!(
+        task.content.contains("`./next-task.md`"),
+        "task message must read the per-task brief: {}",
+        task.content
+    );
+    assert!(
+        task.content
+            .contains("explore `artifacts/` with list_directory"),
+        "task message must allow exploring artifacts/ when the brief is insufficient: {}",
+        task.content
+    );
+    assert!(
+        task.content.contains("marked must-read or optional"),
+        "task message must mention the must-read / optional markings: {}",
+        task.content
+    );
+    assert!(
+        !task.content.contains("Do NOT read `artifacts/handover.md`"),
+        "task message must not forbid reading handover.md outright: {}",
+        task.content
+    );
+}

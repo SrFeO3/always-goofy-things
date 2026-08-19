@@ -379,19 +379,24 @@ pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message 
 /// the tasks.
 pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(
+    sections.push(format!(
         "## 4. Todo Context (Plan-Exec-Dynamic Replan)\n\
-         - You are the task planner.\n\
-         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the notes and task reports from previous sessions.\n\
+         - You are the task planner. Do NOT execute the tasks; only update the plan.\n\
+         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the task reports and planner notes from previous sessions (each task report is followed by an `outputs:` line listing the artifact paths that task declared).\n\
          - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
-         - Mark completed tasks `[x]` (verify outputs in `artifacts/` with tools); add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
-         - A task entry in `artifacts/handover.md` may be followed by an `outputs:` line listing the artifact paths that task declared; verify those files exist in `artifacts/` with tools.\n\
-         - Write ALL notes, status, and reasoning to `artifacts/handover.md` in this order: Status / Progress / Decisions / Next (write or append freely).\n\
-         - Save the updated plan to `./todo.md` with write_file; text alone does not update the plan.\n\
-         - Do NOT execute the tasks; only update the plan.\n\
-         - Your final message is a short summary of the plan changes."
-            .to_string(),
-    );
+         - Mark completed tasks `[x]` (verify the files named in their `outputs:` lines exist in `artifacts/`), and add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
+         - Write, in this order:\n\
+           1. `./todo.md` - the updated plan; text alone does not update the plan.\n\
+           2. `./next-task.md` (write_file; overwrite it every time) - the brief for the IMMEDIATELY NEXT task: its scope, the files it must read (mark each one must-read or optional), the previous task's `outputs:`, and warnings.\n\
+         - Your final message must be your plan-update notes for the next planner session: anything it must know that does not fit in `./todo.md` or `./next-task.md`, in exactly this format:\n\
+           - Status: <overall state of the job>\n\
+           - Progress: <what the completed tasks achieved>\n\
+           - Decisions: <what you changed in the plan and why>\n\
+           - Next: <what happens next, or \"none\">\n\
+         - Keep the entire note within {} characters.\n\
+         Nothing else; do not add other sections. The application saves your note to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself.",
+        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
+    ));
     build_system_message(sections)
 }
 
@@ -402,12 +407,11 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
     sections.push(format!(
         "## 4. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
-         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
+         - Read `./todo.md` and `./next-task.md` FIRST with read_file; todo.md is the plan, next-task.md is the brief for your task: your scope, the files to read (marked must-read or optional), the previous task's `outputs:`, and warnings. If next-task.md is missing or the brief is insufficient, explore `artifacts/` with list_directory and read only the files your task needs.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
          - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
          - Check `artifacts/` for previous work; save your outputs there.\n\
-         - Handover entries may be followed by an `outputs:` line listing the artifact paths the previous task created; read the listed files with read_file when your task needs them.\n\
          - Your final message must be a Handover Report in exactly this format:\n\
            - Status: done / blocked\n\
            - Output: <file paths created or updated, or \"none\">\n\

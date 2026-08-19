@@ -18,9 +18,9 @@
 //!
 //! 1. [User Input]     : Read the task plan from todo.md.
 //! 2. [Todo Loop]      : Recursive cycle: replan, then execute one task per fresh context.
-//!    - Parse State    : Read todo.md to get current tasks and progress.
-//!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback); inspects todo.md, handover.md, artifacts/, then updates todo.md, handover.md.
-//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); runs the single task and updates todo.md.
+//!    - Parse State    : Read todo.md for the plan; the replan reads handover.md (task reports, in) and writes next-task.md (per-task brief, out).
+//!    - Replan Loop    : Fresh planner reasoning loop (LLM Call -> Tool Exec -> Feedback); inspects todo.md, handover.md and the latest artifacts/, then updates todo.md and rewrites next-task.md.
+//!    - Task Loop      : Fresh executor reasoning loop (LLM Call -> Tool Exec -> Feedback); reads todo.md + next-task.md, runs the single task and updates todo.md.
 //!    - Store State    : The application updates artifacts/handover.md and resets the LLM context.
 //! 3. [Final Answer]   : Read the Goal artifact (an `artifacts/...` path named in the Goal) and present it; fall back to the last task's report, then a completion notice.
 
@@ -194,13 +194,14 @@ fn seed_handover() -> Result<()> {
     append_handover(
         "# Handover Log\n\
          \n\
-         Notes for the next LLM session. Read this file together with ./todo.md at\n\
-         the start of every session. The application appends each task's final\n\
-         report here, in this format:\n\
+         Notes for the next LLM session(s). The replan planner (Mode 2) and every\n\
+         Mode 1 task session read this file together with ./todo.md first; Mode 2\n\
+         task sessions read ./next-task.md instead. The application appends every\n\
+         session's final report here, in this format:\n\
          - Task N: - Status: done / blocked - Output: <paths> - Findings: <facts> - Next: <pointer>\n\
+         - Planner: - Status: <state> - Progress: <progress> - Decisions: <decisions> - Next: <plan>\n\
          A task entry may be followed by an `outputs:` line listing the files the task declared in Output (never truncated).\n\
-         The replan planner writes its plan-update notes here, in this order:\n\
-         Status / Progress / Decisions / Next.\n",
+         Neither the executor nor the planner edits this file; the application writes it.\n",
     )
 }
 
@@ -287,9 +288,11 @@ fn check_completion(todo_md: &str) -> bool {
 /// Replan phase (Mode 2): the planner reviews and updates todo.md.
 ///
 /// Runs a full reasoning loop in a fresh planner session: the planner reads
-/// ./todo.md with read_file, may inspect artifacts/ with tools, and saves the
-/// updated plan to ./todo.md via write_file. Returns the todo.md content
-/// after the loop.
+/// ./todo.md with read_file, may inspect artifacts/ with tools, saves the
+/// updated plan to ./todo.md via write_file, and rewrites the per-task brief
+/// ./next-task.md. Its final message (the plan-update notes) is appended to
+/// artifacts/handover.md by the application, like a task report. Returns the
+/// todo.md content after the loop.
 async fn run_replan_loop(
     config: &startup::Config,
     settings: &mut Settings,
@@ -322,6 +325,22 @@ async fn run_replan_loop(
         Vec::new(),
     )
     .await?;
+
+    // The planner hands its plan-update notes over as its final message; the
+    // application appends them to artifacts/handover.md exactly like a task
+    // report (one line, capped at HANDOVER_REPORT_MAX_CHARS), so the planner
+    // never edits the handover log itself.
+    let note = replan_session
+        .messages
+        .last()
+        .map(|m| m.content.as_str())
+        .unwrap_or_default();
+    let note = if note.trim().is_empty() {
+        "Status: (no note)".to_string()
+    } else {
+        note.to_string()
+    };
+    append_handover(&build_handover_entry("- Planner", &note))?;
 
     // Push the planner's conversation to the GUI log for visibility.
     for msg in replan_session.messages.iter().skip(1) {
@@ -685,6 +704,7 @@ async fn run_todo_loop_mode2(
         } else {
             Some(app_feedback.join("\n"))
         };
+        let mut replan_failed = false;
         let updated = match run_replan_loop(
             config,
             settings,
@@ -703,13 +723,39 @@ async fn run_todo_loop_mode2(
             }
             Err(e) => {
                 println!(
-                    "\n{}[Replan] LLM error: {}. Continuing with current plan.{}",
+                    "\n{}[Replan] LLM error: {}. Retrying once.{}",
                     startup::C_RED,
                     e,
                     startup::RESET
                 );
-                // Continue with current todo.md
-                todo_content.clone()
+                match run_replan_loop(
+                    config,
+                    settings,
+                    provider,
+                    metrics,
+                    gui_log,
+                    user_input,
+                    feedback.as_deref(),
+                )
+                .await
+                {
+                    Ok(u) => {
+                        app_feedback.clear();
+                        u
+                    }
+                    Err(e2) => {
+                        println!(
+                            "\n{}[Replan] LLM error again: {}. Skipping task execution this round (next-task.md may be stale); the next replan will retry.{}",
+                            startup::C_RED,
+                            e2,
+                            startup::RESET
+                        );
+                        replan_failed = true;
+                        // Keep the current todo.md; no task runs with a
+                        // possibly-stale plan or missing per-task brief.
+                        todo_content.clone()
+                    }
+                }
             }
         };
 
@@ -758,6 +804,12 @@ async fn run_todo_loop_mode2(
             }
         } else {
             replan_stalls = 0;
+        }
+
+        if replan_failed {
+            // The planner failed twice: skip the task and loop back to the
+            // replan. The stall counter above bounds the retries.
+            continue;
         }
 
         // --- Execute next task ---
