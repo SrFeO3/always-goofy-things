@@ -23,22 +23,33 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "SrFeO3", "always-goofy-things")
 }
 
+/// Root directory for session + stats JSONL files.
+///
+/// The `SESSION_DATA_DIR` environment variable (companion of `SESSION_LABEL`)
+/// overrides the platform-specific application data directory (see README).
+/// Files land directly in this root.
+fn data_dir() -> Option<PathBuf> {
+    std::env::var_os("SESSION_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| project_dirs().map(|d| d.data_local_dir().to_path_buf()))
+}
+
 /// Path to the current session file (`last_session_{label}.jsonl`).
 fn last_session_path(label: &str) -> Option<PathBuf> {
-    let dirs = project_dirs()?;
-    Some(
-        dirs.data_local_dir()
-            .join(format!("last_session_{}.jsonl", label)),
-    )
+    data_dir().map(|dir| dir.join(format!("last_session_{}.jsonl", label)))
 }
 
 /// Path to the previous session file (`previous_session_{label}.jsonl`).
 fn previous_session_path(label: &str) -> Option<PathBuf> {
-    let dirs = project_dirs()?;
-    Some(
-        dirs.data_local_dir()
-            .join(format!("previous_session_{}.jsonl", label)),
-    )
+    data_dir().map(|dir| dir.join(format!("previous_session_{}.jsonl", label)))
+}
+
+/// Path to the resource-stats log (`llm_stats_{label}.jsonl`).
+///
+/// Separate from the conversation JSONL so a recoverable stats write can never
+/// corrupt (or be mistaken for) conversation history.
+fn stats_path(label: &str) -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join(format!("llm_stats_{}.jsonl", label)))
 }
 
 /// Called once at startup.
@@ -157,10 +168,11 @@ pub fn archive_todo_session(label: &str, task_index: usize) -> Result<()> {
         return Ok(());
     }
 
-    let dirs = project_dirs().ok_or_else(|| anyhow!("Could not determine project dirs"))?;
-    let archive_path = dirs
-        .data_local_dir()
-        .join(format!("todo_loop_{}_{}.jsonl", task_index, label));
+    // Resolve the archive path from the same data root as the session file so
+    // a `SESSION_DATA_DIR` override relocates everything together and the
+    // rename below never crosses filesystems (EXDEV).
+    let data_dir = data_dir().ok_or_else(|| anyhow!("Could not determine data dir"))?;
+    let archive_path = data_dir.join(format!("todo_loop_{}_{}.jsonl", task_index, label));
 
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -223,3 +235,60 @@ fn read_messages_from(path: &std::path::Path) -> Result<Vec<Message>> {
 
     Ok(messages)
 }
+
+/// Append one LLM call record as a JSON line to `llm_stats_{label}.jsonl`.
+pub fn save_call_record(label: &str, rec: &crate::llm_stats::LlmCallRecord) -> Result<()> {
+    let path = stats_path(label).ok_or_else(|| anyhow!("Could not determine stats path"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {:?}", parent))?;
+    }
+    let json = serde_json::to_string(rec).context("Failed to serialize LLM call record")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open stats file {:?}", path))?;
+    writeln!(file, "{}", json)
+        .with_context(|| format!("Failed to write to stats file {:?}", path))?;
+    Ok(())
+}
+
+/// Read all LLM call records from `llm_stats_{label}.jsonl`.
+///
+/// A missing file yields an empty list; malformed lines are skipped with a
+/// warning (matching `read_messages_from` behaviour).
+pub fn load_stats(label: &str) -> Result<Vec<crate::llm_stats::LlmCallRecord>> {
+    let Some(path) = stats_path(label) else {
+        return Ok(Vec::new());
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("Failed to open stats file {:?}", path))?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("Failed to read stats line {}", idx + 1))?;
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<crate::llm_stats::LlmCallRecord>(&line) {
+            Ok(rec) => records.push(rec),
+            Err(e) => {
+                eprintln!(
+                    "\x1b[93mWarning: Skipping malformed stats line {}: {} \x1b[0m",
+                    idx + 1,
+                    e
+                );
+            }
+        }
+    }
+    Ok(records)
+}
+
+#[cfg(test)]
+#[path = "tests/persistence_test.rs"]
+mod tests;

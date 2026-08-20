@@ -16,7 +16,8 @@ use crate::cmd::{self, SlashCmdResult};
 use crate::compat_provider::LlmProvider;
 use crate::gui_pretty;
 use crate::gui_pretty::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED};
-use crate::model::{LLM_STREAM_BUF, Message, Metrics, Session, Settings};
+use crate::llm_stats::{Metrics, fmt_tokens};
+use crate::model::{LLM_STREAM_BUF, Message, Session, Settings};
 use crate::persistence;
 use crate::reasoning::run_reasoning_loop;
 use crate::startup::{self, Config};
@@ -483,6 +484,16 @@ impl eframe::App for GuiApp {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("model: {}", self.current_model));
+                // LLM resource usage summary (token totals).
+                if let Some(m) = &self.metrics {
+                    let t = &m.totals;
+                    ui.label(format!(
+                        "In {} | Cache {} | Out {}",
+                        fmt_tokens(t.in_normal + t.in_cached + t.in_cache_write + t.in_audio),
+                        fmt_tokens(t.in_cached),
+                        fmt_tokens(t.out_normal),
+                    ));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.is_running && ui.button("\u{23f9} Stop").clicked() {
                         // Abort the worker task.
@@ -744,7 +755,12 @@ impl GuiApp {
                     return;
                 }
             };
-            if let Some(result) = cmd::try_handle_slash_command(&input, session, settings) {
+            if let Some(result) = cmd::try_handle_slash_command(
+                &input,
+                session,
+                settings,
+                self.metrics.as_ref().unwrap_or(&Metrics::default()),
+            ) {
                 match result {
                     SlashCmdResult::NoAdvance => {}
                     SlashCmdResult::RewoundTo(target) => session.turn = target + 1,
@@ -753,7 +769,13 @@ impl GuiApp {
                         label,
                     } => {
                         session.turn = target + 1;
-                        session.label = label;
+                        session.label = label.clone();
+                        // Rebuild resource stats for the restored label.
+                        if let Some(m) = self.metrics.as_mut()
+                            && let Ok(records) = persistence::load_stats(&label)
+                        {
+                            *m = Metrics::from_records(records);
+                        }
                     }
                     SlashCmdResult::Exit => std::process::exit(0),
                 }
@@ -886,6 +908,7 @@ impl GuiApp {
                     &mut session,
                     &mut settings,
                     &mut metrics,
+                    "main",
                     query_text,
                     attached_files,
                 )

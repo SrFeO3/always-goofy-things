@@ -111,16 +111,6 @@ impl Settings {
     }
 }
 
-/// Accumulated token metrics, derived from LLM responses.
-#[derive(Clone, Default)]
-pub(crate) struct Metrics {
-    pub(crate) in_normal: u64,
-    pub(crate) in_cached: u64,
-    pub(crate) out: u64,
-    pub(crate) reasoning: u64,
-    pub(crate) cache_ever_reported: bool,
-}
-
 /// Shared buffer for LLM streaming output.
 /// `.0` = reasoning, `.1` = content, `.2` = system, `.3` = user.
 /// Worker writes chunks via `push_str`; the GUI reads and clears them each frame.

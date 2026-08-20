@@ -11,12 +11,14 @@
 //! - `/model [name]`: Switch the active LLM on the fly.
 //! - `/config [k] [v]`: Show or change app configuration (no arg: list all, -s/--short for aliases)
 //! - `/restore [label]`: Restore the previous session, optionally for a specific label.
+//! - `/stats`: Show LLM resource usage (per-model and session totals).
 //! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
 use std::io::{self, Write};
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::llm_stats::{Metrics, ModelTotals, fmt_ms};
 use crate::model::{Message, Session, Settings};
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
@@ -47,6 +49,7 @@ pub fn try_handle_slash_command(
     input: &str,
     session: &mut Session,
     settings: &mut Settings,
+    metrics: &Metrics,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     // Termination aliases (bare or `/`-prefixed). Centralised here so the
@@ -99,6 +102,10 @@ pub fn try_handle_slash_command(
                 Some(SlashCmdResult::NoAdvance)
             }
         },
+        "/stats" => {
+            handle_stats(metrics, &session.label);
+            Some(SlashCmdResult::NoAdvance)
+        }
         _ => {
             eprintln!(
                 "\x1b[93mUnknown command: {}\x1b[0m Type /help for available commands.",
@@ -257,6 +264,38 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
 // /help
 // ---------------------------------------------------------------------------
 
+/// Handle `/stats`: print per-model and session-total resource usage.
+fn handle_stats(metrics: &Metrics, label: &str) {
+    println!("Session stats (label: {})", label);
+    if metrics.totals.calls == 0 {
+        println!("No LLM calls recorded yet.");
+        return;
+    }
+    let row = |t: &ModelTotals, name: &str| {
+        println!(
+            "{:<20}{:>7}{:>10}{:>10}{:>10}{:>10}{:>11}{:>10}",
+            name,
+            t.calls,
+            t.in_normal,
+            t.in_cached,
+            t.in_cache_write,
+            t.out_normal,
+            t.out_reasoning,
+            fmt_ms(t.llm_ms_total),
+        );
+    };
+    println!(
+        "{:<20}{:>7}{:>10}{:>10}{:>10}{:>10}{:>11}{:>10}",
+        "Model", "Calls", "In", "Cache", "CacheW", "Out", "Reasoning", "LLM time"
+    );
+    let mut models: Vec<(&String, &ModelTotals)> = metrics.by_model.iter().collect();
+    models.sort_by(|a, b| a.0.cmp(b.0));
+    for (model, t) in models {
+        row(t, model);
+    }
+    row(&metrics.totals, "total");
+}
+
 /// Print the help text.
 fn print_help() {
     println!(
@@ -269,6 +308,7 @@ fn print_help() {
    /model [name]    Switch the active LLM on the fly (no arg: show current)
    /config [k] [v]  Show or change app configuration (no arg: list all, -s for aliases)
    /restore [label] Restore the previous session (optionally specifying a label to switch to)
+   /stats           Show LLM resource usage (per-model and session totals)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
@@ -284,7 +324,8 @@ fn print_help() {
    \x1b[90m/rewind 1     - Discard everything after Turn 1 and continue from there\x1b[0m
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
    \x1b[90m/restore      - Restore the latest session for current label\x1b[0m
-   \x1b[90m/restore work - Restore the latest session for label 'work' and switch to it\x1b[0m"
+   \x1b[90m/restore work - Restore the latest session for label 'work' and switch to it\x1b[0m
+   \x1b[90m/stats        - Show LLM resource usage (per-model and session totals)\x1b[0m"
     );
 }
 

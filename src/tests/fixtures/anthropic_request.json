@@ -1,0 +1,1 @@
+{"max_tokens":100,"messages":[{"content":"Hello","role":"user"}],"model":"gpt-4o","stream":true,"system":"You are a helpful assistant.","tools":[{"description":"Read a file","input_schema":{"properties":{"path":{"type":"string"}},"type":"object"},"name":"read_file"}]}

@@ -28,7 +28,8 @@ use anyhow::{Context, Result};
 
 use crate::attach::AttachedFile;
 use crate::compat_provider::LlmProvider;
-use crate::model::{Message, Metrics, Session, Settings};
+use crate::llm_stats::Metrics;
+use crate::model::{Message, Session, Settings};
 use crate::persistence;
 use crate::reasoning::run_reasoning_loop;
 use crate::startup;
@@ -321,6 +322,7 @@ async fn run_replan_loop(
         &mut replan_session,
         settings,
         metrics,
+        "todo:replan",
         replan_prompt,
         Vec::new(),
     )
@@ -546,6 +548,7 @@ async fn run_todo_loop_mode1(
             &mut task_session,
             settings,
             metrics,
+            &format!("todo:task:{}", task.index),
             task_prompt(&task.description, user_input),
             attached_files.clone(),
         )
@@ -846,6 +849,7 @@ async fn run_todo_loop_mode2(
             &mut task_session,
             settings,
             metrics,
+            &format!("todo:task:{}", task_index),
             task_prompt(&task.description, user_input),
             attached_files.clone(),
         )

@@ -14,6 +14,7 @@ use crate::attach::AttachedFile;
 use crate::compat_provider::{self, LlmProvider, convert_anth_to_openai_format};
 use crate::compat_resilience;
 use crate::compat_resilience::{extract_msg_base, merge_tool_call_delta, post_process_tool_calls};
+use crate::llm_stats::{CallStatus, LlmCallRecord, LlmRequestInfo, Metrics, format_token_line};
 use crate::model::*;
 use crate::persistence;
 use crate::pretty;
@@ -21,6 +22,24 @@ use crate::startup;
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use crate::tools::{self, ToolRunDecision, ToolRunDecisionKind};
 use crate::tools_data;
+
+/// Record one call into `metrics` and append it to the per-label stats JSONL.
+/// Stats persistence is best effort so a slow/unwritable stats file never
+/// breaks the LLM conversation itself.
+fn record_and_save(
+    config: &startup::Config,
+    metrics: &mut Metrics,
+    rec: LlmCallRecord,
+    tool_call_count: usize,
+) {
+    metrics.record_call(rec.clone(), tool_call_count);
+    if let Err(e) = persistence::save_call_record(&config.session_label, &rec) {
+        eprintln!(
+            "\x1b[93m[stats] failed to save LLM call record: {}\x1b[0m",
+            e
+        );
+    }
+}
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
 ///
@@ -30,12 +49,14 @@ use crate::tools_data;
 /// Returns `Ok(true)` when the assistant emitted a final answer; `Ok(false)`
 /// when interrupted (Ctrl+C / connection error / empty-retry limit); `Err(_)`
 /// on persistence failure or batch-mode max-reasoning-turns exceeded.
+#[allow(clippy::too_many_arguments)] // `phase` tags main vs todo context for stats
 pub(crate) async fn run_reasoning_loop(
     config: &startup::Config,
     provider: LlmProvider,
     session: &mut Session,
     settings: &mut Settings,
     metrics: &mut Metrics,
+    phase: &str,
     user_input: String,
     attached_files: Vec<AttachedFile>,
 ) -> Result<bool> {
@@ -104,11 +125,26 @@ pub(crate) async fn run_reasoning_loop(
         let llm_future = call_llm(config, settings, provider, &session.messages);
         let ctrl_c_future = tokio::signal::ctrl_c();
 
-        let (assistant_msg, usage_opt) = tokio::select! {
+        let (assistant_msg, usage_opt, request_info) = tokio::select! {
            msg_result = llm_future => {
                match msg_result {
                    Ok(msg) => msg,
                    Err(e) => {
+                       // Count the failed call (HTTP / connection error).
+                       let rec = LlmCallRecord {
+                           timestamp: chrono::Utc::now(),
+                           model: settings.llm_model.clone(),
+                           provider,
+                           phase: phase.to_string(),
+                           usage: Usage::default(),
+                           latency_ms: llm_start.elapsed().as_millis(),
+                           ttft_ms: 0,
+                           request_bytes: 0,
+                           response_bytes: 0,
+                           retry_count: empty_response_count as u32,
+                           status: CallStatus::HttpError,
+                       };
+                       record_and_save(config, metrics, rec, 0);
                        println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
                        println!("Conversation history preserved. You can try again or rephrase.");
                        #[cfg(feature = "gui")]
@@ -131,7 +167,34 @@ pub(crate) async fn run_reasoning_loop(
         // empty responses (0 = unlimited retries).
         let has_content = !assistant_msg.content.trim().is_empty();
         let has_tools = assistant_msg.tool_calls.is_some();
-        if !has_content && !has_tools {
+        let empty = !has_content && !has_tools;
+
+        // --- Resource accounting: build + record the call ---
+        let tool_call_count = assistant_msg
+            .tool_calls
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let record = LlmCallRecord {
+            timestamp: chrono::Utc::now(),
+            model: settings.llm_model.clone(),
+            provider,
+            phase: phase.to_string(),
+            usage: usage_opt.clone().unwrap_or_default(),
+            latency_ms: request_info.latency_ms,
+            ttft_ms: request_info.ttft_ms,
+            request_bytes: request_info.request_bytes,
+            response_bytes: request_info.response_bytes,
+            retry_count: empty_response_count as u32,
+            status: if empty {
+                CallStatus::Empty
+            } else {
+                CallStatus::Ok
+            },
+        };
+        record_and_save(config, metrics, record, tool_call_count);
+
+        if empty {
             empty_response_count += 1;
             let limit = settings.max_reasoning_empty_responses;
             if limit > 0 && empty_response_count >= limit as usize {
@@ -186,66 +249,10 @@ pub(crate) async fn run_reasoning_loop(
         }
 
         // Accumulate and display statistics for each LLM call
-        fn fmt_tokens(n: u32) -> String {
-            format!("{:.1}K ({})", n as f64 / 1000.0, n)
-        }
-
         if let Some(usage) = &usage_opt {
-            // --- Input tokens: normal + cached ---
-            let (normal, cache_turn_str) = if let Some(details) = &usage.prompt_tokens_details {
-                metrics.cache_ever_reported = true;
-                let c = details.cached_tokens;
-                metrics.in_cached += c as u64;
-                (usage.prompt_tokens.saturating_sub(c), fmt_tokens(c))
-            } else {
-                (usage.prompt_tokens, "---".to_string())
-            };
-            metrics.in_normal += normal as u64;
-            metrics.out += usage.completion_tokens as u64;
-
-            // --- Output tokens: reasoning breakdown (OpenAI o1/o3/o4-mini) ---
-            let reasoning = usage
-                .completion_tokens_details
-                .as_ref()
-                .map(|d| d.reasoning_tokens)
-                .unwrap_or(0);
-            metrics.reasoning += reasoning as u64;
-
-            // Build display line
-            let cache_total_str = if metrics.cache_ever_reported {
-                fmt_tokens(metrics.in_cached as u32)
-            } else {
-                "---".to_string()
-            };
-
-            // Turn portion
-            let mut turn_part = format!(
-                "In {}, Cache {}, Out {}",
-                fmt_tokens(normal),
-                cache_turn_str,
-                fmt_tokens(usage.completion_tokens),
-            );
-            if reasoning > 0 {
-                turn_part.push_str(&format!(" (Reasoning {})", fmt_tokens(reasoning)));
-            }
-
-            // Total portion
-            let mut total_part = format!(
-                "In {}, Cache {}, Out {}",
-                fmt_tokens((metrics.in_normal + metrics.in_cached) as u32),
-                cache_total_str,
-                fmt_tokens(metrics.out as u32),
-            );
-            if metrics.reasoning > 0 {
-                total_part.push_str(&format!(
-                    " (Reasoning {})",
-                    fmt_tokens(metrics.reasoning as u32)
-                ));
-            }
-
             println!(
-                "\x1b[90m[Tokens] Turn: {} | Total: {}\x1b[0m",
-                turn_part, total_part
+                "\x1b[90m[Tokens] {}\x1b[0m",
+                format_token_line(usage, &metrics.totals)
             );
             println!();
         } else {
@@ -423,7 +430,7 @@ pub(crate) async fn call_llm(
     settings: &Settings,
     provider: LlmProvider,
     messages: &[Message],
-) -> Result<(Message, Option<Usage>)> {
+) -> Result<(Message, Option<Usage>, LlmRequestInfo)> {
     let client = reqwest::Client::new();
     let tools =
         tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n));
@@ -440,6 +447,7 @@ pub(crate) async fn call_llm(
     };
     let req_value = req.to_provider_json()?;
     let req_json = serde_json::to_string(&req_value)?;
+    let request_bytes = req_json.len();
 
     // Debug output based on verbose_level
     match settings.verbose_level {
@@ -517,6 +525,8 @@ pub(crate) async fn call_llm(
         };
     }
 
+    // Measure request-send to stream-completion latency.
+    let send_start = std::time::Instant::now();
     let res = request_builder.send().await?;
 
     if !res.status().is_success() {
@@ -553,6 +563,10 @@ pub(crate) async fn call_llm(
     let mut is_thinking = false;
     let mut usage_captured: Option<Usage> = None;
     let mut has_started_content = false;
+    // Time to first received chunk (measurement only; no behavior change).
+    let mut ttft_ms: Option<u128> = None;
+    // Raw bytes received across chunks (SSE overhead included).
+    let mut response_bytes: usize = 0;
     #[allow(unused_mut, unused_variables)]
     let mut anth_tool_index = 0;
     let mut used_nonstandard_format = false;
@@ -564,6 +578,10 @@ pub(crate) async fn call_llm(
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
+        if ttft_ms.is_none() {
+            ttft_ms = Some(send_start.elapsed().as_millis());
+        }
+        response_bytes += chunk.len();
         line_buf.extend_from_slice(&chunk);
 
         // Drain complete lines (ending with \n) from the buffer.
@@ -789,5 +807,19 @@ pub(crate) async fn call_llm(
 
     println!();
 
-    Ok((full_message, usage_captured))
+    let latency_ms = send_start.elapsed().as_millis();
+    Ok((
+        full_message,
+        usage_captured,
+        LlmRequestInfo {
+            latency_ms,
+            ttft_ms: ttft_ms.unwrap_or(0),
+            request_bytes,
+            response_bytes,
+        },
+    ))
 }
+
+#[cfg(test)]
+#[path = "tests/reasoning_test.rs"]
+mod tests;

@@ -4,7 +4,8 @@
 //! mechanically: replan feedback, condensing retries, or safer fallbacks.
 
 use crate::compat_provider::LlmProvider;
-use crate::model::{Metrics, Session, Settings};
+use crate::llm_stats::Metrics;
+use crate::model::{Session, Settings};
 use crate::reasoning::run_reasoning_loop;
 use crate::startup;
 
@@ -191,6 +192,7 @@ pub(crate) async fn llm_guard_handover_report(
         task_session,
         settings,
         metrics,
+        "todo:guard:condense",
         feedback,
         Vec::new(),
     )

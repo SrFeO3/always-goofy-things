@@ -37,6 +37,7 @@ mod file_pdf;
 mod gui;
 #[cfg(feature = "gui")]
 mod gui_pretty;
+mod llm_stats;
 mod model;
 mod persistence;
 mod pretty;
@@ -55,7 +56,8 @@ mod tools_process;
 use attach::AttachedFile;
 use compat_provider::LlmProvider;
 use file::FileType;
-use model::{Metrics, Session, Settings};
+use llm_stats::Metrics;
+use model::{Session, Settings};
 use reasoning::run_reasoning_loop;
 use startup::{C_CYAN, RESET};
 
@@ -156,7 +158,9 @@ async fn main() -> Result<()> {
             continue;
         }
         // Slash commands. cmd.rs mutates `session` / `settings` in place.
-        if let Some(result) = cmd::try_handle_slash_command(&input, &mut session, &mut settings) {
+        if let Some(result) =
+            cmd::try_handle_slash_command(&input, &mut session, &mut settings, &metrics)
+        {
             match result {
                 cmd::SlashCmdResult::NoAdvance => continue,
                 cmd::SlashCmdResult::RewoundTo(target) => {
@@ -169,7 +173,11 @@ async fn main() -> Result<()> {
                 } => {
                     // `last_sent_count` intentionally NOT reset (see Settings).
                     session.turn = target + 1;
-                    session.label = label;
+                    session.label = label.clone();
+                    // Rebuild resource stats for the restored label.
+                    if let Ok(records) = persistence::load_stats(&label) {
+                        metrics = Metrics::from_records(records);
+                    }
                 }
                 cmd::SlashCmdResult::Exit => break,
             }
@@ -281,6 +289,7 @@ async fn main() -> Result<()> {
                     &mut session,
                     &mut settings,
                     &mut metrics,
+                    "main",
                     query_text,
                     attached_files,
                 )
@@ -316,6 +325,7 @@ async fn main() -> Result<()> {
                 &session.label,
                 is_batch,
                 start_time,
+                &metrics,
             )?;
             if is_batch {
                 return Ok(());
@@ -334,6 +344,7 @@ fn handle_turn_output(
     label: &str,
     is_batch: bool,
     start_time: std::time::Instant,
+    metrics: &Metrics,
 ) -> Result<()> {
     // -o file output
     if let Some(output_path) = &config.output_file {
@@ -386,6 +397,24 @@ fn handle_turn_output(
             "\n{}Batch completed in {}, output -> {}, query: \"{}\"{}.",
             C_CYAN, time_str, out_label, q_preview, RESET
         );
+        // Token / LLM-time summary (resource accounting).
+        let t = &metrics.totals;
+        eprintln!(
+            "Tokens: In {}, Cache {}, CacheW {}, Out {}, Reasoning {}",
+            llm_stats::fmt_tokens(t.in_normal + t.in_cached + t.in_cache_write + t.in_audio),
+            llm_stats::fmt_tokens(t.in_cached),
+            llm_stats::fmt_tokens(t.in_cache_write),
+            llm_stats::fmt_tokens(t.out_normal),
+            llm_stats::fmt_tokens(t.out_reasoning),
+        );
+        let llm_secs = t.llm_ms_total as f64 / 1000.0;
+        let wall_secs = secs;
+        let pct = if wall_secs > 0.0 {
+            100.0 * llm_secs / wall_secs
+        } else {
+            0.0
+        };
+        eprintln!("LLM time: {:.1}s ({:.1}% of wall)", llm_secs, pct);
     }
     Ok(())
 }

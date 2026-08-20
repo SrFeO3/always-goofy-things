@@ -165,3 +165,114 @@ fn test_openai_passes_non_document_blocks_unchanged() {
     assert_eq!(blocks[1]["type"], "image_url");
     assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,ABC");
 }
+
+// ------------------------------------------------------------------
+// Golden request-payload snapshots + measurement-junk guards
+// ------------------------------------------------------------------
+//
+// These tests pin the provider request payloads byte-for-byte so that the
+// resource-accounting feature can never change what is sent to the LLM (or
+// leak measurement keys into it). `include_usage` in the OpenAI payload is a
+// pre-existing request stream option, not measurement data.
+
+/// Deterministic request used by the golden / no-junk tests.
+fn sample_request(provider: LlmProvider) -> ChatRequest {
+    let messages = vec![
+        Message {
+            role: "system".to_string(),
+            content: "You are a helpful assistant.".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            ..Default::default()
+        },
+    ];
+    let tools = vec![json!({
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }
+        }
+    })];
+    ChatRequest {
+        provider,
+        model: "gpt-4o".to_string(),
+        max_output_tokens: 100,
+        tools,
+        stream: true,
+        messages,
+        tool_result_format: ToolResultFormat::JsonString,
+    }
+}
+
+fn request_json(provider: LlmProvider) -> String {
+    serde_json::to_string(&sample_request(provider).to_provider_json().unwrap()).unwrap()
+}
+
+/// Golden snapshots: provider payloads must match the fixtures byte-for-byte.
+#[test]
+fn test_golden_provider_payloads() {
+    assert_eq!(
+        request_json(LlmProvider::OpenAi),
+        include_str!("fixtures/openai_request.json").trim(),
+        "golden mismatch for OpenAi"
+    );
+    assert_eq!(
+        request_json(LlmProvider::Ollama),
+        include_str!("fixtures/ollama_request.json").trim(),
+        "golden mismatch for Ollama"
+    );
+    assert_eq!(
+        request_json(LlmProvider::Anthropic),
+        include_str!("fixtures/anthropic_request.json").trim(),
+        "golden mismatch for Anthropic"
+    );
+}
+
+/// The request payload must never carry resource-accounting keys, and the
+/// conversation `messages` array must not carry a `usage`/`metrics` key.
+#[test]
+fn test_request_payload_has_no_measurement_junk() {
+    for provider in [
+        LlmProvider::OpenAi,
+        LlmProvider::Ollama,
+        LlmProvider::Anthropic,
+    ] {
+        let val = sample_request(provider).to_provider_json().unwrap();
+        let text = serde_json::to_string(&val).unwrap();
+        for banned in [
+            "metrics",
+            "latency_ms",
+            "request_bytes",
+            "response_bytes",
+            "ttft_ms",
+            "retry_count",
+            "llm_stats",
+            "phase",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "{:?} payload must not contain '{}': {}",
+                provider,
+                banned,
+                text
+            );
+        }
+        if let Some(msgs) = val.get("messages").and_then(|v| v.as_array()) {
+            for m in msgs {
+                assert!(
+                    m.get("usage").is_none() && m.get("metrics").is_none(),
+                    "{:?} message must not carry measurement keys: {}",
+                    provider,
+                    m
+                );
+            }
+        }
+    }
+}
