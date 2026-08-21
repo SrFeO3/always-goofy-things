@@ -330,8 +330,8 @@ async fn run_replan_loop(
 
     // The planner hands its plan-update notes over as its final message; the
     // application appends them to artifacts/handover.md exactly like a task
-    // report (one line, capped at HANDOVER_REPORT_MAX_CHARS), so the planner
-    // never edits the handover log itself.
+    // report (one line, capped at HANDOVER_REPORT_FUZZY_MAX_CHARS), so the
+    // planner never edits the handover log itself.
     let note = replan_session
         .messages
         .last()

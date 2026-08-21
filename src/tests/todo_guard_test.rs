@@ -29,8 +29,17 @@ fn test_one_line_report_truncates() {
     let long = "a".repeat(400);
     let report = one_line_report(&format!("line1\nline2 {}", long));
     assert!(report.ends_with("..."));
-    assert_eq!(report.chars().count(), 303); // 300 chars + "..."
+    // Truncation happens at the fuzzy limit (360), not the advertised 300.
+    assert_eq!(report.chars().count(), 363); // 360 chars + "..."
     assert!(!report.contains('\n'));
+}
+
+#[test]
+fn test_one_line_report_keeps_report_within_fuzzy_limit() {
+    // At the fuzzy limit (over the advertised 300): kept whole.
+    let report = one_line_report(&"a".repeat(HANDOVER_REPORT_FUZZY_MAX_CHARS));
+    assert_eq!(report.chars().count(), HANDOVER_REPORT_FUZZY_MAX_CHARS);
+    assert!(!report.ends_with("..."));
 }
 
 #[test]

@@ -9,21 +9,25 @@ use crate::model::{Session, Settings};
 use crate::reasoning::run_reasoning_loop;
 use crate::startup;
 
-/// Max chars of a task's handover report (prompt limit + truncation fallback).
+/// Advertised handover-report char limit shown in the system prompt.
 pub(crate) const HANDOVER_REPORT_MAX_CHARS: usize = 300;
+
+/// Enforcement limit (chars): 20% above the advertised limit to tolerate the
+/// LLM's unreliable character counting.
+pub(crate) const HANDOVER_REPORT_FUZZY_MAX_CHARS: usize = HANDOVER_REPORT_MAX_CHARS * 6 / 5; // 300 * 1.2 = 360
 
 /// Session-context budget (in chars) for the condensing retry.
 const LLM_GUARD_CONTEXT_CHARS: usize = 120_000;
 
-/// Collapse a report to a single line (max `HANDOVER_REPORT_MAX_CHARS`) for
-/// handover logging.
+/// Collapse a report to a single line (max `HANDOVER_REPORT_FUZZY_MAX_CHARS`)
+/// for handover logging.
 fn one_line_report(raw: &str) -> String {
     let note: String = raw
         .replace('\n', " ")
         .chars()
-        .take(HANDOVER_REPORT_MAX_CHARS)
+        .take(HANDOVER_REPORT_FUZZY_MAX_CHARS)
         .collect();
-    if raw.chars().count() > HANDOVER_REPORT_MAX_CHARS {
+    if raw.chars().count() > HANDOVER_REPORT_FUZZY_MAX_CHARS {
         format!("{}...", note)
     } else {
         note
@@ -174,7 +178,7 @@ pub(crate) async fn llm_guard_handover_report(
     let Some(last) = task_session.messages.last() else {
         return;
     };
-    if last.content.chars().count() <= HANDOVER_REPORT_MAX_CHARS
+    if last.content.chars().count() <= HANDOVER_REPORT_FUZZY_MAX_CHARS
         || ctx_chars >= LLM_GUARD_CONTEXT_CHARS
     {
         return;
