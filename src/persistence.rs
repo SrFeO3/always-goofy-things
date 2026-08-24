@@ -177,6 +177,18 @@ pub fn archive_todo_session(label: &str, task_index: usize) -> Result<()> {
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Move a pre-existing archive to a timestamped name instead of
+    // overwriting the earlier run's history.
+    if archive_path.exists() {
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let backup = data_dir.join(format!("todo_loop_{}_{}_{}.jsonl", task_index, label, ts));
+        std::fs::rename(&archive_path, &backup).with_context(|| {
+            format!(
+                "Failed to move existing archive {:?} -> {:?}",
+                archive_path, backup
+            )
+        })?;
+    }
     std::fs::rename(&last_path, &archive_path).with_context(|| {
         format!(
             "Failed to archive session {:?} -> {:?}",

@@ -914,7 +914,7 @@ impl GuiApp {
                 )
                 .await
                 {
-                    Ok(d) => (d, None),
+                    Ok(end_reason) => (end_reason.is_completed(), None),
                     Err(e) => (false, Some(e.to_string())),
                 }
             };

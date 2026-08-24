@@ -128,6 +128,23 @@ fn test_append_handover_dedup_same_task_marker() {
     );
 }
 
+/// A resumed run appends its task report with the todo.md number (here 6);
+/// it must not be deduped away by an earlier `- Task 1:` entry.
+#[test]
+fn test_append_handover_resume_numbering_does_not_collide() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = HandoverBackup::capture();
+
+    let r1 = append_handover("- Task 1: earlier run report");
+    let r2 = append_handover("- Task 6: resumed run report");
+    assert!(r1.is_ok() && r2.is_ok());
+    let content = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap();
+    assert_eq!(
+        content,
+        "- Task 1: earlier run report\n- Task 6: resumed run report\n"
+    );
+}
+
 #[test]
 fn test_seed_handover_creates_once() {
     let _guard = HANDOVER_TEST_LOCK.lock().unwrap();

@@ -195,6 +195,63 @@ fn test_stats_do_not_mix_into_conversation() {
     assert!(restore_previous_session(label).unwrap().is_empty());
 }
 
+/// Re-archiving a task keeps the previous archive under a timestamped name.
+#[test]
+fn test_todo_archive_preserves_existing_archive() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "archive_keep";
+    let task_index = 3usize;
+    let data_dir = std::env::var("SESSION_DATA_DIR").unwrap();
+    let archive =
+        std::path::Path::new(&data_dir).join(format!("todo_loop_{}_{}.jsonl", task_index, label));
+
+    // Archive, then re-archive the same task (resume).
+    save_message(
+        label,
+        &Message {
+            role: "user".to_string(),
+            content: "first".to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive_todo_session(label, task_index).unwrap();
+    assert!(archive.exists(), "first archive must exist");
+
+    save_message(
+        label,
+        &Message {
+            role: "user".to_string(),
+            content: "second".to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    archive_todo_session(label, task_index).unwrap();
+
+    // The canonical archive holds the new session; the old one is kept
+    // under a timestamped name.
+    let archived = read_messages_from(&archive).unwrap();
+    assert!(
+        archived.iter().any(|m| m.content == "second"),
+        "canonical archive must hold the newest session"
+    );
+    let backups: Vec<_> = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with(&format!("todo_loop_{}_{}_", task_index, label))
+        })
+        .collect();
+    assert_eq!(
+        backups.len(),
+        1,
+        "previous archive must be preserved with a timestamp suffix"
+    );
+}
+
 /// Todo archives must land in the same data root as the session files, so a
 /// `SESSION_DATA_DIR` override relocates everything together and `rename` never
 /// crosses filesystems.

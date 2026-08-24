@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
         // --- Mode-aware execution ---
         let (done, final_answer) = match config.todo_mode {
             0 => {
-                let d = run_reasoning_loop(
+                let end_reason = run_reasoning_loop(
                     &config,
                     provider,
                     &mut session,
@@ -294,15 +294,16 @@ async fn main() -> Result<()> {
                     attached_files,
                 )
                 .await?;
-                let answer = if d {
+                let done = end_reason.is_completed();
+                let answer = if done {
                     session.messages.last().unwrap().content.clone()
                 } else {
                     String::new()
                 };
-                (d, answer)
+                (done, answer)
             }
             1 | 2 => {
-                let summary = todo::run_todo_loop(
+                match todo::run_todo_loop(
                     &config,
                     provider,
                     &mut settings,
@@ -311,8 +312,30 @@ async fn main() -> Result<()> {
                     query_text,
                     attached_files,
                 )
-                .await?;
-                (true, summary)
+                .await
+                {
+                    Ok(summary) => (true, summary),
+                    Err(e) => {
+                        // Leave an error note in -o before exiting non-zero.
+                        // Write failure is warned about; the original error
+                        // propagates.
+                        if let Some(output_path) = &config.output_file {
+                            let note = format!("\n\n[todo] Error: {}\n", e);
+                            let written = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(output_path)
+                                .and_then(|mut f| f.write_all(note.as_bytes()));
+                            if let Err(we) = written {
+                                eprintln!(
+                                    "Failed to write completion-unconfirmed note to '{}': {}",
+                                    output_path, we
+                                );
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             }
             _ => unreachable!(),
         };

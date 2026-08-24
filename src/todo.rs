@@ -24,14 +24,14 @@
 //!    - Store State    : The application updates artifacts/handover.md and resets the LLM context.
 //! 3. [Final Answer]   : Read the Goal artifact (an `artifacts/...` path named in the Goal) and present it; fall back to the last task's report, then a completion notice.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::attach::AttachedFile;
 use crate::compat_provider::LlmProvider;
 use crate::llm_stats::Metrics;
 use crate::model::{Message, Session, Settings};
 use crate::persistence;
-use crate::reasoning::run_reasoning_loop;
+use crate::reasoning::{EndReason, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
     build_handover_entry, llm_guard_declared_outputs, llm_guard_final_answer,
@@ -286,14 +286,34 @@ fn check_completion(todo_md: &str) -> bool {
     !has_status_section || status_completed
 }
 
+/// How one replan (Mode 2) ended.
+#[derive(Debug)]
+enum ReplanOutcome {
+    /// Replan succeeded; carries the todo.md content read back from disk.
+    Updated(String),
+    /// User pressed Ctrl+C during the replan (no retry, no handover append).
+    Interrupted,
+}
+
+/// Backoff delays (seconds) between consecutive replan failures, capped.
+const REPLAN_BACKOFF_SECS: [u64; 5] = [10, 30, 60, 120, 300];
+
+/// Backoff wait after `consecutive_failures` failed replan attempts.
+fn replan_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let idx = (consecutive_failures as usize)
+        .saturating_sub(1)
+        .min(REPLAN_BACKOFF_SECS.len() - 1);
+    std::time::Duration::from_secs(REPLAN_BACKOFF_SECS[idx])
+}
+
 /// Replan phase (Mode 2): the planner reviews and updates todo.md.
 ///
 /// Runs a full reasoning loop in a fresh planner session: the planner reads
 /// ./todo.md with read_file, may inspect artifacts/ with tools, saves the
 /// updated plan to ./todo.md via write_file, and rewrites the per-task brief
 /// ./next-task.md. Its final message (the plan-update notes) is appended to
-/// artifacts/handover.md by the application, like a task report. Returns the
-/// todo.md content after the loop.
+/// artifacts/handover.md by the application, like a task report. Returns
+/// `ReplanOutcome::Updated` with the todo.md content after the loop.
 async fn run_replan_loop(
     config: &startup::Config,
     settings: &mut Settings,
@@ -302,7 +322,7 @@ async fn run_replan_loop(
     gui_log: &mut Session,
     user_input: &str,
     app_feedback: Option<&str>,
-) -> Result<String> {
+) -> Result<ReplanOutcome> {
     let q = user_input.trim();
     let mut sections =
         vec!["Review and update `./todo.md` per the system instructions.".to_string()];
@@ -315,8 +335,11 @@ async fn run_replan_loop(
     let replan_prompt = sections.join("\n\n");
 
     let system_msg = startup::system_message_mode2_replan(config);
-    let mut replan_session = Session::new(format!("{}_replan", config.session_label), system_msg);
-    run_reasoning_loop(
+    let replan_label = format!("{}_replan", config.session_label);
+    let mut replan_session = Session::new(replan_label.clone(), system_msg);
+    // Move a leftover session file from an earlier replan/run aside.
+    persistence::init_session(&replan_label)?;
+    let end_reason = run_reasoning_loop(
         config,
         provider,
         &mut replan_session,
@@ -327,6 +350,21 @@ async fn run_replan_loop(
         Vec::new(),
     )
     .await?;
+    match end_reason {
+        EndReason::Completed => {}
+        EndReason::Interrupted => return Ok(ReplanOutcome::Interrupted),
+        EndReason::LlmError => {
+            return Err(anyhow!("replan failed: LLM connection error"));
+        }
+        EndReason::EmptyLimit => {
+            return Err(anyhow!(
+                "replan failed: empty LLM responses reached the limit"
+            ));
+        }
+        EndReason::MaxTurns => {
+            return Err(anyhow!("replan failed: max reasoning turns reached"));
+        }
+    }
 
     // The planner hands its plan-update notes over as its final message; the
     // application appends them to artifacts/handover.md exactly like a task
@@ -350,13 +388,18 @@ async fn run_replan_loop(
     }
 
     // The planner updates ./todo.md via write_file during the loop; read it back.
-    std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md after replan")
+    let todo_content =
+        std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md after replan")?;
+    Ok(ReplanOutcome::Updated(todo_content))
 }
 
 /// Completion gate for Mode 2: when all tasks are `[x]`, run ONE final replan
 /// so the planner can add tasks if the Goal is not yet achieved (task-adding
 /// continuation pattern), then re-check. Returns `true` when the plan is
 /// still complete after that final replan.
+///
+/// A failed final replan propagates `Err` (completion unconfirmed, exit 1);
+/// a Ctrl+C stops with exit 0 but prints "completion NOT confirmed".
 async fn final_replan_confirms_completion(
     config: &startup::Config,
     settings: &mut Settings,
@@ -376,7 +419,9 @@ async fn final_replan_confirms_completion(
         gui_log,
         "--- [Replan] (final: all tasks done - planner may add tasks) ---",
     );
-    match run_replan_loop(
+
+    // One backoff retry before treating the completion as unconfirmed.
+    let first = run_replan_loop(
         config,
         settings,
         provider,
@@ -385,17 +430,54 @@ async fn final_replan_confirms_completion(
         user_input,
         app_feedback,
     )
-    .await
-    {
-        Ok(updated) => Ok(check_completion(&updated)),
+    .await;
+    let replan_outcome = match first {
+        Ok(replan_outcome) => replan_outcome,
         Err(e) => {
+            let wait = replan_backoff(1);
             println!(
-                "\n{}[Replan] LLM error: {}. Finishing with the current plan.{}",
+                "\n{}[Replan] (final) LLM error: {}. Retrying once (backoff {}s).{}",
                 startup::C_RED,
                 e,
+                wait.as_secs(),
                 startup::RESET
             );
-            // The plan on disk is all-`[x]`; finish without another replan.
+            tokio::time::sleep(wait).await;
+            match run_replan_loop(
+                config,
+                settings,
+                provider,
+                metrics,
+                gui_log,
+                user_input,
+                app_feedback,
+            )
+            .await
+            {
+                Ok(replan_outcome) => replan_outcome,
+                Err(e2) => {
+                    println!(
+                        "\n{}[Replan] (final) LLM error: {}. Completion could not be confirmed. todo.md is all-[x]; run again to confirm.{}",
+                        startup::C_RED,
+                        e2,
+                        startup::RESET
+                    );
+                    return Err(e2);
+                }
+            }
+        }
+    };
+
+    match replan_outcome {
+        ReplanOutcome::Updated(todo) => Ok(check_completion(&todo)),
+        ReplanOutcome::Interrupted => {
+            // Ctrl+C: stop with exit 0 but state that completion was NOT
+            // confirmed.
+            println!(
+                "\n{}[Replan] (final) Interrupted by user. Completion was NOT confirmed; todo.md is all-[x]. Run again to confirm.{}",
+                startup::C_YELLOW,
+                startup::RESET
+            );
             Ok(true)
         }
     }
@@ -541,8 +623,10 @@ async fn run_todo_loop_mode1(
 
         let task_label = format!("{}_task{}", config.session_label, task.index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
+        // Move a leftover session file from an earlier interrupted run aside.
+        persistence::init_session(&task_label)?;
 
-        let done = run_reasoning_loop(
+        let end_reason = run_reasoning_loop(
             config,
             provider,
             &mut task_session,
@@ -554,7 +638,7 @@ async fn run_todo_loop_mode1(
         )
         .await?;
 
-        if done {
+        if end_reason.is_completed() {
             // llm_guard_: condense an over-long handover report before logging.
             llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
             let raw_note = task_session
@@ -616,12 +700,34 @@ async fn run_todo_loop_mode1(
 
             completed += 1;
         } else {
-            println!(
-                "\n{}--- [Interrupted] Task {} was not completed. Run again to resume. ---{}",
-                startup::C_YELLOW,
-                task.description,
-                startup::RESET
-            );
+            // Distinguish Ctrl+C from LLM failure / limits.
+            match end_reason {
+                EndReason::LlmError => {
+                    println!(
+                        "\n{}--- [LLM Error] Task {} could not run (LLM connection error). Run again after recovery. ---{}",
+                        startup::C_YELLOW,
+                        task.description,
+                        startup::RESET
+                    );
+                }
+                EndReason::Interrupted => {
+                    println!(
+                        "\n{}--- [Interrupted] Task {} was not completed. Run again to resume. ---{}",
+                        startup::C_YELLOW,
+                        task.description,
+                        startup::RESET
+                    );
+                }
+                EndReason::EmptyLimit | EndReason::MaxTurns => {
+                    println!(
+                        "\n{}--- [Stopped] Task {} was not completed (limit reached). ---{}",
+                        startup::C_YELLOW,
+                        task.description,
+                        startup::RESET
+                    );
+                }
+                EndReason::Completed => unreachable!("is_completed() was false"),
+            }
             break;
         }
     }
@@ -653,14 +759,14 @@ async fn run_todo_loop_mode2(
 ) -> Result<String> {
     let mut completed = 0usize;
     let mut replan_stalls = 0u32;
-    let mut task_index = 0usize;
+    // Consecutive failed replans; drives the backoff. Reset on success.
+    let mut replan_consecutive_failures: u32 = 0;
     let mut last_answer = String::new();
     // App-side reports (e.g. missing declared outputs) waiting to be shown
     // to the planner; cleared once a replan succeeds.
     let mut app_feedback: Vec<String> = Vec::new();
 
     loop {
-        task_index += 1;
         let todo_content =
             std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
 
@@ -698,6 +804,20 @@ async fn run_todo_loop_mode2(
         }
 
         // --- Replan ---
+        // Backoff before the next replan after a failed round (avoids a fast
+        // spin while the server is unreachable; the first site is the retry).
+        if replan_consecutive_failures > 0 {
+            replan_consecutive_failures += 1;
+            let wait = replan_backoff(replan_consecutive_failures);
+            println!(
+                "\n{}[Replan] server unreachable ({} consecutive failures); retrying in {}s...{}",
+                startup::C_YELLOW,
+                replan_consecutive_failures,
+                wait.as_secs(),
+                startup::RESET
+            );
+            tokio::time::sleep(wait).await;
+        }
         println!("{}--- [Replan] ---{}", startup::C_CYAN, startup::RESET);
         #[cfg(feature = "gui")]
         push_system_msg(gui_log, "--- [Replan] ---");
@@ -719,18 +839,32 @@ async fn run_todo_loop_mode2(
         )
         .await
         {
-            Ok(u) => {
+            Ok(ReplanOutcome::Updated(u)) => {
                 // The planner saw the pending app reports; drop them.
                 app_feedback.clear();
+                replan_consecutive_failures = 0;
                 u
             }
-            Err(e) => {
+            Ok(ReplanOutcome::Interrupted) => {
                 println!(
-                    "\n{}[Replan] LLM error: {}. Retrying once.{}",
-                    startup::C_RED,
-                    e,
+                    "\n{}--- [Interrupted] Replan stopped. Run again to resume. ---{}",
+                    startup::C_YELLOW,
                     startup::RESET
                 );
+                break;
+            }
+            Err(e) => {
+                // First backoff site: wait before the in-round retry.
+                replan_consecutive_failures += 1;
+                let wait = replan_backoff(replan_consecutive_failures);
+                println!(
+                    "\n{}[Replan] LLM error: {}. Retrying once (backoff {}s).{}",
+                    startup::C_RED,
+                    e,
+                    wait.as_secs(),
+                    startup::RESET
+                );
+                tokio::time::sleep(wait).await;
                 match run_replan_loop(
                     config,
                     settings,
@@ -742,9 +876,18 @@ async fn run_todo_loop_mode2(
                 )
                 .await
                 {
-                    Ok(u) => {
+                    Ok(ReplanOutcome::Updated(u)) => {
                         app_feedback.clear();
+                        replan_consecutive_failures = 0;
                         u
+                    }
+                    Ok(ReplanOutcome::Interrupted) => {
+                        println!(
+                            "\n{}--- [Interrupted] Replan stopped. Run again to resume. ---{}",
+                            startup::C_YELLOW,
+                            startup::RESET
+                        );
+                        break;
                     }
                     Err(e2) => {
                         println!(
@@ -826,7 +969,7 @@ async fn run_todo_loop_mode2(
         println!(
             "\n{}--- [Task {}] {} ---{}",
             startup::C_CYAN,
-            task_index,
+            task.index + 1,
             task.description,
             startup::RESET
         );
@@ -834,28 +977,31 @@ async fn run_todo_loop_mode2(
         #[cfg(feature = "gui")]
         push_system_msg(
             gui_log,
-            &format!("--- [Task {}] {} ---", task_index, task.description),
+            &format!("--- [Task {}] {} ---", task.index + 1, task.description),
         );
 
         // Mode 2 system message: plan read via read_file, updated via write_file
         let system_msg = startup::system_message_mode2_task_loop(config);
 
-        let task_label = format!("{}_task{}", config.session_label, task_index);
+        // Label by the task's todo.md index so resumed runs never collide.
+        let task_label = format!("{}_task{}", config.session_label, task.index);
         let mut task_session = Session::new(task_label.clone(), system_msg);
+        // Move a leftover session file from an earlier interrupted run aside.
+        persistence::init_session(&task_label)?;
 
-        let done = run_reasoning_loop(
+        let end_reason = run_reasoning_loop(
             config,
             provider,
             &mut task_session,
             settings,
             metrics,
-            &format!("todo:task:{}", task_index),
+            &format!("todo:task:{}", task.index),
             task_prompt(&task.description, user_input),
             attached_files.clone(),
         )
         .await?;
 
-        if done {
+        if end_reason.is_completed() {
             // llm_guard_: condense an over-long handover report before logging.
             llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
             // Capture LLM's final message as the final answer
@@ -877,8 +1023,9 @@ async fn run_todo_loop_mode2(
             } else {
                 raw_note.to_string()
             };
+            // Marker = the task's todo.md number (stable across runs).
             append_handover(&build_handover_entry(
-                &format!("- Task {}", task_index),
+                &format!("- Task {}", task.index + 1),
                 &report,
             ))?;
 
@@ -890,24 +1037,24 @@ async fn run_todo_loop_mode2(
                 println!(
                     "\n{}--- [App] Task {} declared Output paths that do not exist: {} ---{}",
                     startup::C_YELLOW,
-                    task_index,
+                    task.index + 1,
                     missing.join(", "),
                     startup::RESET
                 );
                 app_feedback.push(format!(
                     "Task {} declared Output paths that do not exist: {}. Verify whether the task actually finished and add a fix task if needed.",
-                    task_index,
+                    task.index + 1,
                     missing.join(", ")
                 ));
             }
 
-            persistence::archive_todo_session(&task_label, task_index)?;
+            persistence::archive_todo_session(&task_label, task.index)?;
 
             // Push task's LLM conversation to GUI log
             for msg in task_session.messages.iter().skip(1) {
                 gui_log.messages.push(msg.clone());
             }
-            let done_msg = format!("--- Task {} done ---", task_index);
+            let done_msg = format!("--- Task {} done ---", task.index + 1);
             println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
             gui_log.messages.push(Message {
                 role: "system".to_string(),
@@ -923,12 +1070,34 @@ async fn run_todo_loop_mode2(
 
             completed += 1;
         } else {
-            println!(
-                "\n{}--- [Interrupted] Task {} was not completed. Run again to resume. ---{}",
-                startup::C_YELLOW,
-                task_index,
-                startup::RESET
-            );
+            // Distinguish Ctrl+C from LLM failure / limits.
+            match end_reason {
+                EndReason::LlmError => {
+                    println!(
+                        "\n{}--- [LLM Error] Task {} could not run (LLM connection error). Run again after recovery. ---{}",
+                        startup::C_YELLOW,
+                        task.index + 1,
+                        startup::RESET
+                    );
+                }
+                EndReason::Interrupted => {
+                    println!(
+                        "\n{}--- [Interrupted] Task {} was not completed. Run again to resume. ---{}",
+                        startup::C_YELLOW,
+                        task.index + 1,
+                        startup::RESET
+                    );
+                }
+                EndReason::EmptyLimit | EndReason::MaxTurns => {
+                    println!(
+                        "\n{}--- [Stopped] Task {} was not completed (limit reached). ---{}",
+                        startup::C_YELLOW,
+                        task.index + 1,
+                        startup::RESET
+                    );
+                }
+                EndReason::Completed => unreachable!("is_completed() was false"),
+            }
             break;
         }
     }

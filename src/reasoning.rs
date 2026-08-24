@@ -41,14 +41,38 @@ fn record_and_save(
     }
 }
 
+/// Why `run_reasoning_loop` ended; its output is in `Session`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndReason {
+    /// Final answer produced; it is the last `session.messages` entry
+    /// (the loop only ends here when the message has no tool calls).
+    Completed,
+    /// LLM connection / API error (retryable at the caller's discretion).
+    LlmError,
+    /// User pressed Ctrl+C.
+    Interrupted,
+    /// `max_reasoning_empty_responses` reached (0 = unlimited retries, so
+    /// this is only returned when a positive limit was configured).
+    EmptyLimit,
+    /// `max_reasoning_turns` reached (interactive mode only; batch bails).
+    MaxTurns,
+}
+
+impl EndReason {
+    /// Whether the loop ended with a final answer (`Completed`).
+    pub(crate) fn is_completed(self) -> bool {
+        matches!(self, EndReason::Completed)
+    }
+}
+
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
 ///
 /// `tools::confirm_execute_tool`, `persistence::save_message`, and
 /// `tokio::signal::ctrl_c` are called directly.
 ///
-/// Returns `Ok(true)` when the assistant emitted a final answer; `Ok(false)`
-/// when interrupted (Ctrl+C / connection error / empty-retry limit); `Err(_)`
-/// on persistence failure or batch-mode max-reasoning-turns exceeded.
+/// Returns `Ok(EndReason::Completed)` (final answer = last message) or a
+/// termination reason (Ctrl+C / connection error / limits). `Err(_)` on
+/// persistence failure or batch max-turns.
 #[allow(clippy::too_many_arguments)] // `phase` tags main vs todo context for stats
 pub(crate) async fn run_reasoning_loop(
     config: &startup::Config,
@@ -59,7 +83,7 @@ pub(crate) async fn run_reasoning_loop(
     phase: &str,
     user_input: String,
     attached_files: Vec<AttachedFile>,
-) -> Result<bool> {
+) -> Result<EndReason> {
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
     // signature smaller and avoids the caller having to pass it through.
     let is_batch = config.query.is_some();
@@ -89,12 +113,10 @@ pub(crate) async fn run_reasoning_loop(
         .push_str(&format!("{}\n", user_input));
 
     // Inner loop to handle tool execution and sequential LLM reasoning.
-    // `done` tracks whether this turn completed successfully (assistant
-    // responded normally). If the loop exits via error/Ctrl+C/empty-limit, done
-    // is false and the caller does NOT increment the turn counter.
+    // `Completed` by default; every non-completing break overrides it.
     let mut empty_response_count: usize = 0;
     let mut reasoning_turn: u32 = 0;
-    let mut done: bool = false;
+    let mut end_reason = EndReason::Completed;
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
@@ -108,6 +130,7 @@ pub(crate) async fn run_reasoning_loop(
                 "\x1b[93m\u{26a0}\u{fe0f} Max reasoning turns ({}) reached. Returning to prompt.\x1b[0m",
                 config.max_reasoning_turns
             );
+            end_reason = EndReason::MaxTurns;
             break 'reasoning_loop;
         }
         if settings.llm_rpm > 0 {
@@ -151,6 +174,7 @@ pub(crate) async fn run_reasoning_loop(
                        {
                            LLM_STREAM_BUF.lock().unwrap().1.push_str(&format!("[LLM Error] {}", e));
                        }
+                       end_reason = EndReason::LlmError;
                        break 'reasoning_loop;
                     }
                 }
@@ -158,6 +182,7 @@ pub(crate) async fn run_reasoning_loop(
             _ = ctrl_c_future => {
                println!("\x1b[0m");
                println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
+               end_reason = EndReason::Interrupted;
                break 'reasoning_loop;
             }
         };
@@ -209,6 +234,7 @@ pub(crate) async fn run_reasoning_loop(
                         settings.llm_model, empty_response_count, limit
                     );
                 }
+                end_reason = EndReason::EmptyLimit;
                 break 'reasoning_loop;
             }
             if limit > 0 {
@@ -419,10 +445,9 @@ pub(crate) async fn run_reasoning_loop(
             // Re-query LLM with tool execution results
             continue 'reasoning_loop;
         }
-        done = true;
         break 'reasoning_loop;
     }
-    Ok(done)
+    Ok(end_reason)
 }
 
 pub(crate) async fn call_llm(
