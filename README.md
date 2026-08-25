@@ -17,9 +17,9 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Backend**: Ollama, OpenAI-compatible, or Anthropic-compatible API.
 - **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
 
-## Configuration
+## Options and Settings
 
-Configuration can be set via environment variables or command-line flags (flags take precedence).
+Options can be set via environment variables or command-line flags (flags take precedence).
 | CLI Flag | Env Var | Description | Default |
 | :--- | :--- | :--- | :--- |
 | `-w, --working-dir <DIR>` | `WORKING_DIR` | Directory where AI tools operate. | `.` |
@@ -44,6 +44,7 @@ Configuration can be set via environment variables or command-line flags (flags 
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
 | `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
 | `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |
+| `license` | (none) | Subcommand: print the third-party license notices bundled into this binary and exit. | (none) |
 
 ### LLM Provider (`LLM_PROVIDER`)
 

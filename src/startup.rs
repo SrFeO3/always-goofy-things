@@ -6,7 +6,7 @@
 use std::env;
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use crate::compat_provider::LlmProvider;
 use crate::compat_resilience::ToolResultFormat;
@@ -44,6 +44,14 @@ pub type PrettyLevel = u8;
 
 /// UI verbosity for LLM conversation display
 pub type Verbosity = u8;
+
+/// CLI subcommands. When one is given, it runs immediately and the app exits
+/// instead of starting the interactive session.
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    /// Print the third-party licensing notices bundled into the binary and exit.
+    License,
+}
 
 /// The Always-Goofy-Things CLI configuration
 #[derive(Parser, Debug, Clone)]
@@ -212,6 +220,11 @@ pub struct Config {
     /// Data tools are read-only and safe to auto-execute.
     #[arg(long, env = "DB_UNSAFE_REFLEX", default_value_t = false)]
     pub db_unsafe_reflex: bool,
+
+    /// Optional subcommand (e.g. `license`); runs and exits instead of
+    /// starting the app.
+    #[command(subcommand)]
+    pub command: Option<Command>,
 }
 
 impl Config {

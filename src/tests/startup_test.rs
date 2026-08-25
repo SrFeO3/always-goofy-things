@@ -31,6 +31,7 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         db_max_bytes: 65536,
         db_unsafe_reflex: false,
         only_tools,
+        command: None,
     }
 }
 
@@ -89,6 +90,18 @@ fn only_tools_flag_parses_comma_list_and_repeats() {
 fn only_tools_rejects_unknown_name() {
     let result = Config::try_parse_from(["agt", "--only-tools", "rm_rf"]);
     assert!(result.is_err(), "unknown tool name must fail at parse time");
+}
+
+#[test]
+fn license_subcommand_parses() {
+    let config = Config::try_parse_from(["agt", "license"]).unwrap();
+    assert!(matches!(config.command, Some(Command::License)));
+}
+
+#[test]
+fn no_subcommand_by_default() {
+    let config = Config::try_parse_from(["agt"]).unwrap();
+    assert!(config.command.is_none());
 }
 
 #[test]

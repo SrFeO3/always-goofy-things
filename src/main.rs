@@ -61,10 +61,24 @@ use model::{Session, Settings};
 use reasoning::run_reasoning_loop;
 use startup::{C_CYAN, RESET};
 
+/// Third-party licensing notices embedded into the binary; differs by feature.
+#[cfg(feature = "gui")]
+const THIRD_PARTY_LICENSES: &str =
+    include_str!("../third_party_licenses/THIRD_PARTY_LICENSES-gui.txt");
+#[cfg(not(feature = "gui"))]
+const THIRD_PARTY_LICENSES: &str =
+    include_str!("../third_party_licenses/THIRD_PARTY_LICENSES-no-feature.txt");
+
 #[tokio::main]
 #[cfg_attr(feature = "gui", allow(unreachable_code))]
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
+
+    // `license` subcommand: show the third-party notices and exit.
+    if let Some(startup::Command::License) = config.command {
+        print!("{}", THIRD_PARTY_LICENSES);
+        return Ok(());
+    }
 
     let provider: LlmProvider = config
         .provider
