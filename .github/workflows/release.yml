@@ -61,7 +61,6 @@ jobs:
           body: "Automatically built from the latest commit on main branch."
           files: |
             release-assets/always-goofy-things
-            third_party_licenses/THIRD_PARTY_LICENSES-no-feature.txt
 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
