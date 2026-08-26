@@ -1,10 +1,10 @@
 use super::*;
 use std::sync::Mutex;
 
-/// Serializes tests that mutate the real `./artifacts/handover.md`.
-/// (append_handover is hardwired to the CWD-relative HANDOVER_MD_PATH, so
+/// Serializes tests that mutate CWD-relative files (`./artifacts/handover.md`
+/// and `./todo.md`). The mutating helpers are hardwired to CWD paths, so
 /// these tests run in the project directory instead of chdir-ing the whole
-/// test process, which raced with every other CWD-relative test.)
+/// test process, which raced with every other CWD-relative test.
 static HANDOVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Backup of `./artifacts/handover.md`, restored on drop (panic-safe).
@@ -31,6 +31,108 @@ impl Drop for HandoverBackup {
             }
         }
     }
+}
+
+/// Backup of `./todo.md`, restored on drop (panic-safe); a missing file is
+/// removed again on drop.
+struct TodoFileBackup(Option<String>);
+
+impl TodoFileBackup {
+    fn capture() -> Self {
+        Self(std::fs::read_to_string(TODO_MD_PATH).ok())
+    }
+}
+
+impl Drop for TodoFileBackup {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(content) => {
+                let _ = std::fs::write(TODO_MD_PATH, content);
+            }
+            None => {
+                let _ = std::fs::remove_file(TODO_MD_PATH);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// count_task_items (completion report task total).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_count_task_items_mixed() {
+    let md = "# Plan\n\n## Goal\nDo things.\n\n## Tasks\n- [x] a\n- [ ] b\n- [x] c\n- [ ] d\n";
+    assert_eq!(count_task_items(md), 4);
+}
+
+#[test]
+fn test_count_task_items_ignores_prose_and_other_sections() {
+    let md =
+        "## Tasks\n- [x] a\n- [ ] b\n- some prose - [ ] not-a-task\n## Status\n- [ ] after-tasks\n";
+    // Prose lines and items in later sections do not count.
+    assert_eq!(count_task_items(md), 2);
+}
+
+#[test]
+fn test_count_task_items_legacy_or_empty() {
+    // Legacy plans without a Tasks section: no tasks, no panic.
+    assert_eq!(count_task_items("## Status\nStatus: Completed\n"), 0);
+    assert_eq!(count_task_items("## Tasks\n"), 0);
+    assert_eq!(count_task_items(""), 0);
+}
+
+// ---------------------------------------------------------------------------
+// mark_task_done (Mode 1 [x] marking).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mark_task_done_marks_nth_unchecked() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(
+        TODO_MD_PATH,
+        "# Plan\n\n## Tasks\n- [ ] a\n- [x] b\n- [ ] c\n",
+    )
+    .unwrap();
+    mark_task_done(1).unwrap(); // second unchecked task (`c`)
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, "# Plan\n\n## Tasks\n- [ ] a\n- [x] b\n- [x] c\n");
+}
+
+#[test]
+fn test_mark_task_done_index_out_of_range_is_noop() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(TODO_MD_PATH, "## Tasks\n- [x] a\n").unwrap();
+    mark_task_done(0).unwrap(); // no unchecked task at index 0
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, "## Tasks\n- [x] a\n");
+}
+
+#[test]
+fn test_mark_task_done_does_not_touch_later_sections() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(
+        TODO_MD_PATH,
+        "## Tasks\n- [ ] a\n- [ ] b\n\n## Status\nStatus: In Progress\n",
+    )
+    .unwrap();
+    mark_task_done(0).unwrap();
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(
+        content,
+        "## Tasks\n- [x] a\n- [ ] b\n\n## Status\nStatus: In Progress\n"
+    );
+}
+
+#[test]
+fn test_mark_task_done_missing_file_errors() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    let _ = std::fs::remove_file(TODO_MD_PATH);
+    assert!(mark_task_done(0).is_err());
 }
 
 #[test]

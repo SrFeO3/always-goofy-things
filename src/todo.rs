@@ -34,8 +34,10 @@ use crate::persistence;
 use crate::reasoning::{EndReason, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
-    build_handover_entry, llm_guard_declared_outputs, llm_guard_final_answer,
-    llm_guard_goal_outputs_missing, llm_guard_handover_report, llm_guard_unfinished_outputs,
+    build_handover_entry, last_assistant_report, llm_guard_completion_report,
+    llm_guard_declared_outputs, llm_guard_goal_outputs_missing, llm_guard_handover_report,
+    llm_guard_tasks_declaring_outputs, llm_guard_unfinished_outputs,
+    llm_guard_unverifiable_declared, llm_guard_verified_outputs, merge_condensed_report,
 };
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
@@ -122,10 +124,13 @@ fn parse_todo_md() -> Result<Vec<TaskItem>> {
     Ok(tasks)
 }
 
-/// Count unchecked tasks (`- [ ]`) in the given todo.md content.
-fn count_unchecked(todo_md: &str) -> usize {
+/// Count Task-section bullets as `(checked, unchecked)`: walks the
+/// `## Tasks` section, stops at the next `##` heading; legacy plans yield
+/// zeroes without panicking.
+fn count_task_boxes(todo_md: &str) -> (usize, usize) {
     let mut in_tasks = false;
-    let mut count = 0;
+    let mut checked = 0;
+    let mut unchecked = 0;
     for line in todo_md.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("## Tasks") {
@@ -135,11 +140,28 @@ fn count_unchecked(todo_md: &str) -> usize {
         if in_tasks && trimmed.starts_with("##") {
             break;
         }
-        if in_tasks && trimmed.starts_with("- [ ]") {
-            count += 1;
+        if in_tasks {
+            if trimmed.starts_with("- [x]") {
+                checked += 1;
+            } else if trimmed.starts_with("- [ ]") {
+                unchecked += 1;
+            }
         }
     }
-    count
+    (checked, unchecked)
+}
+
+/// Count unchecked tasks (`- [ ]`) in the given todo.md content.
+fn count_unchecked(todo_md: &str) -> usize {
+    count_task_boxes(todo_md).1
+}
+
+/// Count all task items (`- [x]` and `- [ ]`) in the given todo.md content.
+/// Used for the completion report's task total without requiring a full
+/// parse (robust against legacy plans without a Tasks section).
+fn count_task_items(todo_md: &str) -> usize {
+    let (checked, unchecked) = count_task_boxes(todo_md);
+    checked + unchecked
 }
 
 /// Mark the nth unchecked task as done by replacing `- [ ]` with `- [x]`.
@@ -471,10 +493,11 @@ async fn final_replan_confirms_completion(
     match replan_outcome {
         ReplanOutcome::Updated(todo) => Ok(check_completion(&todo)),
         ReplanOutcome::Interrupted => {
-            // Ctrl+C: stop with exit 0 but state that completion was NOT
-            // confirmed.
+            // Ctrl+C: the planner did not confirm; the mechanical Goal
+            // gate that follows decides the outcome (LLM-free, so it
+            // still runs).
             println!(
-                "\n{}[Replan] (final) Interrupted by user. Completion was NOT confirmed; todo.md is all-[x]. Run again to confirm.{}",
+                "\n{}[Replan] (final) Interrupted by user; running the mechanical completion checks.{}",
                 startup::C_YELLOW,
                 startup::RESET
             );
@@ -506,26 +529,31 @@ fn build_replan_feedback(app_feedback: &[String]) -> Option<String> {
     }
 }
 
-/// Mode 2 completion gate: the Goal deliverables must exist on disk
-/// before the job may exit as complete; otherwise completion stays
-/// unconfirmed (Err, non-zero exit). Runs after the final replan, including
-/// the Ctrl+C case, since the check itself needs no LLM.
-fn verify_goal_deliverables() -> Result<()> {
-    let todo_content = std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
-    let missing = llm_guard_goal_outputs_missing(&todo_content);
+/// Goal gate core: non-deliverable Goal artifacts veto completion. LLM-free,
+/// so it also runs after Ctrl+C. Applied to Mode 2's final replan, Mode 1
+/// all-complete/early exit, and every post-loop OK path.
+fn check_goal_deliverables(todo_md: &str) -> Result<()> {
+    let missing = llm_guard_goal_outputs_missing(todo_md);
     if missing.is_empty() {
         return Ok(());
     }
     println!(
-        "\n{}--- [App] Completion NOT confirmed: Goal deliverables do not exist: {} ---{}",
+        "\n{}--- [App] Completion NOT confirmed: Goal deliverables missing or empty: {} ---{}",
         startup::C_RED,
         missing.join(", "),
         startup::RESET
     );
     anyhow::bail!(
-        "completion unconfirmed: Goal deliverables do not exist: {}",
+        "completion unconfirmed: Goal deliverables missing or empty: {}",
         missing.join(", ")
     )
+}
+
+/// Mode 2 gate: runs `check_goal_deliverables` after the final replan
+/// (Ctrl+C included); failure leaves completion unconfirmed (Err, exit != 0).
+fn verify_goal_deliverables() -> Result<()> {
+    let todo_content = std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
+    check_goal_deliverables(&todo_content)
 }
 
 /// Job-end sweep: report declared output paths that still do not
@@ -607,14 +635,20 @@ pub(crate) async fn run_todo_loop(
         "Plan-Exec-Static"
     };
 
-    // Resumed run: Mode 1 finishes with the Goal answer; Mode 2 falls through
-    // so the loop's final-replan completion gate still runs.
+    // Resumed run: Mode 1 finishes with the completion report; Mode 2 falls
+    // through so the loop's final-replan completion gate still runs.
     if pending.is_empty() && config.todo_mode != 2 {
         let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
-        return Ok(finalize_with_sweep(llm_guard_final_answer(
-            &content,
-            "",
-            "All tasks already completed.",
+        let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+        let verified = llm_guard_verified_outputs(&content, &handover);
+        // Goal-gate early exit too: "already completed" needs its deliverables.
+        check_goal_deliverables(&content)?;
+        return Ok(finalize_with_sweep(llm_guard_completion_report(
+            &verified,
+            count_task_items(&content),
+            llm_guard_tasks_declaring_outputs(&handover),
+            llm_guard_unverifiable_declared(&content, &handover),
+            true,
         )));
     }
 
@@ -685,7 +719,6 @@ async fn run_todo_loop_mode1(
 ) -> Result<String> {
     let pending_count = pending.len();
     let mut completed = 0usize;
-    let mut last_answer = String::new();
 
     for task in &pending {
         let task_num = completed + 1;
@@ -728,18 +761,21 @@ async fn run_todo_loop_mode1(
 
         if end_reason.is_completed() {
             // llm_guard_: condense an over-long handover report before logging.
+            // Snapshot first: the rewrite may drop the `- Output:` declaration.
+            let pre_condense = last_assistant_report(&task_session).map(str::to_string);
             llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
-            let mut raw_note = task_session
-                .messages
-                .last()
-                .map(|m| m.content.as_str())
-                .unwrap_or("Task completed.");
+            // Effective report: the last assistant message plus any
+            // declarations the condense rewrite dropped.
+            let mut raw_note = merge_condensed_report(
+                pre_condense.as_deref(),
+                last_assistant_report(&task_session).unwrap_or("Task completed."),
+            );
 
             // A task is complete only when every declared Output path
             // exists on disk. One feedback retry (same session, so the
             // LLM sees its previous work), then give up: no [x], and a
             // durable reason is left for a resumed run.
-            let mut missing = llm_guard_declared_outputs(raw_note);
+            let mut missing = llm_guard_declared_outputs(&raw_note);
             if !missing.is_empty() {
                 let feedback = format!(
                     "Your report declared Output paths that do not exist: {}. \
@@ -759,12 +795,12 @@ async fn run_todo_loop_mode1(
                     Vec::new(),
                 )
                 .await;
-                raw_note = task_session
-                    .messages
-                    .last()
-                    .map(|m| m.content.as_str())
-                    .unwrap_or("Task completed.");
-                missing = llm_guard_declared_outputs(raw_note);
+                // The retry report replaces the declaration: merging the old
+                // paths back in would keep the task blocked forever.
+                raw_note = last_assistant_report(&task_session)
+                    .unwrap_or("Task completed.")
+                    .to_string();
+                missing = llm_guard_declared_outputs(&raw_note);
             }
 
             if missing.is_empty() {
@@ -776,15 +812,8 @@ async fn run_todo_loop_mode1(
                 // `outputs:` line (the one-liner may cut them).
                 append_handover(&build_handover_entry(
                     &format!("- Task {}", task.index + 1),
-                    raw_note,
+                    &raw_note,
                 ))?;
-
-                // Capture LLM's final message as the final answer
-                if let Some(msg) = task_session.messages.last()
-                    && !msg.content.trim().is_empty()
-                {
-                    last_answer = msg.content.clone();
-                }
 
                 persistence::archive_todo_session(&task_label, task.index)?;
 
@@ -861,10 +890,17 @@ async fn run_todo_loop_mode1(
 
     Ok(if completed == pending_count {
         let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
-        llm_guard_final_answer(
-            &final_todo,
-            &last_answer,
-            &format!("All {} tasks completed successfully.", pending_count),
+        // Mode 1 Goal gate: same rule as Mode 2 - Err when deliverables are
+        // missing or empty.
+        check_goal_deliverables(&final_todo)?;
+        let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+        let verified = llm_guard_verified_outputs(&final_todo, &handover);
+        llm_guard_completion_report(
+            &verified,
+            count_task_items(&final_todo),
+            llm_guard_tasks_declaring_outputs(&handover),
+            llm_guard_unverifiable_declared(&final_todo, &handover),
+            false,
         )
     } else {
         format!(
@@ -888,7 +924,6 @@ async fn run_todo_loop_mode2(
     let mut replan_stalls = 0u32;
     // Consecutive failed replans; drives the backoff. Reset on success.
     let mut replan_consecutive_failures: u32 = 0;
-    let mut last_answer = String::new();
     // App-side reports (e.g. missing declared outputs) waiting to be shown
     // to the planner; cleared once a replan succeeds.
     let mut app_feedback: Vec<String> = Vec::new();
@@ -1126,25 +1161,17 @@ async fn run_todo_loop_mode2(
 
         if end_reason.is_completed() {
             // llm_guard_: condense an over-long handover report before logging.
+            // Snapshot first: the rewrite may drop the `- Output:` declaration.
+            let pre_condense = last_assistant_report(&task_session).map(str::to_string);
             llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
-            // Capture LLM's final message as the final answer
-            if let Some(msg) = task_session.messages.last()
-                && !msg.content.trim().is_empty()
-            {
-                last_answer = msg.content.clone();
-            }
-            // Record the executor's handover report (its final message) so
-            // the next replan has a record of what this task reported.
-            // Declared Output paths are kept on an untruncated `outputs:` line.
-            let raw_note = task_session
-                .messages
-                .last()
-                .map(|m| m.content.as_str())
-                .unwrap_or_default();
+            // Record the executor's report (last assistant message; never a
+            // tool response). Output paths stay on an untruncated `outputs:`
+            // line; condense cannot drop them (merge_condensed_report).
+            let raw_note = last_assistant_report(&task_session).unwrap_or_default();
             let report = if raw_note.trim().is_empty() {
                 "Status: (no report)".to_string()
             } else {
-                raw_note.to_string()
+                merge_condensed_report(pre_condense.as_deref(), raw_note)
             };
             // Marker = the task's todo.md number (stable across runs).
             append_handover(&build_handover_entry(
@@ -1233,10 +1260,17 @@ async fn run_todo_loop_mode2(
     // Final check: did the LLM set the completion status?
     let final_todo = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
     if check_completion(&final_todo) {
-        Ok(llm_guard_final_answer(
-            &final_todo,
-            &last_answer,
-            "All tasks completed.",
+        // Goal gate on every completion report, including loop-break paths
+        // (e.g. Ctrl+C during a non-final replan) that skip the in-loop gate.
+        check_goal_deliverables(&final_todo)?;
+        let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+        let verified = llm_guard_verified_outputs(&final_todo, &handover);
+        Ok(llm_guard_completion_report(
+            &verified,
+            count_task_items(&final_todo),
+            llm_guard_tasks_declaring_outputs(&handover),
+            llm_guard_unverifiable_declared(&final_todo, &handover),
+            false,
         ))
     } else if completed > 0 {
         Ok(format!(
