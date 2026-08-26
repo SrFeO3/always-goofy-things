@@ -656,7 +656,7 @@ The above license applies to the following components:
     Repository: https://github.com/rust-windowing/raw-window-metal
   - static_assertions 1.1.0
     Repository: https://github.com/nvzqz/static-assertions-rs
-  - tinyvec 1.11.0
+  - tinyvec 1.12.0
     Repository: https://github.com/Lokathor/tinyvec
   - utf8_iter 1.0.4
     Repository: https://github.com/hsivonen/utf8_iter
@@ -1095,17 +1095,11 @@ The above license applies to the following components:
 
   - windows-collections 0.3.2
     Repository: https://github.com/microsoft/windows-rs
-  - windows-core 0.58.0
-    Repository: https://github.com/microsoft/windows-rs
   - windows-core 0.62.2
     Repository: https://github.com/microsoft/windows-rs
   - windows-future 0.3.2
     Repository: https://github.com/microsoft/windows-rs
-  - windows-implement 0.58.0
-    Repository: https://github.com/microsoft/windows-rs
   - windows-implement 0.60.2
-    Repository: https://github.com/microsoft/windows-rs
-  - windows-interface 0.58.0
     Repository: https://github.com/microsoft/windows-rs
   - windows-interface 0.59.3
     Repository: https://github.com/microsoft/windows-rs
@@ -1115,11 +1109,7 @@ The above license applies to the following components:
     Repository: https://github.com/microsoft/windows-rs
   - windows-registry 0.6.1
     Repository: https://github.com/microsoft/windows-rs
-  - windows-result 0.2.0
-    Repository: https://github.com/microsoft/windows-rs
   - windows-result 0.4.1
-    Repository: https://github.com/microsoft/windows-rs
-  - windows-strings 0.1.0
     Repository: https://github.com/microsoft/windows-rs
   - windows-strings 0.5.1
     Repository: https://github.com/microsoft/windows-rs
@@ -1136,8 +1126,6 @@ The above license applies to the following components:
   - windows-targets 0.53.5
     Repository: https://github.com/microsoft/windows-rs
   - windows-threading 0.2.1
-    Repository: https://github.com/microsoft/windows-rs
-  - windows 0.58.0
     Repository: https://github.com/microsoft/windows-rs
   - windows 0.62.2
     Repository: https://github.com/microsoft/windows-rs
@@ -1815,9 +1803,9 @@ License: Apache License 2.0
 
 The above license applies to the following components:
 
-  - zerocopy-derive 0.8.52
+  - zerocopy-derive 0.8.56
     Repository: https://github.com/google/zerocopy
-  - zerocopy 0.8.52
+  - zerocopy 0.8.56
     Repository: https://github.com/google/zerocopy
 
 ===============================================================================
@@ -2460,7 +2448,7 @@ License: Apache License 2.0
 
 The above license applies to the following components:
 
-  - always-goofy-things 0.6.29
+  - always-goofy-things 0.6.32
     
 
 ===============================================================================
@@ -2682,7 +2670,7 @@ The above license applies to the following components:
     Repository: https://github.com/Voultapher/self_cell
   - unicode-linebreak 0.1.5
     Repository: https://github.com/axelf4/unicode-linebreak
-  - zune-core 0.5.1
+  - zune-core 0.5.3
     Repository: https://github.com/etemesi254/zune-image
   - zune-jpeg 0.5.15
     Repository: https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg
@@ -2898,7 +2886,7 @@ License: Apache License 2.0
 
 The above license applies to the following components:
 
-  - ipnet 2.12.0
+  - ipnet 2.12.1
     Repository: https://github.com/krisprice/ipnet
 
 ===============================================================================
@@ -3337,17 +3325,17 @@ The above license applies to the following components:
     Repository: https://github.com/rust-cli/anstyle.git
   - anstyle 1.0.14
     Repository: https://github.com/rust-cli/anstyle.git
-  - clap 4.6.1
+  - clap 4.6.6
     Repository: https://github.com/clap-rs/clap
-  - clap_builder 4.6.0
+  - clap_builder 4.6.6
     Repository: https://github.com/clap-rs/clap
-  - clap_derive 4.6.1
+  - clap_derive 4.6.4
     Repository: https://github.com/clap-rs/clap
   - clap_lex 1.1.0
     Repository: https://github.com/clap-rs/clap
   - colorchoice 1.0.5
     Repository: https://github.com/rust-cli/anstyle.git
-  - crc32fast 1.5.0
+  - crc32fast 1.5.1
     Repository: https://github.com/srijs/rust-crc32fast
   - env_filter 2.0.0
     Repository: https://github.com/rust-cli/env_logger
@@ -3795,19 +3783,19 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - futures-channel 0.3.32
+  - futures-channel 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-core 0.3.32
+  - futures-core 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-io 0.3.32
+  - futures-io 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-macro 0.3.32
+  - futures-macro 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-sink 0.3.32
+  - futures-sink 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-task 0.3.32
+  - futures-task 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
-  - futures-util 0.3.32
+  - futures-util 0.3.34
     Repository: https://github.com/rust-lang/futures-rs
 
 ===============================================================================
@@ -4448,7 +4436,7 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - http 1.4.2
+  - http 1.5.0
     Repository: https://github.com/hyperium/http
 
 ===============================================================================
@@ -5092,7 +5080,7 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - fast-float2 0.2.3
+  - fast-float2 0.2.4
     Repository: https://github.com/Alexhuszagh/fast-float-rust
 
 ===============================================================================
@@ -5734,7 +5722,7 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - rustls-pki-types 1.14.1
+  - rustls-pki-types 1.15.1
     Repository: https://github.com/rustls/pki-types
 
 ===============================================================================
@@ -6619,13 +6607,13 @@ The above license applies to the following components:
     Repository: https://github.com/marshallpierce/rust-base64
   - bitflags 1.3.2
     Repository: https://github.com/bitflags/bitflags
-  - bitflags 2.13.0
+  - bitflags 2.13.1
     Repository: https://github.com/bitflags/bitflags
-  - blocking 1.6.2
+  - blocking 1.7.0
     Repository: https://github.com/smol-rs/blocking
   - bumpalo 3.20.3
     Repository: https://github.com/fitzgen/bumpalo
-  - cc 1.2.65
+  - cc 1.4.4
     Repository: https://github.com/rust-lang/cc-rs
   - cfg-if 1.0.4
     Repository: https://github.com/rust-lang/cfg-if
@@ -6649,9 +6637,9 @@ The above license applies to the following components:
     Repository: https://github.com/crossbeam-rs/crossbeam
   - crossbeam-utils 0.8.22
     Repository: https://github.com/crossbeam-rs/crossbeam
-  - displaydoc 0.2.6
+  - displaydoc 0.2.7
     Repository: https://github.com/yaahc/displaydoc
-  - either 1.16.0
+  - either 1.18.0
     Repository: https://github.com/rayon-rs/either
   - equivalent 1.0.2
     Repository: https://github.com/indexmap-rs/equivalent
@@ -6665,7 +6653,7 @@ The above license applies to the following components:
     Repository: https://github.com/smol-rs/event-listener
   - fastrand 2.5.0
     Repository: https://github.com/smol-rs/fastrand
-  - find-msvc-tools 0.1.9
+  - find-msvc-tools 0.1.11
     Repository: https://github.com/rust-lang/cc-rs
   - flate2 1.1.9
     Repository: https://github.com/rust-lang/flate2-rs
@@ -6699,11 +6687,11 @@ The above license applies to the following components:
     Repository: https://github.com/indexmap-rs/indexmap
   - itertools 0.14.0
     Repository: https://github.com/rust-itertools/itertools
-  - jobserver 0.1.34
+  - jobserver 0.1.35
     Repository: https://github.com/rust-lang/jobserver-rs
   - jpeg-decoder 0.3.2
     Repository: https://github.com/image-rs/jpeg-decoder
-  - js-sys 0.3.103
+  - js-sys 0.3.104
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
   - khronos-egl 6.0.0
     Repository: https://github.com/timothee-haudebourg/khronos-egl
@@ -6713,7 +6701,7 @@ The above license applies to the following components:
     Repository: https://github.com/sunfishcode/linux-raw-sys
   - lock_api 0.4.14
     Repository: https://github.com/Amanieu/parking_lot
-  - log 0.4.33
+  - log 0.4.34
     Repository: https://github.com/rust-lang/log
   - mime 0.3.17
     Repository: https://github.com/hyperium/mime
@@ -6735,7 +6723,7 @@ The above license applies to the following components:
     Repository: https://github.com/servo/rust-url/
   - piper 0.2.5
     Repository: https://github.com/smol-rs/piper
-  - pkg-config 0.3.33
+  - pkg-config 0.3.34
     Repository: https://github.com/rust-lang/pkg-config-rs
   - plain 0.2.3
     Repository: https://github.com/randomites/plain
@@ -6749,11 +6737,11 @@ The above license applies to the following components:
     Repository: https://github.com/rayon-rs/rayon
   - rayon 1.12.0
     Repository: https://github.com/rayon-rs/rayon
-  - regex-automata 0.4.14
+  - regex-automata 0.4.18
     Repository: https://github.com/rust-lang/regex
   - regex-syntax 0.8.11
     Repository: https://github.com/rust-lang/regex
-  - regex 1.12.4
+  - regex 1.13.1
     Repository: https://github.com/rust-lang/regex
   - renderdoc-sys 1.1.0
     Repository: https://github.com/ebkalderon/renderdoc-rs
@@ -6767,7 +6755,7 @@ The above license applies to the following components:
     Repository: https://github.com/bytecodealliance/rustix
   - rustls-native-certs 0.8.4
     Repository: https://github.com/rustls/rustls-native-certs
-  - rustls 0.23.41
+  - rustls 0.23.43
     Repository: https://github.com/rustls/rustls
   - scoped-tls 1.0.1
     Repository: https://github.com/alexcrichton/scoped-tls
@@ -6779,13 +6767,13 @@ The above license applies to the following components:
     Repository: https://github.com/kornelski/rust-security-framework
   - signal-hook-registry 1.4.8
     Repository: https://github.com/vorner/signal-hook
-  - simd_cesu8 1.1.1
+  - simd_cesu8 1.2.0
     Repository: https://github.com/seancroach/simd_cesu8
   - smallvec 1.15.2
     Repository: https://github.com/servo/rust-smallvec
   - smol_str 0.2.2
     Repository: https://github.com/rust-analyzer/smol_str
-  - socket2 0.6.4
+  - socket2 0.6.5
     Repository: https://github.com/rust-lang/socket2
   - stable_deref_trait 1.2.1
     Repository: https://github.com/storyyeller/stable_deref_trait
@@ -6809,7 +6797,7 @@ The above license applies to the following components:
     Repository: https://github.com/unicode-rs/unicode-width
   - url 2.5.8
     Repository: https://github.com/servo/rust-url
-  - uuid 1.24.0
+  - uuid 1.25.0
     Repository: https://github.com/uuid-rs/uuid
   - version_check 0.9.5
     Repository: https://github.com/SergioBenitez/version_check
@@ -6817,17 +6805,17 @@ The above license applies to the following components:
     Repository: https://github.com/bytecodealliance/wasi
   - wasip2 1.0.4+wasi-0.2.12
     Repository: https://github.com/bytecodealliance/wasi-rs
-  - wasm-bindgen-futures 0.4.76
+  - wasm-bindgen-futures 0.4.77
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
-  - wasm-bindgen-macro-support 0.2.126
+  - wasm-bindgen-macro-support 0.2.127
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support
-  - wasm-bindgen-macro 0.2.126
+  - wasm-bindgen-macro 0.2.127
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
-  - wasm-bindgen-shared 0.2.126
+  - wasm-bindgen-shared 0.2.127
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
-  - wasm-bindgen 0.2.126
+  - wasm-bindgen 0.2.127
     Repository: https://github.com/wasm-bindgen/wasm-bindgen
-  - web-sys 0.3.103
+  - web-sys 0.3.104
     Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
   - wit-bindgen 0.57.1
     Repository: https://github.com/bytecodealliance/wit-bindgen
@@ -7263,7 +7251,7 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - aes 0.9.1
+  - aes 0.9.2
     Repository: https://github.com/RustCrypto/block-ciphers
   - block-buffer 0.12.1
     Repository: https://github.com/RustCrypto/utils
@@ -7283,7 +7271,7 @@ The above license applies to the following components:
     Repository: https://github.com/RustCrypto/traits
   - digest 0.11.3
     Repository: https://github.com/RustCrypto/traits
-  - hybrid-array 0.4.13
+  - hybrid-array 0.4.14
     Repository: https://github.com/RustCrypto/hybrid-array
   - inout 0.2.2
     Repository: https://github.com/RustCrypto/utils
@@ -7492,7 +7480,7 @@ limitations under the License.
 
 The above license applies to the following components:
 
-  - webbrowser 1.2.1
+  - webbrowser 1.2.4
     Repository: https://github.com/amodm/webbrowser-rs
 
 ===============================================================================
@@ -9192,7 +9180,7 @@ The above license applies to the following components:
 
   - bytemuck 1.25.2
     Repository: https://github.com/Lokathor/bytemuck
-  - bytemuck_derive 1.11.0
+  - bytemuck_derive 1.12.0
     Repository: https://github.com/Lokathor/bytemuck
 
 ===============================================================================
@@ -9304,15 +9292,15 @@ The above license applies to the following components:
     Repository: https://github.com/zakarumych/allocator-api2
   - android-activity 0.6.1
     Repository: https://github.com/rust-mobile/android-activity
-  - android_system_properties 0.1.5
+  - android_system_properties 0.1.6
     Repository: https://github.com/nical/android_system_properties
-  - anyhow 1.0.103
+  - anyhow 1.0.104
     Repository: https://github.com/dtolnay/anyhow
   - arboard 3.6.1
     Repository: https://github.com/1Password/arboard
-  - async-trait 0.1.91
+  - async-trait 0.1.92
     Repository: https://github.com/dtolnay/async-trait
-  - aws-lc-sys 0.41.0
+  - aws-lc-sys 0.44.0
     Repository: https://github.com/aws/aws-lc-rs
   - color 0.3.3
     Repository: https://github.com/linebender/color
@@ -9366,7 +9354,7 @@ The above license applies to the following components:
     Repository: https://github.com/jni-rs/jni-rs
   - khronos_api 3.1.0
     Repository: https://github.com/brendanzab/gl-rs/
-  - libc 0.2.186
+  - libc 0.2.189
     Repository: https://github.com/rust-lang/libc
   - linebender_resource_handle 0.1.1
     Repository: https://github.com/linebender/raw_resource_handle
@@ -9412,13 +9400,13 @@ The above license applies to the following components:
     Repository: https://github.com/taiki-e/pin-project
   - portable-atomic-util 0.2.7
     Repository: https://github.com/taiki-e/portable-atomic-util
-  - portable-atomic 1.14.0
+  - portable-atomic 1.15.0
     Repository: https://github.com/taiki-e/portable-atomic
-  - proc-macro2 1.0.106
+  - proc-macro2 1.0.107
     Repository: https://github.com/dtolnay/proc-macro2
   - profiling 1.0.18
     Repository: https://github.com/aclysma/profiling
-  - quote 1.0.46
+  - quote 1.0.47
     Repository: https://github.com/dtolnay/quote
   - r-efi 5.3.0
     Repository: https://github.com/r-efi/r-efi
@@ -9428,21 +9416,21 @@ The above license applies to the following components:
     Repository: https://github.com/gfx-rs/range-alloc
   - raw-window-handle 0.6.2
     Repository: https://github.com/rust-windowing/raw-window-handle
-  - rustc-hash 2.1.2
+  - rustc-hash 2.1.3
     Repository: https://github.com/rust-lang/rustc-hash
   - rustls-platform-verifier-android 0.1.1
     Repository: https://github.com/rustls/rustls-platform-verifier
-  - rustversion 1.0.22
+  - rustversion 1.0.23
     Repository: https://github.com/dtolnay/rustversion
   - semver 1.0.28
     Repository: https://github.com/dtolnay/semver
-  - serde 1.0.228
+  - serde 1.0.229
     Repository: https://github.com/serde-rs/serde
-  - serde_core 1.0.228
+  - serde_core 1.0.229
     Repository: https://github.com/serde-rs/serde
-  - serde_derive 1.0.228
+  - serde_derive 1.0.229
     Repository: https://github.com/serde-rs/serde
-  - serde_json 1.0.150
+  - serde_json 1.0.151
     Repository: https://github.com/serde-rs/json
   - serde_repr 0.1.21
     Repository: https://github.com/dtolnay/serde-repr
@@ -9456,19 +9444,19 @@ The above license applies to the following components:
     Repository: https://github.com/gfx-rs/rspirv
   - subsetter 0.2.6
     Repository: https://github.com/typst/subsetter
-  - syn 2.0.118
+  - syn 2.0.119
     Repository: https://github.com/dtolnay/syn
-  - syn 3.0.3
+  - syn 3.0.4
     Repository: https://github.com/dtolnay/syn
   - sync_wrapper 1.0.2
     Repository: https://github.com/Actyx/sync_wrapper
   - thiserror-impl 1.0.69
     Repository: https://github.com/dtolnay/thiserror
-  - thiserror-impl 2.0.18
+  - thiserror-impl 2.0.20
     Repository: https://github.com/dtolnay/thiserror
   - thiserror 1.0.69
     Repository: https://github.com/dtolnay/thiserror
-  - thiserror 2.0.18
+  - thiserror 2.0.20
     Repository: https://github.com/dtolnay/thiserror
   - type-map 0.5.1
     Repository: https://github.com/kardeiz/type-map
@@ -9932,7 +9920,7 @@ The above license applies to the following components:
 
   - alloc-stdlib 0.2.4
     Repository: https://github.com/dropbox/rust-alloc-no-stdlib
-  - aws-lc-sys 0.41.0
+  - aws-lc-sys 0.44.0
     Repository: https://github.com/aws/aws-lc-rs
 
 ===============================================================================
@@ -10007,7 +9995,7 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - error-code 3.3.2
+  - error-code 3.4.0
     Repository: https://github.com/DoumanAsh/error-code
 
 ===============================================================================
@@ -10235,7 +10223,7 @@ insights.
 
 The above license applies to the following components:
 
-  - webpki-root-certs 1.0.8
+  - webpki-root-certs 1.0.9
     Repository: https://github.com/rustls/webpki-roots
 
 ===============================================================================
@@ -10318,7 +10306,7 @@ third-party/chromium/LICENSE.
 
 The above license applies to the following components:
 
-  - rustls-webpki 0.103.13
+  - rustls-webpki 0.103.15
     Repository: https://github.com/rustls/webpki
 
 ===============================================================================
@@ -10339,9 +10327,9 @@ THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO
 
 The above license applies to the following components:
 
-  - aws-lc-rs 1.17.0
+  - aws-lc-rs 1.18.0
     Repository: https://github.com/aws/aws-lc-rs
-  - aws-lc-sys 0.41.0
+  - aws-lc-sys 0.44.0
     Repository: https://github.com/aws/aws-lc-rs
 
 ===============================================================================
@@ -10439,7 +10427,7 @@ THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - mio 1.2.1
+  - mio 1.2.2
     Repository: https://github.com/tokio-rs/mio
 
 ===============================================================================
@@ -10504,7 +10492,7 @@ THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - hyper 1.10.1
+  - hyper 1.11.0
     Repository: https://github.com/hyperium/hyper
 
 ===============================================================================
@@ -10536,7 +10524,7 @@ THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - wayland-backend 0.3.16
+  - wayland-backend 0.3.17
     Repository: https://github.com/smithay/wayland-rs
   - wayland-client 0.31.15
     Repository: https://github.com/smithay/wayland-rs
@@ -10592,7 +10580,7 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - ordered-float 5.3.0
+  - ordered-float 5.5.0
     Repository: https://github.com/reem/rust-ordered-float
 
 ===============================================================================
@@ -10713,7 +10701,7 @@ The above license applies to the following components:
     Repository: https://gitlab.redox-os.org/redox-os/syscall
   - redox_syscall 0.5.18
     Repository: https://gitlab.redox-os.org/redox-os/syscall
-  - redox_syscall 0.8.1
+  - redox_syscall 0.9.3
     Repository: https://gitlab.redox-os.org/redox-os/syscall
 
 ===============================================================================
@@ -10751,7 +10739,7 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - h2 0.4.15
+  - h2 0.4.19
     Repository: https://github.com/hyperium/h2
 
 ===============================================================================
@@ -10789,7 +10777,7 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - bytes 1.12.0
+  - bytes 1.12.1
     Repository: https://github.com/tokio-rs/bytes
 
 ===============================================================================
@@ -11124,7 +11112,7 @@ The above license applies to the following components:
 License: MIT License
 -------------------------------------------------------------------------------
 
-Copyright (c) 2019-2024 Sean McArthur & Hyper Contributors
+Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -11153,45 +11141,9 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - http-body 1.0.1
+  - http-body-util 0.1.5
     Repository: https://github.com/hyperium/http-body
-
-===============================================================================
-
--------------------------------------------------------------------------------
-License: MIT License
--------------------------------------------------------------------------------
-
-Copyright (c) 2019-2025 Sean McArthur & Hyper Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-The above license applies to the following components:
-
-  - http-body-util 0.1.3
+  - http-body 1.1.0
     Repository: https://github.com/hyperium/http-body
 
 ===============================================================================
@@ -11358,18 +11310,56 @@ DEALINGS IN THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - zbus 5.18.0
+  - zbus 5.19.0
     Repository: https://github.com/z-galaxy/zbus/
-  - zbus_macros 5.18.0
+  - zbus_macros 5.19.0
     Repository: https://github.com/z-galaxy/zbus/
   - zbus_names 4.3.4
     Repository: https://github.com/z-galaxy/zbus/
   - zbus_xml 5.2.1
     Repository: https://github.com/z-galaxy/zbus/
-  - zvariant 5.13.1
+  - zvariant 5.15.0
     Repository: https://github.com/z-galaxy/zbus/
-  - zvariant_derive 5.13.1
+  - zvariant_derive 5.15.0
     Repository: https://github.com/z-galaxy/zbus/
+
+===============================================================================
+
+-------------------------------------------------------------------------------
+License: MIT License
+-------------------------------------------------------------------------------
+
+Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+The above license applies to the following components:
+
+  - zcheapstr 1.1.0
+    Repository: https://github.com/z-galaxy/zcheapstr/
 
 ===============================================================================
 
@@ -11513,7 +11503,7 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - tokio-macros 2.7.0
+  - tokio-macros 2.7.2
     Repository: https://github.com/tokio-rs/tokio
 
 ===============================================================================
@@ -11535,7 +11525,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The above license applies to the following components:
 
-  - cfg_aliases 0.2.1
+  - cfg_aliases 0.2.2
     Repository: https://github.com/katharostech/cfg_aliases
 
 ===============================================================================
@@ -11603,7 +11593,7 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - xcursor 0.3.10
+  - xcursor 0.3.11
     Repository: https://github.com/esposm03/xcursor-rs
 
 ===============================================================================
@@ -11671,7 +11661,7 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - libredox 0.1.17
+  - libredox 0.1.20
     Repository: https://gitlab.redox-os.org/redox-os/libredox.git
 
 ===============================================================================
@@ -11768,9 +11758,9 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - tokio-util 0.7.18
+  - tokio-util 0.7.19
     Repository: https://github.com/tokio-rs/tokio
-  - tokio 1.52.3
+  - tokio 1.53.1
     Repository: https://github.com/tokio-rs/tokio
 
 ===============================================================================
@@ -11882,9 +11872,9 @@ The above license applies to the following components:
     Repository: https://github.com/luukvanderduim/zbus-lockstep
   - zbus-lockstep 0.5.2
     Repository: https://github.com/luukvanderduim/zbus-lockstep
-  - zmij 1.0.21
+  - zmij 1.0.23
     Repository: https://github.com/dtolnay/zmij
-  - zvariant_utils 3.5.0
+  - zvariant_utils 4.2.0
     Repository: https://github.com/z-galaxy/zbus/
 
 ===============================================================================
@@ -11983,7 +11973,7 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - xml-rs 0.8.28
+  - xml-rs 0.8.29
     Repository: https://github.com/kornelski/xml-rs
 
 ===============================================================================
@@ -12099,7 +12089,7 @@ THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - aho-corasick 1.1.4
+  - aho-corasick 1.1.5
     Repository: https://github.com/BurntSushi/aho-corasick
   - byteorder-lite 0.1.0
     Repository: https://github.com/image-rs/byteorder-lite
@@ -12107,9 +12097,9 @@ The above license applies to the following components:
     Repository: https://github.com/BurntSushi/byteorder
   - jiff-core 0.1.0
     Repository: https://github.com/BurntSushi/jiff
-  - jiff 0.2.34
+  - jiff 0.2.35
     Repository: https://github.com/BurntSushi/jiff
-  - memchr 2.8.2
+  - memchr 2.8.3
     Repository: https://github.com/BurntSushi/memchr
   - walkdir 2.5.0
     Repository: https://github.com/BurntSushi/walkdir
@@ -12251,7 +12241,7 @@ THE SOFTWARE.
 
 The above license applies to the following components:
 
-  - combine 4.6.7
+  - combine 4.6.8
     Repository: https://github.com/Marwes/combine
 
 ===============================================================================
@@ -12356,7 +12346,7 @@ SOFTWARE.
 
 The above license applies to the following components:
 
-  - aws-lc-sys 0.41.0
+  - aws-lc-sys 0.44.0
     Repository: https://github.com/aws/aws-lc-rs
 
 ===============================================================================
@@ -13242,27 +13232,27 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 
 The above license applies to the following components:
 
-  - icu_collections 2.2.0
+  - icu_collections 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_locale_core 2.2.0
+  - icu_locale_core 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_normalizer 2.2.0
+  - icu_normalizer 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_normalizer_data 2.2.0
+  - icu_normalizer_data 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_properties 2.2.0
+  - icu_properties 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_properties_data 2.2.0
+  - icu_properties_data 2.3.0
     Repository: https://github.com/unicode-org/icu4x
-  - icu_provider 2.2.0
+  - icu_provider 2.3.1
     Repository: https://github.com/unicode-org/icu4x
-  - litemap 0.8.2
+  - litemap 0.8.3
     Repository: https://github.com/unicode-org/icu4x
-  - potential_utf 0.1.5
+  - potential_utf 0.1.6
     Repository: https://github.com/unicode-org/icu4x
-  - tinystr 0.8.3
+  - tinystr 0.8.4
     Repository: https://github.com/unicode-org/icu4x
-  - writeable 0.6.3
+  - writeable 0.6.4
     Repository: https://github.com/unicode-org/icu4x
   - yoke-derive 0.8.2
     Repository: https://github.com/unicode-org/icu4x
@@ -13272,11 +13262,11 @@ The above license applies to the following components:
     Repository: https://github.com/unicode-org/icu4x
   - zerofrom 0.1.8
     Repository: https://github.com/unicode-org/icu4x
-  - zerotrie 0.2.4
+  - zerotrie 0.2.5
     Repository: https://github.com/unicode-org/icu4x
-  - zerovec-derive 0.11.3
+  - zerovec-derive 0.11.6
     Repository: https://github.com/unicode-org/icu4x
-  - zerovec 0.11.6
+  - zerovec 0.11.8
     Repository: https://github.com/unicode-org/icu4x
 
 ===============================================================================
@@ -13308,7 +13298,7 @@ freely, subject to the following restrictions:
 
 The above license applies to the following components:
 
-  - zlib-rs 0.6.6
+  - zlib-rs 0.6.7
     Repository: https://github.com/trifectatechfoundation/zlib-rs
 
 ===============================================================================
