@@ -28,7 +28,7 @@ fn project_dirs() -> Option<ProjectDirs> {
 /// The `SESSION_DATA_DIR` environment variable (companion of `SESSION_LABEL`)
 /// overrides the platform-specific application data directory (see README).
 /// Files land directly in this root.
-fn data_dir() -> Option<PathBuf> {
+pub(crate) fn data_dir() -> Option<PathBuf> {
     std::env::var_os("SESSION_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| project_dirs().map(|d| d.data_local_dir().to_path_buf()))

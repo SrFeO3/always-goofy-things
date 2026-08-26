@@ -193,7 +193,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "always-goofy-things"
-version = "0.6.30"
+version = "0.6.31"
 dependencies = [
  "anyhow",
  "base64",
@@ -203,6 +203,7 @@ dependencies = [
  "eframe",
  "futures-util",
  "pdf_oxide",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rustyline",

@@ -40,7 +40,7 @@ macro_rules! require_db {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — placeholder generation
+// Unit tests: placeholder generation
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -82,7 +82,7 @@ fn test_placeholders_unknown_type() {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — tool definition JSON generation
+// Unit tests: tool definition JSON generation
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -126,7 +126,7 @@ fn test_build_data_schema_def_structure() {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — SQL sanitization (read-only enforcement)
+// Unit tests: SQL sanitization (read-only enforcement)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -225,7 +225,8 @@ fn test_sanitize_leading_comment() {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — DB error detail truncation (改善 4a: head-cap, DB-independent)
+// Unit tests: DB error detail truncation (improvement 4a: head-cap,
+// DB-independent)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -279,7 +280,7 @@ fn test_truncate_error_body_notice_passive() {
 }
 
 // ---------------------------------------------------------------------------
-// Integration tests — local GreptimeDB (no auth) at localhost:4000/v1/sql
+// Integration tests: local GreptimeDB (no auth) at localhost:4000/v1/sql
 // ---------------------------------------------------------------------------
 
 /// Helper: build a `DbContext` pointing at the default local GreptimeDB.
@@ -322,7 +323,7 @@ async fn test_greptimedb_data_search_syntax_error() {
 
 #[tokio::test]
 async fn test_greptimedb_data_schema_list_tables() {
-    // data_schema without table arg → list tables
+    // data_schema without table arg -> list tables
     require_db!();
     let ctx = local_greptimedb_ctx();
     let result = execute_data_schema(&ctx, None).await.unwrap();
@@ -367,14 +368,14 @@ async fn test_greptimedb_timeout() {
     ctx.db_timeout = 1; // 1ms is impossibly short
     // A simple query might still succeed in <1ms, so we try a heavier one
     let result = execute_data_search(&ctx, "SELECT count(*) FROM numbers(1000000)").await;
-    // Either succeeds quickly or times out — both are acceptable;
+    // Either succeeds quickly or times out: both are acceptable;
     // we just verify the timeout path doesn't panic.
     if let Err(e) = &result {
         let msg = e.to_string();
         // A 1ms timeout is impossibly short. The query may:
-        // - time out → DB_TIMEOUT
-        // - fail immediately with a DB error (e.g. function not found) → still acceptable
-        // - succeed impossibly fast → also acceptable
+        // - time out: DB_TIMEOUT
+        // - fail immediately with a DB error (e.g. function not found): still acceptable
+        // - succeed impossibly fast: also acceptable
         // The point is to verify the timeout codepath doesn't panic.
         assert!(
             msg.contains("DB_TIMEOUT")

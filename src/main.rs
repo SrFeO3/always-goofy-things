@@ -49,6 +49,7 @@ mod startup;
 mod todo;
 mod todo_guard;
 mod tools;
+mod tools_calc;
 mod tools_data;
 mod tools_fuzzy;
 mod tools_process;

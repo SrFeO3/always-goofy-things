@@ -432,6 +432,12 @@ fn compute_replace_lines(path: &str, args: &Value) -> Option<(u64, u64)> {
 }
 
 pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>) {
+    // calc returns a JSON array (one element per expression), unlike the
+    // object-returning tools below.
+    if name == "calc" {
+        pretty_print_calc_result(result);
+        return;
+    }
     let obj = match result.as_object() {
         Some(o) => o,
         None => {
@@ -601,7 +607,30 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
     }
 }
 
-// Pretty-print command preview before execution.
+/// Pretty-print a calc result array: one line per expression element.
+fn pretty_print_calc_result(result: &Value) {
+    let Some(arr) = result.as_array() else {
+        // Whole-call error object (e.g. LIMIT_EXCEEDED).
+        println!("{}Result:{} {}", C_GRAY, RESET, result);
+        return;
+    };
+    for el in arr {
+        let id = el.get("calc_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let expr = el.get("expression").and_then(|v| v.as_str()).unwrap_or("?");
+        if let Some(err) = el.get("error") {
+            let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("?");
+            let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            println!("  {}[{} {}] {}: {}{}", C_RED, id, code, expr, msg, RESET);
+        } else if let Some(r) = el.get("result") {
+            let unit = el.get("unit").and_then(|v| v.as_str());
+            match unit {
+                Some(u) => println!("  {}[{}] {} = {} {}{}", C_GREEN, id, expr, r, u, RESET),
+                None => println!("  {}[{}] {} = {}{}", C_GREEN, id, expr, r, RESET),
+            }
+        }
+    }
+}
+
 /// Displays a diagnostic warning when the LLM returns a malformed / broken tool call.
 ///
 /// Detects these broken states:
@@ -682,6 +711,7 @@ pub fn pretty_print_broken_tool_call(
     println!("\x1b[91m----------------------------------------------\x1b[0m\n");
 }
 
+// Pretty-print command preview before execution.
 pub fn pretty_print_command(name: &str, args: &Value) {
     match name {
         "read_file" => {
@@ -751,6 +781,19 @@ pub fn pretty_print_command(name: &str, args: &Value) {
             println!("-- Fetch: {}{}{}", C_YELLOW, url, RESET);
         }
         "data_search" | "data_schema" => pretty_data::pretty_print_data_command(name, args),
+        "calc" => {
+            let exprs = match args.get("expressions").and_then(|v| v.as_array()) {
+                Some(a) => a,
+                None => return,
+            };
+            let shown: Vec<&str> = exprs.iter().take(3).filter_map(|e| e.as_str()).collect();
+            let more = exprs.len().saturating_sub(shown.len());
+            let mut line = format!("-- Calc: {}", shown.join(" | "));
+            if more > 0 {
+                line.push_str(&format!(" (+{} more)", more));
+            }
+            println!("{}{}{}", C_YELLOW, line, RESET);
+        }
         _ => {}
     }
 }

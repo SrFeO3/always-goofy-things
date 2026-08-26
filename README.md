@@ -64,7 +64,7 @@ Controls how tool results are structured when sent back to the LLM.
 
 Restricts which AI tools the LLM can use. When unset, all tools are enabled. When set (comma-separated or repeated), **only** the listed tools are enabled; disabled tools are hidden from the LLM and refuse to execute even if called.
 
-Available names: `list_directory`, `read_file`, `write_file`, `str_replace_editor`, `grep_search`, `execute_bash`, `fetch_web`, `data_search`, `data_schema`.
+Available names: `list_directory`, `read_file`, `write_file`, `str_replace_editor`, `grep_search`, `execute_bash`, `fetch_web`, `data_search`, `data_schema`, `calc`.
 
 ```bash
 # Read-only exploration session

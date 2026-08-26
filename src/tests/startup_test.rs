@@ -48,6 +48,7 @@ fn is_tool_enabled_all_tools_when_unset() {
         "fetch_web",
         "data_search",
         "data_schema",
+        "calc",
     ] {
         assert!(config.is_tool_enabled(name), "expected '{}' enabled", name);
     }
@@ -126,6 +127,15 @@ fn system_message_full_when_all_enabled() {
             .contains("- str_replace_editor: Replace one exact string block; prefer it over write_file for partial edits.")
     );
     assert!(msg.content.contains("## 2-3. Information Retrieval (list_directory, grep_search, fetch_web, data_search, data_schema)"));
+    assert!(
+        msg.content
+            .contains("## 2-4. Deterministic Calculation (calc)")
+    );
+    assert!(
+        msg.content
+            .contains("verbatim copies of tool execution results"),
+        "citation rule must be present when calc is enabled"
+    );
     assert!(msg.content.contains("## 3. Response Style"));
 }
 
@@ -152,6 +162,14 @@ fn system_message_omits_disabled_tools() {
     assert!(!msg.content.contains("fetch_web"));
     assert!(!msg.content.contains("data_search"));
     assert!(!msg.content.contains("data_schema"));
+    assert!(
+        !msg.content.contains("calc"),
+        "calc must be omitted when disabled"
+    );
+    assert!(
+        !msg.content.contains("verbatim copies"),
+        "citation rule must be omitted when calc is disabled"
+    );
 }
 
 #[test]

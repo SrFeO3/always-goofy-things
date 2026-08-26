@@ -335,6 +335,14 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         ));
     }
 
+    if is_enabled("calc") {
+        tool_sections.push(
+            "## 2-4. Deterministic Calculation (calc)\n\
+             - calc: Deterministic, side-effect-free evaluator for arithmetic, percentages, rates, byte/unit conversion, epoch (ns/s/ms) to UTC datetime conversion, decoding (base64/hex/url/json), and string normalization; accepts all needed expressions as one batch in a single call. Use it for ALL computations and conversions; never compute or convert values by mental arithmetic or guesswork."
+                .to_string(),
+        );
+    }
+
     if !tool_sections.is_empty() {
         sections.push(format!(
             "## 2. Tools (your interface to the workspace and the outside world)\n{}",
@@ -342,12 +350,19 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         ));
     }
 
-    sections.push(
+    let citation_rule = if is_enabled("calc") {
+        "\n\
+         - All numbers, timestamps, and conversion results in your outputs must be verbatim copies of tool execution results (from calc or database queries). Never compute or convert values by mental arithmetic, timezone math, or guesswork, and never repeat a value from a tool result with modified numbers. If a required value is not present in any tool result, obtain it from a deterministic tool (calc or a database query) before writing it; if none is available, state the value as unverified instead of computing it yourself."
+            .to_string()
+    } else {
+        String::new()
+    };
+    sections.push(format!(
         "## 3. Response Style\n\
          - Briefly explain the purpose of a tool before calling it.\n\
-         - Maintain system rules at the top of the context for inference efficiency."
-            .to_string(),
-    );
+         - Maintain system rules at the top of the context for inference efficiency.{}",
+        citation_rule
+    ));
     sections
 }
 

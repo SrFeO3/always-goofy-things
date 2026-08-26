@@ -645,6 +645,7 @@ fn test_validate_path_symlink_escape() {
             "read_file",
             &json!({ "path": link_str }),
             None,
+            None,
             |_| true,
         ));
     assert!(blocked.is_err());
@@ -794,7 +795,14 @@ fn test_get_tool_definitions_only_data_tools_with_db_type() {
 
 #[tokio::test]
 async fn test_execute_tool_rejects_disabled() {
-    let res = execute_tool("execute_bash", &json!({ "command": "ls" }), None, |_| false).await;
+    let res = execute_tool(
+        "execute_bash",
+        &json!({ "command": "ls" }),
+        None,
+        None,
+        |_| false,
+    )
+    .await;
     let err = res.unwrap_err().to_string();
     assert!(
         err.contains("[TOOL_DISABLED]"),
@@ -824,6 +832,91 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
         "expected [TOOL_DISABLED] reason, got: {}",
         reason
     );
+}
+
+#[tokio::test]
+async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
+    // calc must NEVER auto-run without a reflex flag (like every tool).
+    // Batch mode (no stdin) denies instead of executing.
+    let decision = confirm_execute_tool(
+        "calc",
+        &json!({ "expressions": ["1 + 1"] }),
+        false, // unsafe_reflex off
+        false, // db_unsafe_reflex off (does not apply to calc)
+        true,  // batch
+        |_| true,
+    )
+    .await;
+    assert!(!decision.proceed, "calc must not auto-run without reflex");
+    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
+
+    // --db-unsafe-reflex alone must NOT auto-confirm calc (db-only flag).
+    let decision = confirm_execute_tool(
+        "calc",
+        &json!({ "expressions": ["1 + 1"] }),
+        false,
+        true,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(!decision.proceed, "db_unsafe_reflex must not gate calc");
+
+    // Under --unsafe-reflex calc auto-confirms (side-effect-free policy).
+    let decision = confirm_execute_tool(
+        "calc",
+        &json!({ "expressions": ["1 + 1"] }),
+        true,
+        false,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(decision.proceed);
+    assert_eq!(decision.kind, ToolRunDecisionKind::AutoConfirm);
+}
+
+#[tokio::test]
+async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
+    // Reflex gates off: NO tool may auto-confirm. Batch mode must deny every
+    // tool (SystemError) instead of running it without y/N.
+    let cases: &[(&str, serde_json::Value)] = &[
+        ("read_file", json!({ "path": "x" })),
+        ("write_file", json!({ "path": "x", "content": "y" })),
+        (
+            "str_replace_editor",
+            json!({ "path": "x", "old_string": "a", "new_string": "b" }),
+        ),
+        ("grep_search", json!({ "query": "q" })),
+        ("list_directory", json!({ "path": "." })),
+        ("execute_bash", json!({ "command": "ls" })),
+        ("fetch_web", json!({ "url": "https://example.com" })),
+        ("data_search", json!({ "query": "SELECT 1" })),
+        ("data_schema", json!({})),
+        ("calc", json!({ "expressions": ["1 + 1"] })),
+    ];
+    for (name, args) in cases {
+        let decision = confirm_execute_tool(
+            name,
+            args,
+            false, // unsafe_reflex off
+            false, // db_unsafe_reflex off
+            true,  // batch: no y/N available -> must deny, never execute
+            |_| true,
+        )
+        .await;
+        assert!(
+            !decision.proceed,
+            "tool '{}' must not auto-run without any reflex flag",
+            name
+        );
+        assert_eq!(
+            decision.kind,
+            ToolRunDecisionKind::SystemError,
+            "tool '{}'",
+            name
+        );
+    }
 }
 
 #[test]

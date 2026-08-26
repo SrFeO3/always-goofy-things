@@ -155,6 +155,14 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
             // (whitelist/blacklist) before reaching the database.
             (true, Some("Read-only database query".to_string()))
         }
+        "calc" => {
+            // calc has no file or network access and a bounded batch size.
+            // Reached only when the caller's reflex gate is on (--unsafe-reflex).
+            (
+                true,
+                Some("Side-effect-free deterministic expression evaluation".to_string()),
+            )
+        }
         _ => (false, None),
     }
 }

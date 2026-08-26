@@ -44,6 +44,7 @@ use crate::file::{self, FileType};
 use crate::reflex::auto_confirm;
 #[cfg(not(feature = "gui"))]
 use crate::startup::{C_CYAN, RESET};
+use crate::tools_calc;
 use crate::tools_data;
 use crate::tools_fuzzy::{
     build_full_fuzzy_pattern, build_full_skip_blank_pattern, build_space_fuzzy_pattern,
@@ -103,7 +104,7 @@ pub fn set_workspace_root(root: PathBuf) {
     let _ = WORKSPACE_ROOT.set(root);
 }
 
-fn workspace_root() -> &'static PathBuf {
+pub(crate) fn workspace_root() -> &'static PathBuf {
     WORKSPACE_ROOT
         .get()
         .expect("workspace root not set: set_workspace_root must be called at startup")
@@ -123,6 +124,7 @@ pub enum ToolName {
     FetchWeb,
     DataSearch,
     DataSchema,
+    Calc,
 }
 
 impl ToolName {
@@ -138,6 +140,7 @@ impl ToolName {
             ToolName::FetchWeb => "fetch_web",
             ToolName::DataSearch => "data_search",
             ToolName::DataSchema => "data_schema",
+            ToolName::Calc => "calc",
         }
     }
 }
@@ -303,6 +306,27 @@ pub fn get_tool_definitions(
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "calc",
+                "description": "Deterministic, side-effect-free expression evaluator for arithmetic, percentages, rates, byte/unit conversion, epoch (ns/s/ms) to UTC datetime conversion, decoding (base64/hex/url/json), and string normalization. Accepts a LIST of expressions in a single call and returns one result per expression in the same order. Use this for ALL computations and conversions: never compute or convert values by mental arithmetic or timezone guesswork, and never repeat a value from a tool result with modified numbers. When several calculations are needed, pass them all in this one call instead of calling calc repeatedly.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expressions": {
+                            "type": "array",
+                            "description": "All expressions to evaluate in this batch, in the order the results should be returned. Pass every needed calculation in this single call (up to 50).",
+                            "items": {
+                                "type": "string",
+                                "description": "One expression to evaluate. Operators: + - * / % with parentheses; numbers are IEEE 754 doubles (integer literals are kept exact). Functions: percent(part, whole), rate(count, seconds), round(value, digits), sum(...), avg(...), bytes_to_human(bytes), bytes_unit(bytes, unit), epoch_ns_to_utc(ns), epoch_s_to_utc(seconds), epoch_ms_to_utc(ms), utc_to_epoch(iso), duration_between(from, to), tz_convert(datetime, zone), base64_encode(s), base64_decode(s), hex_encode(s), hex_decode(s), url_encode(s), url_decode(s), json_get(json, path), normalize(s). Times are expressed as 'YYYY-MM-DD HH:MM:SS UTC' or with a fixed offset like '... +09:00' (tz_convert accepts UTC and fixed offsets only). Examples: \"1425 * 32\", \"(100 + 50) / 3\", \"percent(17121, 17267)\", \"round(percent(17121, 17267), 2)\", \"epoch_ns_to_utc(1472057364542756000)\", \"bytes_to_human(71176704)\", \"base64_decode('aHR0cHM6Ly8=')\". Each result element carries a calc_id; when quoting a computed value in artifacts or reports, cite its calc_id as [C-XXXX]."
+                            }
+                        }
+                    },
+                    "required": ["expressions"]
+                }
+            }
+        }),
     ];
 
     // Conditionally append data tools when db_type is configured
@@ -327,6 +351,7 @@ pub async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     db_ctx: Option<&tools_data::DbContext>,
+    calc_ledger: Option<&tools_calc::CalcLedger>,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Result<serde_json::Value> {
     // Refuse disabled tools even if the LLM calls them anyway (defense in depth).
@@ -371,6 +396,7 @@ pub async fn execute_tool(
             let table = args.get("table").and_then(|v| v.as_str());
             tools_data::execute_data_schema(ctx, table).await
         }
+        "calc" => Ok(tools_calc::execute_calc(args, calc_ledger)),
         _ => Err(anyhow::anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
     }
 }

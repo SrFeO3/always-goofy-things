@@ -43,6 +43,7 @@ async fn test_tool_smoke_read_file_and_grep() {
         "read_file",
         &serde_json::json!({ "path": probe }),
         None,
+        None,
         |_| true,
     )
     .await
@@ -53,6 +54,7 @@ async fn test_tool_smoke_read_file_and_grep() {
     let res = crate::tools::execute_tool(
         "grep_search",
         &serde_json::json!({ "query": "unique_probe_token_42", "path": dirname }),
+        None,
         None,
         |_| true,
     )
@@ -67,6 +69,7 @@ async fn test_tool_smoke_disabled_tool_refused() {
     let res = crate::tools::execute_tool(
         "read_file",
         &serde_json::json!({ "path": "._smtool_disabled_probe.txt" }),
+        None,
         None,
         |_| false,
     )

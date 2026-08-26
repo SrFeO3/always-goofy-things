@@ -21,6 +21,7 @@ use crate::pretty;
 use crate::startup;
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use crate::tools::{self, ToolRunDecision, ToolRunDecisionKind};
+use crate::tools_calc;
 use crate::tools_data;
 
 /// Record one call into `metrics` and append it to the per-label stats JSONL.
@@ -117,6 +118,9 @@ pub(crate) async fn run_reasoning_loop(
     let mut empty_response_count: usize = 0;
     let mut reasoning_turn: u32 = 0;
     let mut end_reason = EndReason::Completed;
+    // Number ledger for calc results (spec: number ledger): todo modes append
+    // under <workspace>/artifacts/, other modes to the session data dir.
+    let calc_ledger = tools_calc::CalcLedger::new(&session.label, config.todo_mode);
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
@@ -399,9 +403,13 @@ pub(crate) async fn run_reasoning_loop(
 
                     // execute tool and get tool_result json for following steps
                     let db_ctx = tools_data::db_context_from_config(config);
-                    match tools::execute_tool(&call.function.name, &args, db_ctx.as_ref(), |name| {
-                        config.is_tool_enabled(name)
-                    })
+                    match tools::execute_tool(
+                        &call.function.name,
+                        &args,
+                        db_ctx.as_ref(),
+                        Some(&calc_ledger),
+                        |name| config.is_tool_enabled(name),
+                    )
                     .await
                     {
                         Ok(res) => {
