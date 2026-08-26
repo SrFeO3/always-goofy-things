@@ -35,7 +35,7 @@ use crate::reasoning::{EndReason, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
     build_handover_entry, llm_guard_declared_outputs, llm_guard_final_answer,
-    llm_guard_handover_report,
+    llm_guard_goal_outputs_missing, llm_guard_handover_report, llm_guard_unfinished_outputs,
 };
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
@@ -483,6 +483,93 @@ async fn final_replan_confirms_completion(
     }
 }
 
+/// Replan feedback: pending app reports plus the current sweep of declared
+/// but still-missing output paths, so the planner can add fix tasks.
+fn build_replan_feedback(app_feedback: &[String]) -> Option<String> {
+    let mut items: Vec<String> = app_feedback.to_vec();
+    let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+    let unfinished = llm_guard_unfinished_outputs(&handover);
+    if !unfinished.is_empty() {
+        items.push(format!(
+            "Declared Output paths still do not exist: {}. Add a fix task if the plan is incomplete.",
+            unfinished
+                .iter()
+                .map(|(t, p)| format!("{}: {}", t, p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items.join("\n"))
+    }
+}
+
+/// Mode 2 completion gate: the Goal deliverables must exist on disk
+/// before the job may exit as complete; otherwise completion stays
+/// unconfirmed (Err, non-zero exit). Runs after the final replan, including
+/// the Ctrl+C case, since the check itself needs no LLM.
+fn verify_goal_deliverables() -> Result<()> {
+    let todo_content = std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
+    let missing = llm_guard_goal_outputs_missing(&todo_content);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    println!(
+        "\n{}--- [App] Completion NOT confirmed: Goal deliverables do not exist: {} ---{}",
+        startup::C_RED,
+        missing.join(", "),
+        startup::RESET
+    );
+    anyhow::bail!(
+        "completion unconfirmed: Goal deliverables do not exist: {}",
+        missing.join(", ")
+    )
+}
+
+/// Job-end sweep: report declared output paths that still do not
+/// exist. Three channels: console warning, summary note, and a handover.md
+/// machine note (content-deduped; write failure is warned about, never
+/// fatal, so a completed job is not broken by a logging problem).
+fn finalize_with_sweep(mut summary: String) -> String {
+    let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
+    let missing = llm_guard_unfinished_outputs(&handover);
+    if missing.is_empty() {
+        return summary;
+    }
+    let paths: Vec<String> = missing
+        .iter()
+        .map(|(t, p)| format!("{}: {}", t, p))
+        .collect();
+    println!(
+        "\n{}--- [App] Declared Output paths still do not exist at job end: {} ---{}",
+        startup::C_YELLOW,
+        paths.join(", "),
+        startup::RESET
+    );
+    let note = format!(
+        "> [App] Job ended with declared Output paths still missing: {}",
+        paths.join(", ")
+    );
+    if !handover.lines().any(|l| l.trim() == note)
+        && let Err(e) = append_handover(&note)
+    {
+        eprintln!(
+            "[App] Warning: failed to record job-end note in handover.md: {}",
+            e
+        );
+    }
+    if !summary.is_empty() && !summary.ends_with('\n') {
+        summary.push('\n');
+    }
+    summary.push_str(&format!(
+        "(Note: declared Output paths still missing at job end: {})",
+        paths.join(", ")
+    ));
+    summary
+}
+
 /// Run the Plan-Exec todo loop for Mode 1 and Mode 2.
 pub(crate) async fn run_todo_loop(
     config: &startup::Config,
@@ -524,11 +611,11 @@ pub(crate) async fn run_todo_loop(
     // so the loop's final-replan completion gate still runs.
     if pending.is_empty() && config.todo_mode != 2 {
         let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
-        return Ok(llm_guard_final_answer(
+        return Ok(finalize_with_sweep(llm_guard_final_answer(
             &content,
             "",
             "All tasks already completed.",
-        ));
+        )));
     }
 
     let pending_count = pending.len();
@@ -544,7 +631,7 @@ pub(crate) async fn run_todo_loop(
     // every session can read it together with todo.md.
     seed_handover()?;
 
-    if config.todo_mode == 2 {
+    let summary = if config.todo_mode == 2 {
         run_todo_loop_mode2(
             config,
             provider,
@@ -554,7 +641,7 @@ pub(crate) async fn run_todo_loop(
             &user_input,
             attached_files,
         )
-        .await
+        .await?
     } else {
         run_todo_loop_mode1(
             config,
@@ -566,8 +653,9 @@ pub(crate) async fn run_todo_loop(
             attached_files,
             pending,
         )
-        .await
-    }
+        .await?
+    };
+    Ok(finalize_with_sweep(summary))
 }
 
 /// Build the task user message: the task description plus the `-q` addendum
@@ -641,64 +729,103 @@ async fn run_todo_loop_mode1(
         if end_reason.is_completed() {
             // llm_guard_: condense an over-long handover report before logging.
             llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
-            let raw_note = task_session
+            let mut raw_note = task_session
                 .messages
                 .last()
                 .map(|m| m.content.as_str())
                 .unwrap_or("Task completed.");
 
-            mark_task_done(0)?;
-            // Hand the executor's final report over to the free-form log.
-            // Uses the stable task index (not the per-run counter) so that
-            // resumed runs never collide with earlier entries of the same
-            // task number. Declared Output paths are kept on an untruncated
-            // `outputs:` line (the one-liner may cut them).
-            append_handover(&build_handover_entry(
-                &format!("- Task {}", task.index + 1),
-                raw_note,
-            ))?;
-
-            // Mechanical check: every Output path the executor declared must
-            // exist on disk. Mode 1 has no planner to fix it, so warn.
-            let missing = llm_guard_declared_outputs(raw_note);
+            // A task is complete only when every declared Output path
+            // exists on disk. One feedback retry (same session, so the
+            // LLM sees its previous work), then give up: no [x], and a
+            // durable reason is left for a resumed run.
+            let mut missing = llm_guard_declared_outputs(raw_note);
             if !missing.is_empty() {
+                let feedback = format!(
+                    "Your report declared Output paths that do not exist: {}. \
+                     The task is NOT complete until every declared Output path exists \
+                     on disk. Finish the work and rewrite your Handover Report with \
+                     the existing paths.",
+                    missing.join(", ")
+                );
+                let _ = run_reasoning_loop(
+                    config,
+                    provider,
+                    &mut task_session,
+                    settings,
+                    metrics,
+                    "todo:guard:fix-outputs",
+                    feedback,
+                    Vec::new(),
+                )
+                .await;
+                raw_note = task_session
+                    .messages
+                    .last()
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("Task completed.");
+                missing = llm_guard_declared_outputs(raw_note);
+            }
+
+            if missing.is_empty() {
+                mark_task_done(0)?;
+                // Hand the executor's final report over to the free-form log.
+                // Uses the stable task index (not the per-run counter) so that
+                // resumed runs never collide with earlier entries of the same
+                // task number. Declared Output paths are kept on an untruncated
+                // `outputs:` line (the one-liner may cut them).
+                append_handover(&build_handover_entry(
+                    &format!("- Task {}", task.index + 1),
+                    raw_note,
+                ))?;
+
+                // Capture LLM's final message as the final answer
+                if let Some(msg) = task_session.messages.last()
+                    && !msg.content.trim().is_empty()
+                {
+                    last_answer = msg.content.clone();
+                }
+
+                persistence::archive_todo_session(&task_label, task.index)?;
+
+                // Push task's LLM conversation to GUI log
+                for msg in task_session.messages.iter().skip(1) {
+                    gui_log.messages.push(msg.clone());
+                }
+                let done_msg = format!("--- Task {}/{} done ---", task_num, pending_count);
+                println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
+                gui_log.messages.push(Message {
+                    role: "system".to_string(),
+                    content: done_msg.clone(),
+                    ..Default::default()
+                });
+                #[cfg(feature = "gui")]
+                crate::model::LLM_STREAM_BUF
+                    .lock()
+                    .unwrap()
+                    .2
+                    .push_str(&format!("{}\n", done_msg));
+
+                completed += 1;
+            } else {
+                // Give up after the single retry: the task stays unchecked.
+                // The machine note marker differs from `- Task N:` so
+                // append_handover's dedup never swallows a later real entry
+                // from a resumed run.
                 println!(
-                    "\n{}--- [App] Task {} declared Output paths that do not exist: {} ---{}",
+                    "\n{}--- [App] Task {} NOT complete: declared Output paths do not exist: {} ---{}",
                     startup::C_YELLOW,
                     task_num,
                     missing.join(", "),
                     startup::RESET
                 );
+                append_handover(&format!(
+                    "- Task {} [unverified]: not completed; declared Output paths do not exist: {}. No more retries this run; run again to retry.",
+                    task.index + 1,
+                    missing.join(", ")
+                ))?;
+                break;
             }
-
-            // Capture LLM's final message as the final answer
-            if let Some(msg) = task_session.messages.last()
-                && !msg.content.trim().is_empty()
-            {
-                last_answer = msg.content.clone();
-            }
-
-            persistence::archive_todo_session(&task_label, task.index)?;
-
-            // Push task's LLM conversation to GUI log
-            for msg in task_session.messages.iter().skip(1) {
-                gui_log.messages.push(msg.clone());
-            }
-            let done_msg = format!("--- Task {}/{} done ---", task_num, pending_count);
-            println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
-            gui_log.messages.push(Message {
-                role: "system".to_string(),
-                content: done_msg.clone(),
-                ..Default::default()
-            });
-            #[cfg(feature = "gui")]
-            crate::model::LLM_STREAM_BUF
-                .lock()
-                .unwrap()
-                .2
-                .push_str(&format!("{}\n", done_msg));
-
-            completed += 1;
         } else {
             // Distinguish Ctrl+C from LLM failure / limits.
             match end_reason {
@@ -774,11 +901,6 @@ async fn run_todo_loop_mode2(
         // the planner can add tasks if the Goal is not yet achieved; exit
         // only when the plan is still complete after that final replan.
         if check_completion(&todo_content) {
-            let feedback = if app_feedback.is_empty() {
-                None
-            } else {
-                Some(app_feedback.join("\n"))
-            };
             if final_replan_confirms_completion(
                 config,
                 settings,
@@ -786,10 +908,13 @@ async fn run_todo_loop_mode2(
                 metrics,
                 gui_log,
                 user_input,
-                feedback.as_deref(),
+                build_replan_feedback(&app_feedback).as_deref(),
             )
             .await?
             {
+                // Completion gate: the Goal deliverables must exist on disk
+                // before the job exits as complete.
+                verify_goal_deliverables()?;
                 println!(
                     "{}--- [TODO LOOP] Completion reached. Exiting. ---{}",
                     startup::C_CYAN,
@@ -906,11 +1031,6 @@ async fn run_todo_loop_mode2(
         };
 
         if check_completion(&updated) {
-            let feedback = if app_feedback.is_empty() {
-                None
-            } else {
-                Some(app_feedback.join("\n"))
-            };
             if final_replan_confirms_completion(
                 config,
                 settings,
@@ -918,10 +1038,13 @@ async fn run_todo_loop_mode2(
                 metrics,
                 gui_log,
                 user_input,
-                feedback.as_deref(),
+                build_replan_feedback(&app_feedback).as_deref(),
             )
             .await?
             {
+                // Completion gate: the Goal deliverables must exist on disk
+                // before the job exits as complete.
+                verify_goal_deliverables()?;
                 println!(
                     "{}--- [TODO LOOP] Completion reached during replan. Exiting. ---{}",
                     startup::C_CYAN,
@@ -1031,7 +1154,8 @@ async fn run_todo_loop_mode2(
 
             // Mechanical check: every Output path the executor declared must
             // exist on disk; missing ones are reported to the next replan so
-            // the planner can add a fix task.
+            // the planner can add a fix task. The task does not count as
+            // verified-complete until the declared paths exist.
             let missing = llm_guard_declared_outputs(&report);
             if !missing.is_empty() {
                 println!(
@@ -1068,7 +1192,11 @@ async fn run_todo_loop_mode2(
                 .2
                 .push_str(&format!("{}\n", done_msg));
 
-            completed += 1;
+            // A task whose declared Output paths are missing does not count
+            // as verified-complete; the replan feedback carries the gap.
+            if missing.is_empty() {
+                completed += 1;
+            }
         } else {
             // Distinguish Ctrl+C from LLM failure / limits.
             match end_reason {

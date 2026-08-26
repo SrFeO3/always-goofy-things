@@ -203,3 +203,94 @@ fn test_llm_guard_final_answer_fallback_chain() {
     assert_eq!(llm_guard_final_answer(md, "", "fallback"), "fallback");
     assert_eq!(llm_guard_final_answer(md, "   ", "fallback"), "fallback");
 }
+
+// ---------------------------------------------------------------------------
+// Declared-output verification (job-end sweep + Goal gate).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unfinished_outputs_lists_missing_task_outputs() {
+    let _guard = ArtifactFilesGuard::new(&["./artifacts/_agt_test_ok.md"]);
+    std::fs::write("./artifacts/_agt_test_ok.md", "ok\n").unwrap();
+    let md = "# Handover Log\n\n- Task 2: - Status: done - Output: artifacts/_agt_test_ok.md, artifacts/_agt_test_missing.md\noutputs: artifacts/_agt_test_ok.md, artifacts/_agt_test_missing.md\n- Task 5: - Status: done - Output: artifacts/other.md\noutputs: artifacts/other.md\n";
+    assert_eq!(
+        llm_guard_unfinished_outputs(md),
+        vec![
+            (
+                "Task 2".to_string(),
+                "artifacts/_agt_test_missing.md".to_string()
+            ),
+            ("Task 5".to_string(), "artifacts/other.md".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_unfinished_outputs_excludes_planner_and_prose() {
+    let md = "- Planner: - Status: done - Output: artifacts/plan.md\noutputs: artifacts/plan.md\n- Task 1: - Status: done - Output: none\nA task entry may be followed by an `outputs:` line listing files.\n";
+    // Planner outputs and the template prose (not an `outputs:`-synced line
+    // under a Task) are ignored; no declared paths remain.
+    assert!(llm_guard_unfinished_outputs(md).is_empty());
+}
+
+#[test]
+fn test_unfinished_outputs_dedups_normalized_paths() {
+    let md = "- Task 1: - Status: done - Output: artifacts/a.md\noutputs: ./artifacts/a.md, artifacts/a.md\n";
+    // `./`-prefixed and plain spellings of the same missing path collapse
+    // into one entry (first task wins).
+    assert_eq!(
+        llm_guard_unfinished_outputs(md),
+        vec![("Task 1".to_string(), "artifacts/a.md".to_string())]
+    );
+}
+
+#[test]
+fn test_unfinished_outputs_skips_unverifiable_paths() {
+    let md = "- Task 3: - Status: done\noutputs: artifacts/*.md, https://example.com/x.md, artifacts/real.md\n";
+    assert_eq!(
+        llm_guard_unfinished_outputs(md),
+        vec![("Task 3".to_string(), "artifacts/real.md".to_string())]
+    );
+}
+
+#[test]
+fn test_goal_outputs_missing_lists_only_missing_or_empty() {
+    let _guard = ArtifactFilesGuard::new(&[
+        "./artifacts/_agt_test_existing.md",
+        "./artifacts/_agt_test_empty.md",
+    ]);
+    std::fs::write("./artifacts/_agt_test_existing.md", "x\n").unwrap();
+    std::fs::write("./artifacts/_agt_test_empty.md", "").unwrap();
+    let md = "## Goal\nWrite artifacts/_agt_test_existing.md, artifacts/_agt_test_missing.md and artifacts/_agt_test_empty.md.\n";
+    assert_eq!(
+        llm_guard_goal_outputs_missing(md),
+        vec![
+            "artifacts/_agt_test_missing.md".to_string(),
+            "artifacts/_agt_test_empty.md".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_goal_outputs_missing_none_declared_is_empty() {
+    let md = "## Goal\nDo things.\n";
+    assert!(llm_guard_goal_outputs_missing(md).is_empty());
+}
+
+#[test]
+fn test_final_answer_notes_missing_goal_artifact() {
+    let _guard = ArtifactFilesGuard::new(&["./artifacts/_agt_test_note.md"]);
+    let md = "## Goal\nSave to artifacts/_agt_test_note.md.\n";
+    let answer = llm_guard_final_answer(md, "last report", "fallback");
+    assert!(answer.starts_with("last report"));
+    assert!(answer.contains("artifacts/_agt_test_note.md"));
+    assert!(answer.contains("missing or empty"));
+}
+
+#[test]
+fn test_final_answer_has_no_note_when_goal_artifact_exists() {
+    let _guard = ArtifactFilesGuard::new(&["./artifacts/_agt_test_note_ok.md"]);
+    std::fs::write("./artifacts/_agt_test_note_ok.md", "GOAL\n").unwrap();
+    let md = "## Goal\nSave to artifacts/_agt_test_note_ok.md.\n";
+    assert_eq!(llm_guard_final_answer(md, "", "fallback"), "GOAL\n");
+}

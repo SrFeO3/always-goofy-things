@@ -77,6 +77,81 @@ pub(crate) fn llm_guard_declared_outputs(report: &str) -> Vec<String> {
         .collect()
 }
 
+/// Paths that an existence check cannot judge (globs, URLs, shell-ish
+/// patterns). These are skipped by the job-end sweep to avoid false
+/// "missing" reports.
+fn is_unverifiable_path(p: &str) -> bool {
+    p.contains('*') || p.contains('?') || p.contains('<') || p.contains('>') || p.contains("://")
+}
+
+/// Job-end sweep: declared `outputs:` paths of `- Task` entries in the
+/// handover log that still do not exist on disk, as `(task label, path)`
+/// pairs (deduped by normalized path, first task wins).
+///
+/// The `outputs:` line is written by `build_handover_entry` (never
+/// truncated), so this is the durable declaration record. `- Planner`
+/// entries are excluded (their outputs are plan files, not deliverables).
+pub(crate) fn llm_guard_unfinished_outputs(handover_md: &str) -> Vec<(String, String)> {
+    let mut current_task: Option<String> = None;
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for line in handover_md.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- Task ") {
+            let num = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("?")
+                .trim_end_matches(':')
+                .to_string();
+            current_task = Some(format!("Task {}", num));
+            continue;
+        }
+        if trimmed.starts_with("- Planner") {
+            current_task = None;
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("outputs:") else {
+            continue;
+        };
+        let Some(task) = &current_task else {
+            continue;
+        };
+        // Reuse the report parser by synthesizing an `Output:` line, so the
+        // sweep and build_handover_entry share one syntax.
+        for path in extract_output_paths(&format!("Output: {}", rest)) {
+            if is_unverifiable_path(&path) {
+                continue;
+            }
+            let normalized = path.strip_prefix("./").unwrap_or(&path);
+            if std::path::Path::new(normalized).exists() {
+                continue;
+            }
+            if !missing.iter().any(|(_, m)| m == normalized) {
+                missing.push((task.clone(), normalized.to_string()));
+            }
+        }
+    }
+    missing
+}
+
+/// Declared Goal artifact paths (from the `## Goal` section) that are
+/// missing or empty on disk. Empty when the Goal names no artifact, in
+/// which case no gate applies.
+pub(crate) fn llm_guard_goal_outputs_missing(todo_md: &str) -> Vec<String> {
+    extract_goal_artifact_paths(todo_md)
+        .into_iter()
+        .filter(|p| {
+            if is_unverifiable_path(p) {
+                return false;
+            }
+            let Ok(content) = std::fs::read_to_string(p) else {
+                return true;
+            };
+            content.trim().is_empty()
+        })
+        .collect()
+}
+
 /// Build a handover entry: one-line report plus an untruncated `outputs:`
 /// line when `Output:` paths are declared.
 pub(crate) fn build_handover_entry(prefix: &str, report: &str) -> String {
@@ -134,10 +209,13 @@ fn extract_goal_artifact_paths(todo_md: &str) -> Vec<String> {
 
 /// Resolve the job's final answer.
 /// Prefers the Goal artifact (the LAST named path first), then the last
-/// task's report, then the given notice.
+/// task's report, then the given notice. When Goal artifact paths were
+/// declared but none is readable, the fallback carries an explicit note
+/// (no silent degradation).
 pub(crate) fn llm_guard_final_answer(todo_md: &str, last_answer: &str, fallback: &str) -> String {
-    for path in extract_goal_artifact_paths(todo_md).into_iter().rev() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    let goal_paths = extract_goal_artifact_paths(todo_md);
+    for path in goal_paths.iter().rev() {
+        let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
         if content.trim().is_empty() {
@@ -155,10 +233,23 @@ pub(crate) fn llm_guard_final_answer(todo_md: &str, last_answer: &str, fallback:
         }
         return content;
     }
+    let note = if !goal_paths.is_empty() {
+        format!(
+            "\n\n(Note: the Goal artifact {} is missing or empty, so the final answer uses {})",
+            goal_paths.join(", "),
+            if last_answer.trim().is_empty() {
+                "the fallback"
+            } else {
+                "the task report"
+            }
+        )
+    } else {
+        String::new()
+    };
     if !last_answer.trim().is_empty() {
-        return last_answer.to_string();
+        return format!("{}{}", last_answer.trim_end(), note);
     }
-    fallback.to_string()
+    format!("{}{}", fallback.trim_end(), note)
 }
 
 /// Ask the LLM once to rewrite an over-long Handover Report (skipped near
