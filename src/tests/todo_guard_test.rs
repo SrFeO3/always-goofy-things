@@ -103,6 +103,51 @@ fn test_extract_output_paths_trailing_punct_and_links() {
 }
 
 #[test]
+fn test_extract_output_paths_strict_list_syntax() {
+    // The machine format is a comma-separated `Output:` list. Japanese list
+    // separators are NOT split: `・` between paths is taken as written (one
+    // phantom declaration), so reports must use the documented format.
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/a.md・b.md"),
+        vec!["artifacts/a.md・b.md"]
+    );
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/a.md、artifacts/b.md"),
+        vec!["artifacts/a.md、artifacts/b.md"]
+    );
+    // Only `artifacts/` spellings are returned; other declarations are
+    // prose noise and never tracked.
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/a.md, b.md, `c.md`"),
+        vec!["artifacts/a.md"]
+    );
+}
+
+#[test]
+fn test_extract_output_paths_strict_prefix_and_prose() {
+    // A fullwidth colon after Output is not the documented prefix, and
+    // prose suffixes/annotations are taken as written (no Japanese fuzz);
+    // non-artifacts wrappers are dropped by the artifacts-only rule.
+    assert!(extract_output_paths("- Output：artifacts/final-report.md").is_empty());
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/final-report.md（既存確認）"),
+        vec!["artifacts/final-report.md（既存確認）"]
+    );
+    assert!(extract_output_paths("- Output: 「artifacts/a.md」").is_empty());
+}
+
+#[test]
+fn test_extract_output_paths_artifacts_only_and_normalized() {
+    // `./` is normalized to the canonical artifacts/ form, subdir paths
+    // are not artifacts declarations, and `Outputs:` is not `Output:`.
+    assert_eq!(
+        extract_output_paths("- Output: ./artifacts/a.md, sub/x.md"),
+        vec!["artifacts/a.md"]
+    );
+    assert!(extract_output_paths("- Outputs: artifacts/a.md").is_empty());
+}
+
+#[test]
 fn test_build_handover_entry_keeps_untruncated_outputs_line() {
     let long = "x".repeat(400);
     let report = format!(
@@ -123,59 +168,267 @@ fn test_build_handover_entry_no_outputs_line_when_none() {
 }
 
 // ---------------------------------------------------------------------------
-// Completion report (B2): verified deliverables + harness-composed report.
+// Completion report (B2): verified deliverables + application-composed report.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_extract_goal_artifact_paths_basic() {
+fn test_extract_goal_artifact_paths_removed() {
+    // The Goal-prose extraction is gone: `## Deliverables` is the only
+    // machine-verified source, so Goal prose is never parsed (phantom-path
+    // bugs are impossible).
     let md =
         "# Plan\n\n## Goal\nSave the report to artifacts/final-report.md.\n\n## Tasks\n- [ ] a\n";
+    assert!(
+        extract_deliverables_paths(md).is_empty(),
+        "Goal prose must not be parsed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ## Deliverables section: the machine contract for Goal deliverables.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deliverables_primary_section() {
+    // Bullets: plain and checkbox-decorated are both read. Prose lines,
+    // Task bullets below the section, and the Goal/Tasks prose are ignored.
+    let md = "# Plan\n\n## Goal\n最終成果物は artifacts/final-report.md（Goal 散文は読まない）\n\n## Tasks\n- [ ] write artifacts/from-task.md\n\n## Deliverables\n- artifacts/final-report.md\n- artifacts/schema-notes.md\n- artifacts/dimension-notes.md\n- [ ] artifacts/checkbox-tolerated.md\n- 注意: 散文の行\n- artifacts/source-inventory.md 時系列の整理\n";
     assert_eq!(
-        extract_goal_artifact_paths(md),
-        vec!["artifacts/final-report.md"]
+        extract_deliverables_paths(md),
+        vec![
+            "artifacts/final-report.md",
+            "artifacts/schema-notes.md",
+            "artifacts/dimension-notes.md",
+            "artifacts/checkbox-tolerated.md",
+            "artifacts/source-inventory.md",
+        ]
     );
 }
 
 #[test]
-fn test_extract_goal_artifact_paths_backticks_trailing_punct_dedup() {
-    let md = "## Goal\nWrite `artifacts/comparison.md` and artifacts/comparison.md.\n";
+fn test_deliverables_loose_bullet_spellings() {
+    // LLM sloppiness is tolerated: tabs, runs of spaces, alternative
+    // bullet markers (`*`, `+`, `・`, `•`), and Tasks-style checkboxes all
+    // resolve to the same path.
+    let md = "## Deliverables\n\
+- artifacts/a.md\n\
+-\tartifacts/b.md\n\
+-  artifacts/c.md\n\
+* artifacts/d.md\n\
++ artifacts/e.md\n\
+・artifacts/f.md\n\
+• artifacts/g.md\n\
+- [ ] artifacts/h.md\n\
+- [x] artifacts/i.md\n\
+- [X] artifacts/j.md\n\
+\t- artifacts/k.md\n";
     assert_eq!(
-        extract_goal_artifact_paths(md),
-        vec!["artifacts/comparison.md"]
+        extract_deliverables_paths(md),
+        vec![
+            "artifacts/a.md",
+            "artifacts/b.md",
+            "artifacts/c.md",
+            "artifacts/d.md",
+            "artifacts/e.md",
+            "artifacts/f.md",
+            "artifacts/g.md",
+            "artifacts/h.md",
+            "artifacts/i.md",
+            "artifacts/j.md",
+            "artifacts/k.md",
+        ]
     );
 }
 
 #[test]
-fn test_extract_goal_artifact_paths_ignores_other_sections() {
-    let md = "# Plan\n\n## Goal\nDo things.\n\n## Tasks\n- [ ] write artifacts/from-task.md\n";
-    assert!(extract_goal_artifact_paths(md).is_empty());
+fn test_deliverables_loose_heading() {
+    // Extra whitespace and trailing words on the `## Deliverables` heading
+    // are tolerated; unrelated headings still end the section.
+    let md = "##  Deliverables (成果物)\n- artifacts/a.md\n\n## Appendices\n- artifacts/b.md\n";
+    assert_eq!(extract_deliverables_paths(md), vec!["artifacts/a.md"]);
 }
 
 #[test]
-fn test_extract_goal_artifact_paths_rejects_escape_and_non_files() {
+fn test_extract_output_paths_loose_prefix_spellings() {
+    // `Output:` prefix sloppiness is tolerated: an alternative bullet
+    // marker, tabs/extra spaces, a glued dash, and a space before the
+    // colon all still parse (fullwidth colon stays rejected).
+    assert_eq!(
+        extract_output_paths("- Output : artifacts/a.md"),
+        vec!["artifacts/a.md"]
+    );
+    assert_eq!(
+        extract_output_paths("-Output: artifacts/a.md"),
+        vec!["artifacts/a.md"]
+    );
+    assert_eq!(
+        extract_output_paths("* Output:\tartifacts/a.md"),
+        vec!["artifacts/a.md"]
+    );
+    assert_eq!(
+        extract_output_paths("・Output: artifacts/a.md"),
+        vec!["artifacts/a.md"]
+    );
+    assert_eq!(
+        extract_output_paths("+ Output : artifacts/a.md, artifacts/b.md"),
+        vec!["artifacts/a.md", "artifacts/b.md"]
+    );
+    assert!(extract_output_paths("* Output：artifacts/a.md").is_empty());
+}
+
+#[test]
+fn test_deliverables_strict_bullets_only() {
+    // Non-conforming lines are ignored as written: multi-path bullets and
+    // bare names are not parsed (no Japanese fuzz), escape attempts are
+    // rejected, and only file-shaped artifacts/ paths are collected.
     let md =
-        "## Goal\nUse ../outside.md, artifacts/../evil.md, artifacts/ (dir) and artifacts/ok.md.\n";
-    assert_eq!(extract_goal_artifact_paths(md), vec!["artifacts/ok.md"]);
+        "## Deliverables\n- artifacts/a.md・b.md\n- b.md\n- artifacts/../evil.md\n- artifacts\n";
+    assert_eq!(extract_deliverables_paths(md), vec!["artifacts/a.md・b.md"]);
 }
 
 #[test]
-fn test_verified_outputs_goal_first_then_task_outputs() {
+fn test_deliverables_absent_means_no_declarations() {
+    // A plan without a Deliverables section declares no deliverables; the
+    // Goal prose is not read (no gate).
+    let md =
+        "# Plan\n\n## Goal\nSave the report to artifacts/final-report.md.\n\n## Tasks\n- [ ] a\n";
+    assert!(extract_deliverables_paths(md).is_empty());
+}
+
+#[test]
+fn test_deliverables_empty_section_no_fallback() {
+    let md = "# Plan\n\n## Goal\nSave artifacts/ignored.md.\n\n## Tasks\n- [ ] a\n\n## Deliverables\n\n## Appendices\n";
+    assert!(extract_deliverables_paths(md).is_empty());
+}
+
+#[test]
+fn test_guard_state_file_write_mode2_only() {
+    // Mode 2: writes to guard-managed state files are denied; the denial
+    // message is actionable.
+    for (name, path) in [
+        ("write_file", "artifacts/handover.md"),
+        ("str_replace_editor", "artifacts/handover.md"),
+        ("write_file", "artifacts/calc_ledger.jsonl"),
+        ("write_file", "./artifacts/handover.md"),
+    ] {
+        let msg = llm_guard_state_file_write(name, path, 2).expect("mode 2 must deny");
+        assert!(msg.starts_with("[TOOL_DENIED]"), "{}", msg);
+    }
+    // Mode 2: reads, deliverables, root files, same name elsewhere - all fine.
+    for (name, path) in [
+        ("read_file", "artifacts/handover.md"),
+        ("grep_search", "artifacts/handover.md"),
+        ("write_file", "artifacts/final-report.md"),
+        ("write_file", "todo.md"),
+        ("write_file", "handover.md"),
+        ("write_file", "sub/artifacts/handover.md"),
+        ("write_file", "artifacts/handover.md.bak"),
+    ] {
+        assert!(
+            llm_guard_state_file_write(name, path, 2).is_none(),
+            "{} {} must not be denied",
+            name,
+            path
+        );
+    }
+    // Modes 0/1: no denial for the same canonical path.
+    for mode in [0u8, 1u8] {
+        assert!(llm_guard_state_file_write("write_file", "artifacts/handover.md", mode).is_none());
+    }
+}
+
+#[test]
+fn test_goal_outputs_missing_ignores_goal_prose() {
+    // The muse-glimmer phantom line would previously fail the gate; Goal
+    // prose is now never parsed, so a plan without a Deliverables section
+    // has no machine-verified deliverables (no gate, no phantom).
+    let _guard = ArtifactFilesGuard::new(&[
+        "./artifacts/_agt_test_schema.md",
+        "./artifacts/_agt_test_dim.md",
+    ]);
+    std::fs::write("./artifacts/_agt_test_schema.md", "s\n").unwrap();
+    std::fs::write("./artifacts/_agt_test_dim.md", "d\n").unwrap();
+    let md = "## Goal\nクエリ対象カラムは必ず artifacts/_agt_test_schema.md・_agt_test_dim.md に記載済みのものだけを使う。\n";
+    assert!(llm_guard_goal_outputs_missing(md).is_empty());
+}
+
+#[test]
+fn test_verified_outputs_separates_goal_and_task_lists() {
     let _guard = ArtifactFilesGuard::new(&[
         "./artifacts/_agt_test_goal.md",
         "./artifacts/_agt_test_task1.md",
     ]);
     std::fs::write("./artifacts/_agt_test_goal.md", "g\n").unwrap();
     std::fs::write("./artifacts/_agt_test_task1.md", "t\n").unwrap();
-    let todo = "## Goal\nSave to artifacts/_agt_test_goal.md.\n";
+    let todo = "## Goal\nSave to artifacts/_agt_test_goal.md.\n\n## Deliverables\n- artifacts/_agt_test_goal.md\n";
     let handover = "- Task 1: - Status: done\noutputs: artifacts/_agt_test_task1.md, artifacts/_agt_test_missing.md\n- Planner: - Status: done\noutputs: artifacts/plan.md\n";
-    // Goal paths come first; missing and Planner outputs are excluded.
+    // Goal list = Deliverables section only; task list = verified task
+    // outputs (missing and Planner outputs excluded). Never mixed.
     assert_eq!(
         llm_guard_verified_outputs(todo, handover),
-        vec![
-            "artifacts/_agt_test_goal.md".to_string(),
-            "artifacts/_agt_test_task1.md".to_string(),
-        ]
+        (
+            vec!["artifacts/_agt_test_goal.md".to_string()],
+            vec!["artifacts/_agt_test_task1.md".to_string()],
+        )
     );
+}
+
+#[test]
+fn test_verified_outputs_task_list_excludes_goal_paths() {
+    // A path both in the Deliverables section and in a task's outputs is
+    // reported once, under the gated goal list.
+    let _guard = ArtifactFilesGuard::new(&["./artifacts/_agt_test_shared.md"]);
+    std::fs::write("./artifacts/_agt_test_shared.md", "s\n").unwrap();
+    let todo = "## Deliverables\n- artifacts/_agt_test_shared.md\n";
+    let handover = "- Task 1: - Status: done\noutputs: artifacts/_agt_test_shared.md\n";
+    assert_eq!(
+        llm_guard_verified_outputs(todo, handover),
+        (vec!["artifacts/_agt_test_shared.md".to_string()], vec![],)
+    );
+}
+
+#[test]
+fn test_has_deliverables_section_tolerates_heading() {
+    assert!(has_deliverables_section(
+        "## Goal\nx\n\n##  Deliverables (成果物)\n- artifacts/a.md\n"
+    ));
+    assert!(has_deliverables_section(
+        "## Deliverables\n- artifacts/a.md\n"
+    ));
+    assert!(!has_deliverables_section("## Goal\nDeliverables?\n"));
+    assert!(!has_deliverables_section("## Tasks\n- [ ] a\n"));
+}
+
+#[test]
+fn test_handover_entry_filters_non_artifact_outputs() {
+    // `todo.md (updated)`-style declarations are prose noise; the machine
+    // `outputs:` line only records artifacts paths.
+    let entry = build_handover_entry(
+        "- Task 2",
+        "- Status: done\n- Output: artifacts/a.md, todo.md (updated)\n- Findings: ok",
+    );
+    assert!(entry.contains("Output: artifacts/a.md, todo.md (updated)"));
+    assert!(entry.ends_with("outputs: artifacts/a.md"));
+}
+
+#[test]
+fn test_sweep_ignores_non_artifact_declarations() {
+    // Annotated declarations (`todo.md (updated)`) are prose noise and are
+    // never tracked; only artifacts/ paths are reported.
+    let md = "- Task 1: - Status: done\noutputs: artifacts/real_missing.md, todo.md (updated)\n";
+    assert_eq!(
+        llm_guard_unfinished_outputs(md),
+        vec![(
+            "Task 1".to_string(),
+            "artifacts/real_missing.md".to_string()
+        )]
+    );
+}
+
+#[test]
+fn test_tasks_declaring_outputs_counts_artifacts_only() {
+    let md = "- Task 1: - Status: done\noutputs: todo.md (updated)\n- Task 2: - Status: done\noutputs: artifacts/a.md\n";
+    assert_eq!(llm_guard_tasks_declaring_outputs(md), 1);
 }
 
 #[test]
@@ -184,75 +437,102 @@ fn test_verified_outputs_normalizes_and_skips_unverifiable() {
     std::fs::write("./artifacts/_agt_test_norm.md", "x\n").unwrap();
     let todo = "## Goal\nDo things.\n";
     let handover = "- Task 2: - Status: done\noutputs: ./artifacts/_agt_test_norm.md, artifacts/_agt_test_norm.md, artifacts/*.md, https://example.com/r.md\n";
-    // `./`-spellings dedup, globs/URLs are unverifiable and skipped.
+    // `./`-spellings dedup, globs/URLs are unverifiable and skipped; no
+    // Deliverables section, so everything lands in the task list.
     assert_eq!(
         llm_guard_verified_outputs(todo, handover),
-        vec!["artifacts/_agt_test_norm.md".to_string()]
+        (vec![], vec!["artifacts/_agt_test_norm.md".to_string()])
     );
 }
 
 #[test]
-fn test_completion_report_zero_outputs() {
+fn test_completion_report_zero_everything() {
+    // No Deliverables section and no task declarations: both zeros are
+    // annotated so nothing is silently empty.
     assert_eq!(
-        llm_guard_completion_report(&[], 13, 0, 0, false),
-        "OK: all 13 tasks completed; deliverables(0; no tasks declared Output paths)"
+        llm_guard_completion_report(&[], &[], false, 13, 0, 0, false),
+        "OK: all 13 tasks completed; deliverables(0; no ## Deliverables section); task outputs(0; no tasks declared Output paths)"
     );
     assert_eq!(
-        llm_guard_completion_report(&[], 13, 0, 0, true),
-        "OK: all 13 tasks already completed; deliverables(0; no tasks declared Output paths)"
+        llm_guard_completion_report(&[], &[], false, 13, 0, 0, true),
+        "OK: all 13 tasks already completed; deliverables(0; no ## Deliverables section); task outputs(0; no tasks declared Output paths)"
     );
 }
 
 #[test]
-fn test_completion_report_zero_annotates_declarations() {
+fn test_completion_report_goal_and_task_segments() {
+    // Both segments listed side by side, never mixed.
+    let goal = vec!["artifacts/final.md".to_string()];
+    let tasks = vec!["artifacts/notes.md".to_string()];
     assert_eq!(
-        llm_guard_completion_report(&[], 13, 2, 0, false),
-        "OK: all 13 tasks completed; deliverables(0; 2 tasks declared Output paths)"
+        llm_guard_completion_report(&goal, &tasks, true, 3, 2, 0, false),
+        "OK: all 3 tasks completed; deliverables(1): artifacts/final.md; task outputs(1): artifacts/notes.md"
+    );
+}
+
+#[test]
+fn test_completion_report_no_section_with_task_declarations() {
+    // The shape of a plan without ## Deliverables (e.g. the Counter Test
+    // example): the goal segment says so explicitly, and the declared
+    // output is listed under task outputs, not deliverables.
+    let tasks = vec!["artifacts/count.txt".to_string()];
+    assert_eq!(
+        llm_guard_completion_report(&[], &tasks, false, 3, 3, 0, false),
+        "OK: all 3 tasks completed; deliverables(0; no ## Deliverables section); task outputs(1): artifacts/count.txt"
+    );
+}
+
+#[test]
+fn test_completion_report_zero_task_outputs_annotate_declarations() {
+    // Tasks declared outputs but none verified beyond the goal list.
+    assert_eq!(
+        llm_guard_completion_report(&[], &[], true, 13, 2, 0, false),
+        "OK: all 13 tasks completed; deliverables(0); task outputs(0; 2 tasks declared Output paths)"
     );
     assert_eq!(
-        llm_guard_completion_report(&[], 13, 1, 0, false),
-        "OK: all 13 tasks completed; deliverables(0; 1 task declared Output paths)"
+        llm_guard_completion_report(&[], &[], true, 13, 1, 0, false),
+        "OK: all 13 tasks completed; deliverables(0); task outputs(0; 1 task declared Output paths)"
     );
 }
 
 #[test]
 fn test_completion_report_lists_up_to_cap() {
-    let paths: Vec<String> = (1..=7).map(|i| format!("artifacts/f{}.md", i)).collect();
-    let report = llm_guard_completion_report(&paths, 7, 7, 0, false);
+    let goal: Vec<String> = (1..=7).map(|i| format!("artifacts/f{}.md", i)).collect();
+    let report = llm_guard_completion_report(&goal, &[], true, 7, 0, 0, false);
     assert!(report.starts_with("OK: all 7 tasks completed; deliverables(7): artifacts/f1.md"));
     assert!(report.contains("artifacts/f5.md"));
     assert!(!report.contains("artifacts/f6.md"));
-    assert!(report.ends_with("(+2 more)"));
+    assert!(report.contains("(+2 more)"));
 }
 
 #[test]
 fn test_completion_report_small_list() {
-    let paths = vec!["artifacts/a.md".to_string(), "artifacts/b.md".to_string()];
+    let goal = vec!["artifacts/a.md".to_string(), "artifacts/b.md".to_string()];
     assert_eq!(
-        llm_guard_completion_report(&paths, 2, 2, 0, false),
-        "OK: all 2 tasks completed; deliverables(2): artifacts/a.md, artifacts/b.md"
+        llm_guard_completion_report(&goal, &[], true, 2, 0, 0, false),
+        "OK: all 2 tasks completed; deliverables(2): artifacts/a.md, artifacts/b.md; task outputs(0; no tasks declared Output paths)"
     );
 }
 
 #[test]
-fn test_completion_report_already_done_lists_deliverables() {
-    let paths = vec!["artifacts/report.md".to_string()];
+fn test_completion_report_already_done_lists_goal_deliverables() {
+    let goal = vec!["artifacts/report.md".to_string()];
     assert_eq!(
-        llm_guard_completion_report(&paths, 13, 1, 0, true),
-        "OK: all 13 tasks already completed; deliverables(1): artifacts/report.md"
+        llm_guard_completion_report(&goal, &[], true, 13, 0, 0, true),
+        "OK: all 13 tasks already completed; deliverables(1): artifacts/report.md; task outputs(0; no tasks declared Output paths)"
     );
 }
 
 #[test]
 fn test_completion_report_unverifiable_suffix() {
-    let paths = vec!["artifacts/r.md".to_string()];
+    let goal = vec!["artifacts/r.md".to_string()];
     assert_eq!(
-        llm_guard_completion_report(&paths, 7, 1, 2, false),
-        "OK: all 7 tasks completed; deliverables(1): artifacts/r.md (+2 unverifiable skipped)"
+        llm_guard_completion_report(&goal, &[], true, 7, 0, 2, false),
+        "OK: all 7 tasks completed; deliverables(1): artifacts/r.md; task outputs(0; no tasks declared Output paths) (+2 unverifiable skipped)"
     );
     assert_eq!(
-        llm_guard_completion_report(&[], 7, 0, 3, true),
-        "OK: all 7 tasks already completed; deliverables(0; no tasks declared Output paths) (+3 unverifiable skipped)"
+        llm_guard_completion_report(&[], &[], false, 7, 0, 3, true),
+        "OK: all 7 tasks already completed; deliverables(0; no ## Deliverables section); task outputs(0; no tasks declared Output paths) (+3 unverifiable skipped)"
     );
 }
 
@@ -324,7 +604,7 @@ fn test_goal_outputs_missing_lists_only_missing_or_empty() {
     ]);
     std::fs::write("./artifacts/_agt_test_existing.md", "x\n").unwrap();
     std::fs::write("./artifacts/_agt_test_empty.md", "").unwrap();
-    let md = "## Goal\nWrite artifacts/_agt_test_existing.md, artifacts/_agt_test_missing.md and artifacts/_agt_test_empty.md.\n";
+    let md = "## Deliverables\n- artifacts/_agt_test_existing.md\n- artifacts/_agt_test_missing.md\n- artifacts/_agt_test_empty.md\n";
     assert_eq!(
         llm_guard_goal_outputs_missing(md),
         vec![
@@ -343,12 +623,13 @@ fn test_goal_outputs_missing_binary_file_counts_as_existing() {
         [0x89, 0x50, 0x4e, 0x47, 0x00],
     )
     .unwrap();
-    let md = "## Goal\nWrite artifacts/_agt_test_bin.md.\n";
+    let md = "## Deliverables\n- artifacts/_agt_test_bin.md\n";
     assert!(llm_guard_goal_outputs_missing(md).is_empty());
 }
 
 #[test]
 fn test_goal_outputs_missing_none_declared_is_empty() {
+    // No Deliverables section -> no machine-verified deliverables.
     let md = "## Goal\nDo things.\n";
     assert!(llm_guard_goal_outputs_missing(md).is_empty());
 }
@@ -356,7 +637,7 @@ fn test_goal_outputs_missing_none_declared_is_empty() {
 #[test]
 fn test_goal_outputs_missing_rejects_directories() {
     std::fs::create_dir_all("./artifacts/_agt_test_dir.md").unwrap();
-    let md = "## Goal\nWrite artifacts/_agt_test_dir.md.\n";
+    let md = "## Deliverables\n- artifacts/_agt_test_dir.md\n";
     assert_eq!(
         llm_guard_goal_outputs_missing(md),
         vec!["artifacts/_agt_test_dir.md".to_string()]
@@ -379,11 +660,12 @@ fn test_tasks_declaring_outputs_zero() {
 }
 
 #[test]
-fn test_unverifiable_declared_counts_goal_and_task_outputs() {
-    let todo = "## Goal\nWrite artifacts/*.md.\n";
-    let handover = "- Task 1: - Status: done\noutputs: https://example.com/x.md, artifacts/real.md, artifacts/?x.md\n";
-    // Goal glob (1) + task glob/URL paths (2); the plain path does not count.
-    assert_eq!(llm_guard_unverifiable_declared(todo, handover), 3);
+fn test_unverifiable_declared_counts_deliverables_and_task_outputs() {
+    let todo = "## Deliverables\n- artifacts/*.md\n";
+    let handover = "- Task 1: - Status: done\noutputs: artifacts/*.md, artifacts/real.md\n";
+    // Deliverables glob (1) + task glob (1); the plain path and non-artifacts
+    // URLs (never returned by extraction) do not count.
+    assert_eq!(llm_guard_unverifiable_declared(todo, handover), 2);
 }
 
 // ---------------------------------------------------------------------------

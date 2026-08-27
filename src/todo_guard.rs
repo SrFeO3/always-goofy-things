@@ -34,45 +34,79 @@ fn one_line_report(raw: &str) -> String {
     }
 }
 
-/// Extract the file paths declared in a raw report's `Output:` field.
-/// Accepts `- Output:` / `Output:` prefixes, punctuation/backticks/quotes,
-/// markdown links, trailing `.`/`。`, comma lists, and `none`.
+/// Strip wrapping an LLM may put around a machine-format path: quotes/
+/// backticks/edge punctuation, a bracket pair or markdown link, trailing
+/// `.`/`。`. No Japanese-prose heuristics; non-conforming text stays as-is.
+fn clean_path_token(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    s = s
+        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | ',' | ';' | ':'))
+        .trim()
+        .to_string();
+    // Parenthesized wrapper (ASCII chars, so byte indices are boundaries).
+    if s.starts_with('(') && s.ends_with(')') && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim().to_string();
+    }
+    // Markdown link `[path](url)` or bracket-wrapped `[path]`.
+    if s.starts_with('[') {
+        if let Some(close) = s.find("](") {
+            s = s[1..close].to_string();
+        } else if s.ends_with(']') && s.len() >= 2 {
+            s = s[1..s.len() - 1].trim().to_string();
+        }
+    }
+    // Sentence punctuation an LLM may append after a path.
+    s.trim_end_matches(['.', '。']).to_string()
+}
+
+/// A bullet marker an LLM may use instead of `-` (`*`, `+`, `・`, `•`),
+/// plus any following whitespace. None when the line is not a bullet.
+fn strip_bullet_marker(line: &str) -> Option<&str> {
+    line.strip_prefix(['-', '*', '+', '・', '•'])
+        .map(str::trim_start)
+}
+
+/// A Tasks-style `[ ]` / `[x]` / `[X]` checkbox decorating a bullet. Its
+/// state is ignored (disk existence is the only status); other `[`-lines
+/// are left untouched.
+fn strip_checkbox(body: &str) -> &str {
+    let Some(rest) = body.strip_prefix('[').map(str::trim_start) else {
+        return body;
+    };
+    rest.strip_prefix(']')
+        .or_else(|| rest.strip_prefix("x]"))
+        .or_else(|| rest.strip_prefix("X]"))
+        .map(str::trim_start)
+        .unwrap_or(body)
+}
+
+/// `artifacts/` paths from a report's `Output:` line (comma-separated).
+/// Prefix sloppiness is tolerated - bullet markers, tabs/extra spaces, a
+/// glued dash, a space before the colon; `./` is normalized, non-artifacts
+/// declarations (`todo.md (updated)`) are prose noise, never returned.
 fn extract_output_paths(report: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for line in report.lines() {
         let trimmed = line.trim();
-        let Some(rest) = trimmed
-            .strip_prefix("- Output:")
-            .or_else(|| trimmed.strip_prefix("Output:"))
-            .map(str::trim)
-        else {
+        let rest = strip_bullet_marker(trimmed).unwrap_or(trimmed).trim_start();
+        let Some(rest) = rest.strip_prefix("Output").map(str::trim_start) else {
             continue;
         };
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let rest = rest.trim_start();
         for raw in rest.split(',') {
-            let mut cleaned = raw
-                .trim()
-                .trim_matches('`')
-                .trim_matches('"')
-                .trim()
-                .to_string();
-            if cleaned.starts_with('(') && cleaned.ends_with(')') && cleaned.len() >= 2 {
-                cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
-            }
-            // Markdown link `[path](url)` or bracket-wrapped `[path]`.
-            if cleaned.starts_with('[') {
-                if let Some(close) = cleaned.find("](") {
-                    cleaned = cleaned[1..close].to_string();
-                } else if cleaned.ends_with(']') && cleaned.len() >= 2 {
-                    cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
-                }
-            }
-            // Sentence punctuation an LLM may append after a path.
-            cleaned = cleaned.trim_end_matches(['.', '。']).to_string();
+            let cleaned = clean_path_token(raw);
             if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("none") {
                 continue;
             }
-            if !paths.contains(&cleaned) {
-                paths.push(cleaned);
+            let path = cleaned.strip_prefix("./").unwrap_or(&cleaned);
+            if !path.starts_with("artifacts/") {
+                continue;
+            }
+            if !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
             }
         }
     }
@@ -100,8 +134,7 @@ fn is_unverifiable_path(p: &str) -> bool {
     if p.starts_with('~') || p.starts_with('/') || p.contains('\\') {
         return true;
     }
-    // A `..` component escapes the workspace; a literal one (a..b.md) is not.
-    p.split('/').any(|component| component == "..")
+    escapes_workspace(p)
 }
 
 /// Job-end sweep: declared `outputs:` paths of `- Task` entries in the
@@ -142,12 +175,11 @@ pub(crate) fn llm_guard_unfinished_outputs(handover_md: &str) -> Vec<(String, St
             if is_unverifiable_path(&path) {
                 continue;
             }
-            let normalized = path.strip_prefix("./").unwrap_or(&path);
-            if std::path::Path::new(normalized).exists() {
+            if std::path::Path::new(&path).exists() {
                 continue;
             }
-            if !missing.iter().any(|(_, m)| m == normalized) {
-                missing.push((task.clone(), normalized.to_string()));
+            if !missing.iter().any(|(_, m)| m == &path) {
+                missing.push((task.clone(), path));
             }
         }
     }
@@ -163,11 +195,12 @@ fn is_deliverable_file(p: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Declared Goal artifact paths that are not deliverables (missing,
+/// Declared Deliverables-section paths that are not deliverables (missing,
 /// zero-sized, or a directory). Metadata-based, so binary artifacts pass
-/// on size alone. Empty when the Goal names no artifact (no gate).
+/// on size alone. Empty when the plan has no `## Deliverables` section
+/// (no gate).
 pub(crate) fn llm_guard_goal_outputs_missing(todo_md: &str) -> Vec<String> {
-    extract_goal_artifact_paths(todo_md)
+    extract_deliverables_paths(todo_md)
         .into_iter()
         .filter(|p| {
             if is_unverifiable_path(p) {
@@ -178,8 +211,9 @@ pub(crate) fn llm_guard_goal_outputs_missing(todo_md: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build a handover entry: one-line report plus an untruncated `outputs:`
-/// line when `Output:` paths are declared.
+/// Handover entry: the one-line report plus an untruncated `outputs:` line
+/// when `Output:` declares artifacts paths (prose declarations are never
+/// recorded).
 pub(crate) fn build_handover_entry(prefix: &str, report: &str) -> String {
     let mut entry = format!("{}: {}", prefix, one_line_report(report));
     let outputs = extract_output_paths(report);
@@ -189,65 +223,125 @@ pub(crate) fn build_handover_entry(prefix: &str, report: &str) -> String {
     entry
 }
 
-/// Extract safe `artifacts/...` file paths from the `## Goal` section.
-/// Keeps only paths under `artifacts/` with no `..` and a file extension.
-fn extract_goal_artifact_paths(todo_md: &str) -> Vec<String> {
-    let mut in_goal = false;
+/// A `..` path component escapes the workspace; a literal one (`a..b.md`)
+/// does not.
+fn escapes_workspace(p: &str) -> bool {
+    p.split('/').any(|component| component == "..")
+}
+
+/// The last path component looks like a file name (has an extension).
+fn looks_like_file(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .map(|name| name.contains('.') && !name.starts_with('.'))
+        .unwrap_or(false)
+}
+
+/// A `## Deliverables` heading; extra spaces and trailing section words
+/// are tolerated (same rule as the extractor below).
+fn is_deliverables_heading(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("##") && trimmed.split_whitespace().nth(1) == Some("Deliverables")
+}
+
+/// Whether the plan has a `## Deliverables` section; a plan without one
+/// declares no goal deliverables (the completion report says so instead of
+/// listing task outputs as deliverables).
+pub(crate) fn has_deliverables_section(todo_md: &str) -> bool {
+    todo_md.lines().any(is_deliverables_heading)
+}
+
+/// Deliverable paths from the `## Deliverables` section - the only
+/// machine-verified Goal source. One path per bullet (`- artifacts/<path>`,
+/// first token); bullet markers, extra spaces, and Tasks-style checkboxes
+/// are tolerated, prose after the path is ignored. `## Goal` prose is never
+/// parsed, so a plan without the section declares nothing (no gate).
+pub(crate) fn extract_deliverables_paths(todo_md: &str) -> Vec<String> {
     let mut paths = Vec::new();
+    let mut in_deliverables = false;
     for line in todo_md.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("## Goal") {
-            in_goal = true;
+        if is_deliverables_heading(trimmed) {
+            in_deliverables = true;
             continue;
         }
-        if in_goal && trimmed.starts_with("##") {
+        if in_deliverables && trimmed.starts_with("##") {
             break;
         }
-        if !in_goal {
+        if !in_deliverables {
             continue;
         }
-        for token in trimmed.split_whitespace() {
-            let cleaned = token.trim_matches(|c| matches!(c, '`' | '"' | '\'' | ',' | ';' | ':'));
-            let cleaned = cleaned
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-                .unwrap_or(cleaned)
-                .trim_end_matches(['.', '。']);
-            let looks_like_file = cleaned
-                .rsplit('/')
-                .next()
-                .map(|name| name.contains('.') && !name.starts_with('.'))
-                .unwrap_or(false);
-            if cleaned.starts_with("artifacts/")
-                && !cleaned.contains("..")
-                && looks_like_file
-                && !paths.iter().any(|p| p == cleaned)
-            {
-                paths.push(cleaned.to_string());
-            }
+        // Bullet line: marker (plus optional checkbox), then the path.
+        let Some(body) = strip_bullet_marker(trimmed) else {
+            continue;
+        };
+        let body = strip_checkbox(body);
+        // First whitespace token only; anything else on the line is ignored.
+        let Some(token) = body.split_whitespace().next() else {
+            continue;
+        };
+        let path = clean_path_token(token);
+        if path.starts_with("artifacts/")
+            && !escapes_workspace(&path)
+            && looks_like_file(&path)
+            && !paths.iter().any(|p| p == &path)
+        {
+            paths.push(path);
         }
     }
     paths
 }
 
-/// Verified deliverables for the completion report: Goal artifact paths
-/// (declared order) followed by task-declared `outputs:` paths from the
-/// handover log, all existing non-empty regular files on disk, deduped
-/// and `./`-normalized. `- Planner` entries are excluded (their outputs
-/// are not deliverables).
-pub(crate) fn llm_guard_verified_outputs(todo_md: &str, handover_md: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |p: &str| {
-        let normalized = p.strip_prefix("./").unwrap_or(p);
-        if is_unverifiable_path(normalized) || !is_deliverable_file(normalized) {
+/// The guard's state files under `artifacts/` (`handover.md` task reports,
+/// `calc_ledger.jsonl` calc results): the guard appends to them, so an LLM
+/// write would corrupt the record (observed: an executor overwrote
+/// `handover.md`, erasing history). Reads stay allowed.
+fn is_guard_state_file(path: &str) -> bool {
+    let p = path.strip_prefix("./").unwrap_or(path);
+    let mut comps = p.split('/').collect::<Vec<_>>();
+    let name = comps.pop().unwrap_or("");
+    comps.join("/") == "artifacts" && matches!(name, "handover.md" | "calc_ledger.jsonl")
+}
+
+/// Mode-2 tool guard: LLM writes to guard state files are refused with a
+/// `[TOOL_DENIED]` message; None elsewhere (other modes, reads, paths).
+pub(crate) fn llm_guard_state_file_write(name: &str, path: &str, todo_mode: u8) -> Option<String> {
+    if todo_mode == 2
+        && matches!(name, "write_file" | "str_replace_editor")
+        && is_guard_state_file(path)
+    {
+        Some(format!(
+            "[TOOL_DENIED] '{}' is managed by the todo-mode guard (task reports / calc ledger); LLM writes to it are rejected - your report is appended automatically.",
+            path
+        ))
+    } else {
+        None
+    }
+}
+
+/// Verified completion-report lists, split so gated goal deliverables and
+/// soft task outputs never mix:
+/// - `goal_deliverables`: `## Deliverables` paths (declared order) that
+///   exist as non-empty regular files - the job's goal deliverables.
+/// - `task_outputs`: verified `outputs:` paths of `- Task` handover entries
+///   minus any goal path, so each artifact is reported once, under the
+///   gated category. `- Planner` entries are excluded.
+pub(crate) fn llm_guard_verified_outputs(
+    todo_md: &str,
+    handover_md: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut goal: Vec<String> = Vec::new();
+    let mut tasks: Vec<String> = Vec::new();
+    let mut push = |out: &mut Vec<String>, p: &str| {
+        if is_unverifiable_path(p) || !is_deliverable_file(p) {
             return;
         }
-        if !out.iter().any(|m| m == normalized) {
-            out.push(normalized.to_string());
+        if !out.iter().any(|m| m == p) {
+            out.push(p.to_string());
         }
     };
-    for path in extract_goal_artifact_paths(todo_md) {
-        push(&path);
+    for path in extract_deliverables_paths(todo_md) {
+        push(&mut goal, &path);
     }
     let mut current_task = false;
     for line in handover_md.lines() {
@@ -265,15 +359,16 @@ pub(crate) fn llm_guard_verified_outputs(todo_md: &str, handover_md: &str) -> Ve
         };
         if current_task {
             for path in extract_output_paths(&format!("Output: {}", rest)) {
-                push(&path);
+                push(&mut tasks, &path);
             }
         }
     }
-    out
+    tasks.retain(|p| !goal.iter().any(|g| g == p));
+    (goal, tasks)
 }
 
 /// `- Task` handover entries whose `outputs:` line declares at least one
-/// path; feeds the completion report's zero-deliverables annotation.
+/// path; feeds the completion report's zero task-outputs annotation.
 /// `- Planner` entries and the seeded template prose are excluded.
 pub(crate) fn llm_guard_tasks_declaring_outputs(handover_md: &str) -> usize {
     let mut in_task = false;
@@ -298,12 +393,12 @@ pub(crate) fn llm_guard_tasks_declaring_outputs(handover_md: &str) -> usize {
     count
 }
 
-/// Declared paths (Goal + task `outputs:` lines) the checks skip as
+/// Declared paths (Deliverables + task `outputs:` lines) the checks skip as
 /// unverifiable; reported as `(+U unverifiable skipped)` so the skip is
 /// never silent. Same sources as `llm_guard_verified_outputs`.
 pub(crate) fn llm_guard_unverifiable_declared(todo_md: &str, handover_md: &str) -> usize {
     let mut count = 0usize;
-    for path in extract_goal_artifact_paths(todo_md) {
+    for path in extract_deliverables_paths(todo_md) {
         if is_unverifiable_path(&path) {
             count += 1;
         }
@@ -331,16 +426,34 @@ pub(crate) fn llm_guard_unverifiable_declared(todo_md: &str, handover_md: &str) 
     count
 }
 
-/// Max number of deliverable paths listed in a completion report; the
-/// remainder is summarized as `(+K more)`.
+/// Max number of paths listed per completion-report segment; the remainder
+/// is summarized as `(+K more)`.
 const COMPLETION_REPORT_MAX_LISTED: usize = 5;
 
-/// One mechanical completion line (verified deliverables only):
-/// `OK: all {N} tasks {already }completed; deliverables({M}): p1, ... (+K more)`.
-/// Zero deliverables annotate how many tasks declared Output paths;
+/// Up to `COMPLETION_REPORT_MAX_LISTED` paths joined with ", ", the
+/// remainder summarized as `(+K more)`.
+fn join_limited(paths: &[String]) -> String {
+    let extra = paths.len().saturating_sub(COMPLETION_REPORT_MAX_LISTED);
+    let n = paths.len() - extra;
+    let mut s = paths[..n].join(", ");
+    if extra > 0 {
+        s.push_str(&format!(" (+{} more)", extra));
+    }
+    s
+}
+
+/// One mechanical completion line, goal deliverables and task outputs
+/// reported separately, never mixed:
+/// `OK: all {N} tasks {already }completed; deliverables({M}): p1, ...;
+/// task outputs({T}): q1, ...`.
+/// `deliverables` are the gated `## Deliverables` paths; `task outputs`
+/// are verified `outputs:` declarations beyond those. Zero lists annotate
+/// why (`no ## Deliverables section`, `no tasks declared Output paths`);
 /// unverifiable declarations are appended as `(+U unverifiable skipped)`.
 pub(crate) fn llm_guard_completion_report(
-    verified: &[String],
+    goal_deliverables: &[String],
+    task_outputs: &[String],
+    has_section: bool,
     task_total: usize,
     declared_outputs_tasks: usize,
     unverifiable: usize,
@@ -351,8 +464,23 @@ pub(crate) fn llm_guard_completion_report(
     } else {
         "completed"
     };
-    let mut line = if verified.is_empty() {
-        let declared_note = if declared_outputs_tasks == 0 {
+    let mut line = format!("OK: all {} tasks {}; ", task_total, verb);
+    if goal_deliverables.is_empty() {
+        line.push_str(if has_section {
+            "deliverables(0)"
+        } else {
+            "deliverables(0; no ## Deliverables section)"
+        });
+    } else {
+        line.push_str(&format!(
+            "deliverables({}): {}",
+            goal_deliverables.len(),
+            join_limited(goal_deliverables)
+        ));
+    }
+    line.push_str("; ");
+    if task_outputs.is_empty() {
+        let note = if declared_outputs_tasks == 0 {
             "no tasks declared Output paths".to_string()
         } else {
             format!(
@@ -361,25 +489,14 @@ pub(crate) fn llm_guard_completion_report(
                 if declared_outputs_tasks == 1 { "" } else { "s" }
             )
         };
-        format!(
-            "OK: all {} tasks {}; deliverables(0; {})",
-            task_total, verb, declared_note
-        )
+        line.push_str(&format!("task outputs(0; {})", note));
     } else {
-        let extra = verified.len().saturating_sub(COMPLETION_REPORT_MAX_LISTED);
-        let n = verified.len() - extra;
-        let mut line = format!(
-            "OK: all {} tasks {}; deliverables({}): {}",
-            task_total,
-            verb,
-            verified.len(),
-            verified[..n].join(", ")
-        );
-        if extra > 0 {
-            line.push_str(&format!(" (+{} more)", extra));
-        }
-        line
-    };
+        line.push_str(&format!(
+            "task outputs({}): {}",
+            task_outputs.len(),
+            join_limited(task_outputs)
+        ));
+    }
     if unverifiable > 0 {
         line.push_str(&format!(" (+{} unverifiable skipped)", unverifiable));
     }
@@ -387,7 +504,7 @@ pub(crate) fn llm_guard_completion_report(
 }
 
 /// The session's final report: the last assistant message, never a tool or
-/// harness-injected message. After `Completed` this equals `messages.last()`;
+/// guard-injected message. After `Completed` this equals `messages.last()`;
 /// it differs only when a retry stopped mid-tool-call.
 pub(crate) fn last_assistant_report(session: &Session) -> Option<&str> {
     session

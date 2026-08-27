@@ -411,7 +411,9 @@ pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
         "## 4. Todo Context (Plan-Exec-Dynamic Replan)\n\
          - You are the task planner. Do NOT execute the tasks in `## Tasks`; a separate task session executes them after your replan.\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the task reports and planner notes from previous sessions (each task report is followed by an `outputs:` line listing the artifact paths that task declared).\n\
-         - todo.md has a FIXED format of exactly three sections: `# <title>`, `## Goal`, `## Tasks`. NEVER add, remove, or rename sections; NEVER add prose outside the Tasks list; keep the `- [ ]` / `- [x]` bullet format.\n\
+         - todo.md has a FIXED format:\n\
+           - `# <title>`, `## Goal`, `## Tasks`, and optionally one `## Deliverables` section. NEVER add or rename sections beyond these; NEVER add prose to the `## Tasks` or `## Deliverables` lists; keep the `- [ ]` / `- [x]` bullet format.\n\
+           - `## Deliverables`: one file per bullet (`- artifacts/<name>`), nothing else on the line. List only files the plan actually produces (the final report included); keep the list in sync as tasks change.\n\
          - Mark completed tasks `[x]` (verify the files named in their `outputs:` lines exist in `artifacts/` with read_file / list_directory), and add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
          - Write ONLY these two files, in this order:\n\
            1. `./todo.md` - the updated plan; text alone does not update the plan.\n\
@@ -439,7 +441,7 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
          - Read `./todo.md` and `./next-task.md` FIRST with read_file; todo.md is the plan, next-task.md is the brief for your task: your scope, the files to read (marked must-read or optional), the previous task's `outputs:`, and warnings. If next-task.md is missing or the brief is insufficient, explore `artifacts/` with list_directory and read only the files your task needs.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
-         - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed.\n\
+         - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed. Do NOT edit the `## Deliverables` section (the planner owns it).\n\
          - Check `artifacts/` for previous work; save your outputs there.\n\
          - Your final message must be a Handover Report in exactly this format:\n\
            - Status: done / blocked\n\

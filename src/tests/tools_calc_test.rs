@@ -636,6 +636,7 @@ async fn tool_definition_and_dispatch() {
         &json!({ "expressions": ["1425 * 32"] }),
         None,
         None,
+        0,
         |_| true,
     )
     .await
@@ -648,6 +649,7 @@ async fn tool_definition_and_dispatch() {
         &json!({ "expressions": ["1 + 1"] }),
         None,
         None,
+        0,
         |_| false,
     )
     .await;

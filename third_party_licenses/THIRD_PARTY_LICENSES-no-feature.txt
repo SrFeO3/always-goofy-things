@@ -1525,7 +1525,7 @@ License: Apache License 2.0
 
 The above license applies to the following components:
 
-  - always-goofy-things 0.6.33
+  - always-goofy-things 0.6.34
     
 
 ===============================================================================

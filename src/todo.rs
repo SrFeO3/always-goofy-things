@@ -34,9 +34,9 @@ use crate::persistence;
 use crate::reasoning::{EndReason, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
-    build_handover_entry, last_assistant_report, llm_guard_completion_report,
-    llm_guard_declared_outputs, llm_guard_goal_outputs_missing, llm_guard_handover_report,
-    llm_guard_tasks_declaring_outputs, llm_guard_unfinished_outputs,
+    build_handover_entry, has_deliverables_section, last_assistant_report,
+    llm_guard_completion_report, llm_guard_declared_outputs, llm_guard_goal_outputs_missing,
+    llm_guard_handover_report, llm_guard_tasks_declaring_outputs, llm_guard_unfinished_outputs,
     llm_guard_unverifiable_declared, llm_guard_verified_outputs, merge_condensed_report,
 };
 
@@ -224,7 +224,10 @@ fn seed_handover() -> Result<()> {
          - Task N: - Status: done / blocked - Output: <paths> - Findings: <facts> - Next: <pointer>\n\
          - Planner: - Status: <state> - Progress: <progress> - Decisions: <decisions> - Next: <plan>\n\
          A task entry may be followed by an `outputs:` line listing the files the task declared in Output (never truncated).\n\
-         Neither the executor nor the planner edits this file; the application writes it.\n",
+         Neither the executor nor the planner edits this file; the application writes it.\n\
+         \n\
+         ---\n\
+         Entries are appended below by the application after each session.\n",
     )
 }
 
@@ -640,11 +643,13 @@ pub(crate) async fn run_todo_loop(
     if pending.is_empty() && config.todo_mode != 2 {
         let content = std::fs::read_to_string(TODO_MD_PATH).unwrap_or_default();
         let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
-        let verified = llm_guard_verified_outputs(&content, &handover);
+        let (goal, task_outputs) = llm_guard_verified_outputs(&content, &handover);
         // Goal-gate early exit too: "already completed" needs its deliverables.
         check_goal_deliverables(&content)?;
         return Ok(finalize_with_sweep(llm_guard_completion_report(
-            &verified,
+            &goal,
+            &task_outputs,
+            has_deliverables_section(&content),
             count_task_items(&content),
             llm_guard_tasks_declaring_outputs(&handover),
             llm_guard_unverifiable_declared(&content, &handover),
@@ -894,9 +899,11 @@ async fn run_todo_loop_mode1(
         // missing or empty.
         check_goal_deliverables(&final_todo)?;
         let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
-        let verified = llm_guard_verified_outputs(&final_todo, &handover);
+        let (goal, task_outputs) = llm_guard_verified_outputs(&final_todo, &handover);
         llm_guard_completion_report(
-            &verified,
+            &goal,
+            &task_outputs,
+            has_deliverables_section(&final_todo),
             count_task_items(&final_todo),
             llm_guard_tasks_declaring_outputs(&handover),
             llm_guard_unverifiable_declared(&final_todo, &handover),
@@ -1264,9 +1271,11 @@ async fn run_todo_loop_mode2(
         // (e.g. Ctrl+C during a non-final replan) that skip the in-loop gate.
         check_goal_deliverables(&final_todo)?;
         let handover = std::fs::read_to_string(HANDOVER_MD_PATH).unwrap_or_default();
-        let verified = llm_guard_verified_outputs(&final_todo, &handover);
+        let (goal, task_outputs) = llm_guard_verified_outputs(&final_todo, &handover);
         Ok(llm_guard_completion_report(
-            &verified,
+            &goal,
+            &task_outputs,
+            has_deliverables_section(&final_todo),
             count_task_items(&final_todo),
             llm_guard_tasks_declaring_outputs(&handover),
             llm_guard_unverifiable_declared(&final_todo, &handover),

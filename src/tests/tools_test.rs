@@ -1,6 +1,79 @@
 use super::*;
 use std::fs;
 
+#[tokio::test]
+async fn test_execute_tool_mode2_denies_state_file_writes() {
+    // Todo mode 2: LLM writes to guard-managed state files are rejected at
+    // the dispatch layer. The decision itself lives in todo_guard
+    // (llm_guard_state_file_write); here we prove execute_tool wires it.
+    let denied = execute_tool(
+        "write_file",
+        &json!({ "content": "x", "path": "artifacts/handover.md" }),
+        None,
+        None,
+        2,
+        |_| true,
+    )
+    .await;
+    let err = denied.unwrap_err().to_string();
+    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
+
+    // str_replace_editor on the ledger is denied the same way.
+    let denied = execute_tool(
+        "str_replace_editor",
+        &json!({
+            "path": "./artifacts/calc_ledger.jsonl",
+            "old_string": "a",
+            "new_string": "b"
+        }),
+        None,
+        None,
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
+
+    // The match is exact: the same file name outside artifacts/ is not a
+    // state file, so the write is allowed and succeeds at the dispatch
+    // layer (it lands in tmp).
+    let tmp = get_temp_path("mode2_ok");
+    let outside = tmp.join("artifacts/handover.md");
+    let ok = execute_tool(
+        "write_file",
+        &json!({ "content": "x", "path": outside.to_str().unwrap() }),
+        None,
+        None,
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "mode 2 write outside artifacts/ must be allowed and succeed: {:?}",
+        ok.err()
+    );
+
+    // Mode 1 / non-todo: no denial at the dispatch layer either.
+    for mode in [0u8, 1u8] {
+        let ok = execute_tool(
+            "write_file",
+            &json!({ "content": "x", "path": outside.to_str().unwrap() }),
+            None,
+            None,
+            mode,
+            |_| true,
+        )
+        .await;
+        assert!(
+            ok.is_ok(),
+            "mode {} write must succeed: {:?}",
+            mode,
+            ok.err()
+        );
+    }
+}
+
 // Helper to generate a unique temporary path for testing (relative path)
 fn get_temp_path(name: &str) -> std::path::PathBuf {
     // Tests run with CWD = package root; register it as the workspace root
@@ -646,6 +719,7 @@ fn test_validate_path_symlink_escape() {
             &json!({ "path": link_str }),
             None,
             None,
+            0,
             |_| true,
         ));
     assert!(blocked.is_err());
@@ -800,6 +874,7 @@ async fn test_execute_tool_rejects_disabled() {
         &json!({ "command": "ls" }),
         None,
         None,
+        0,
         |_| false,
     )
     .await;

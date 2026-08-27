@@ -408,6 +408,7 @@ pub(crate) async fn run_reasoning_loop(
                         &args,
                         db_ctx.as_ref(),
                         Some(&calc_ledger),
+                        config.todo_mode,
                         |name| config.is_tool_enabled(name),
                     )
                     .await

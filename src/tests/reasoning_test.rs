@@ -44,6 +44,7 @@ async fn test_tool_smoke_read_file_and_grep() {
         &serde_json::json!({ "path": probe }),
         None,
         None,
+        0,
         |_| true,
     )
     .await
@@ -56,6 +57,7 @@ async fn test_tool_smoke_read_file_and_grep() {
         &serde_json::json!({ "query": "unique_probe_token_42", "path": dirname }),
         None,
         None,
+        0,
         |_| true,
     )
     .await
@@ -71,6 +73,7 @@ async fn test_tool_smoke_disabled_tool_refused() {
         &serde_json::json!({ "path": "._smtool_disabled_probe.txt" }),
         None,
         None,
+        0,
         |_| false,
     )
     .await;

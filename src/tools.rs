@@ -352,6 +352,7 @@ pub async fn execute_tool(
     args: &serde_json::Value,
     db_ctx: Option<&tools_data::DbContext>,
     calc_ledger: Option<&tools_calc::CalcLedger>,
+    todo_mode: u8,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Result<serde_json::Value> {
     // Refuse disabled tools even if the LLM calls them anyway (defense in depth).
@@ -362,9 +363,14 @@ pub async fn execute_tool(
         ));
     }
 
-    // Path security check for tools that take 'path'
+    // Path security check for tools that take 'path'; in todo mode 2 the
+    // todo_guard additionally rejects LLM writes to guard-managed state
+    // files (artifacts/handover.md, artifacts/calc_ledger.jsonl).
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
+        if let Some(msg) = crate::todo_guard::llm_guard_state_file_write(name, path, todo_mode) {
+            return Err(anyhow!("{}", msg));
+        }
     }
 
     match name {
