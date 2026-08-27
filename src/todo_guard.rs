@@ -37,7 +37,7 @@ fn one_line_report(raw: &str) -> String {
 fn clean_path_token(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     s = s
-        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | ',' | ';' | ':'))
+        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | ',' | ';' | ':' | '*'))
         .trim()
         .to_string();
     // Parenthesized wrapper (ASCII chars, so byte indices are boundaries).
@@ -56,11 +56,25 @@ fn clean_path_token(raw: &str) -> String {
     s.trim_end_matches(['.', '。']).to_string()
 }
 
-/// A bullet marker an LLM may use instead of `-` (`*`, `+`, `・`, `•`),
-/// plus any following whitespace. None when the line is not a bullet.
+/// A bullet marker an LLM may use instead of `-` (`*`, `+`, `・`, `•`);
+/// a run of markers incl. whitespace between them is stripped, so bold
+/// `- **Output:**` passes. None if the line is not a bullet.
 fn strip_bullet_marker(line: &str) -> Option<&str> {
-    line.strip_prefix(['-', '*', '+', '・', '•'])
-        .map(str::trim_start)
+    let mut rest = line;
+    loop {
+        let next = rest
+            .trim_start_matches(['-', '*', '+', '・', '•'])
+            .trim_start();
+        if next.len() == rest.len() {
+            break;
+        }
+        rest = next;
+    }
+    if rest.len() == line.len() {
+        None
+    } else {
+        Some(rest)
+    }
 }
 
 /// A Tasks-style `[ ]` / `[x]` / `[X]` checkbox decorating a bullet. Its
@@ -77,9 +91,19 @@ fn strip_checkbox(body: &str) -> &str {
         .unwrap_or(body)
 }
 
-/// `artifacts/` paths from a report's `Output:` line (comma-separated).
-/// Prefix sloppiness is tolerated - bullet markers, tabs/extra spaces, a
-/// glued dash, a space before the colon; `./` is normalized, non-artifacts
+/// Cut an LLM annotation appended after a path (`...md (created)`,
+/// `...md; todo.md (...)`) - ASCII `(`/`;` only; fullwidth stays as written
+/// (no Japanese fuzz); the `artifacts/` prefix still gates.
+fn cut_ascii_annotation(mut s: String) -> String {
+    if let Some(idx) = s.find(['(', ';']) {
+        s.truncate(idx);
+    }
+    s.trim().to_string()
+}
+
+/// `artifacts/` paths from a report's `Output:` line (comma/semicolon-
+/// separated). Prefix sloppiness (bullet markers, bold `**`, `./`) is
+/// tolerated; ASCII annotations after a path are cut; non-artifacts
 /// declarations (`todo.md (updated)`) are prose noise, never returned.
 fn extract_output_paths(report: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -93,8 +117,8 @@ fn extract_output_paths(report: &str) -> Vec<String> {
             continue;
         };
         let rest = rest.trim_start();
-        for raw in rest.split(',') {
-            let cleaned = clean_path_token(raw);
+        for raw in rest.split([',', ';']) {
+            let cleaned = cut_ascii_annotation(clean_path_token(raw));
             if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("none") {
                 continue;
             }
@@ -545,18 +569,22 @@ pub(crate) fn merge_condensed_report(original: Option<&str>, condensed: &str) ->
     merged
 }
 
-/// Ask the LLM once to rewrite an over-long Handover Report (skipped near
-/// the context budget; truncation is the fallback).
-pub(crate) async fn llm_guard_handover_report<'a>(
+/// Enforce the storage cap: if the final message exceeds it (context
+/// budget permitting), ask the LLM to rewrite it within the advertised
+/// limit, keeping `fields`. `noun`/`limit` set wording/budget.
+pub(crate) async fn llm_guard_condense_final_message<'a>(
     ctx: &mut LoopCtx<'a>,
-    task_session: &mut Session,
+    session: &mut Session,
+    noun: &str,
+    fields: &[&str],
+    limit: usize,
 ) {
-    let ctx_chars: usize = task_session
+    let ctx_chars: usize = session
         .messages
         .iter()
         .map(|m| m.content.chars().count())
         .sum();
-    let Some(last) = last_assistant_report(task_session) else {
+    let Some(last) = last_assistant_report(session) else {
         return;
     };
     if last.chars().count() <= HANDOVER_REPORT_FUZZY_MAX_CHARS
@@ -565,20 +593,16 @@ pub(crate) async fn llm_guard_handover_report<'a>(
         return;
     }
     let feedback = format!(
-        "Your Handover Report is too long ({} chars > {}). Rewrite it as ONE concise report within {} characters, keeping Status / Output / Findings / Next.",
+        "Your {} is too long ({} chars > {}). Rewrite it as ONE concise {} within {} characters, keeping {}.",
+        noun,
         last.chars().count(),
-        HANDOVER_REPORT_MAX_CHARS,
-        HANDOVER_REPORT_MAX_CHARS
+        limit,
+        noun,
+        limit,
+        fields.join(" / ")
     );
     // One retry at most; ignore errors (truncation fallback still applies).
-    let _ = run_reasoning_loop(
-        ctx,
-        task_session,
-        "todo:guard:condense",
-        feedback,
-        Vec::new(),
-    )
-    .await;
+    let _ = run_reasoning_loop(ctx, session, "todo:guard:condense", feedback, Vec::new()).await;
 }
 
 #[cfg(test)]

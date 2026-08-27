@@ -137,6 +137,57 @@ fn test_extract_output_paths_strict_prefix_and_prose() {
 }
 
 #[test]
+fn test_extract_output_paths_cuts_ascii_annotations() {
+    // LLM-style annotations after a path resolve to the bare artifact path
+    // (the Task 3/4 pattern behind the false-positive job-end warning).
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/chunk-review-11-20.md; todo.md (Task 3 [x])"),
+        vec!["artifacts/chunk-review-11-20.md"]
+    );
+    assert_eq!(
+        extract_output_paths(
+            "- Output: artifacts/chunk-review-21-25.md (new, ~62 facts); todo task4 [x]"
+        ),
+        vec!["artifacts/chunk-review-21-25.md"]
+    );
+    assert_eq!(
+        extract_output_paths(
+            "- Output: artifacts/overall_review.md (new), artifacts/checklist.md (refined), \
+             artifacts/chunk-review-11-20.md (2 corrected)"
+        ),
+        vec![
+            "artifacts/overall_review.md",
+            "artifacts/checklist.md",
+            "artifacts/chunk-review-11-20.md",
+        ]
+    );
+    // Semicolon-separated bare paths are two declarations, not one.
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/a.md; artifacts/b.md"),
+        vec!["artifacts/a.md", "artifacts/b.md"]
+    );
+}
+
+#[test]
+fn test_extract_output_paths_bold_marker_and_star_junk() {
+    // Markdown-bold `**Output:**` and stray asterisks are decorations, not
+    // path text; a mid-token `*` (glob-style) stays untouched and is gated
+    // by the artifacts-only rule.
+    assert_eq!(
+        extract_output_paths("- **Output:** artifacts/a.md, artifacts/b.md"),
+        vec!["artifacts/a.md", "artifacts/b.md"]
+    );
+    assert_eq!(
+        extract_output_paths("**Output:** artifacts/a.md **"),
+        vec!["artifacts/a.md"]
+    );
+    assert_eq!(
+        extract_output_paths("- Output: artifacts/a*b.md"),
+        vec!["artifacts/a*b.md"]
+    );
+}
+
+#[test]
 fn test_extract_output_paths_artifacts_only_and_normalized() {
     // `./` is normalized to the canonical artifacts/ form, subdir paths
     // are not artifacts declarations, and `Outputs:` is not `Output:`.
@@ -593,6 +644,41 @@ fn test_unfinished_outputs_skips_home_absolute_escape_paths() {
     assert_eq!(
         llm_guard_unfinished_outputs(md),
         vec![("Task 2".to_string(), "artifacts/a..b.md".to_string())]
+    );
+}
+
+#[test]
+fn test_unfinished_outputs_annotation_tokens_resolve() {
+    // Regression for the false-positive job-end warning: annotated
+    // `outputs:` tokens must resolve, so existing artifacts are not
+    // reported missing.
+    let _guard = ArtifactFilesGuard::new(&[
+        "./artifacts/_agt_test_r11_20.md",
+        "./artifacts/_agt_test_r21_25.md",
+    ]);
+    std::fs::write("./artifacts/_agt_test_r11_20.md", "x\n").unwrap();
+    std::fs::write("./artifacts/_agt_test_r21_25.md", "x\n").unwrap();
+    let md = "- Task 3: - Status: done - Output: artifacts/_agt_test_r11_20.md; todo.md (Task 3 [x])\n\
+             outputs: artifacts/_agt_test_r11_20.md; todo.md (Task 3 [x]), \
+             artifacts/_agt_test_r11_20.md (created); todo.md (Task 3 marked [x])\n\
+             - Task 4: - Status: done - Output: artifacts/_agt_test_r21_25.md (new, ~62 facts); todo task4 [x]\n\
+             outputs: artifacts/_agt_test_r21_25.md (new\n";
+    assert_eq!(
+        llm_guard_unfinished_outputs(md),
+        Vec::<(String, String)>::new()
+    );
+    // A genuinely missing artifact among the same annotations is still
+    // reported.
+    let md = md.replace(
+        "artifacts/_agt_test_r11_20.md; todo.md",
+        "artifacts/_agt_test_r11_20_missing.md; todo.md",
+    );
+    assert_eq!(
+        llm_guard_unfinished_outputs(&md),
+        vec![(
+            "Task 3".to_string(),
+            "artifacts/_agt_test_r11_20_missing.md".to_string()
+        )]
     );
 }
 

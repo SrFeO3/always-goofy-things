@@ -32,10 +32,11 @@ use crate::persistence;
 use crate::reasoning::{EndReason, LoopCtx, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
-    build_handover_entry, has_deliverables_section, last_assistant_report,
-    llm_guard_completion_report, llm_guard_declared_outputs, llm_guard_goal_outputs_missing,
-    llm_guard_handover_report, llm_guard_tasks_declaring_outputs, llm_guard_unfinished_outputs,
-    llm_guard_unverifiable_declared, llm_guard_verified_outputs, merge_condensed_report,
+    HANDOVER_REPORT_MAX_CHARS, build_handover_entry, has_deliverables_section,
+    last_assistant_report, llm_guard_completion_report, llm_guard_condense_final_message,
+    llm_guard_declared_outputs, llm_guard_goal_outputs_missing, llm_guard_tasks_declaring_outputs,
+    llm_guard_unfinished_outputs, llm_guard_unverifiable_declared, llm_guard_verified_outputs,
+    merge_condensed_report,
 };
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
@@ -384,19 +385,25 @@ async fn run_replan_loop<'a>(
         }
     }
 
-    // The planner hands its plan-update notes over as its final message; the
-    // application appends them to artifacts/handover.md exactly like a task
-    // report (one line, capped at HANDOVER_REPORT_FUZZY_MAX_CHARS), so the
-    // planner never edits the handover log itself.
-    let note = replan_session
-        .messages
-        .last()
-        .map(|m| m.content.as_str())
-        .unwrap_or_default();
-    let note = if note.trim().is_empty() {
+    // The planner's final message is its plan-update notes; the application
+    // appends them to artifacts/handover.md like a task report (one line;
+    // the planner never edits the log itself). Condense over-long notes
+    // first like task reports, snapshotting for merge_condensed_report
+    // (re-appends a dropped `- Output:` line).
+    let pre_condense = last_assistant_report(&replan_session).map(str::to_string);
+    llm_guard_condense_final_message(
+        ctx,
+        &mut replan_session,
+        "plan-update note",
+        &["Status", "Progress", "Decisions", "Next"],
+        HANDOVER_REPORT_MAX_CHARS,
+    )
+    .await;
+    let raw_note = last_assistant_report(&replan_session).unwrap_or_default();
+    let note = if raw_note.trim().is_empty() {
         "Status: (no note)".to_string()
     } else {
-        note.to_string()
+        merge_condensed_report(pre_condense.as_deref(), raw_note)
     };
     append_handover(&build_handover_entry("- Planner", &note))?;
 
@@ -713,7 +720,14 @@ async fn run_todo_loop_mode1<'a>(
             // llm_guard_: condense an over-long handover report before logging.
             // Snapshot first: the rewrite may drop the `- Output:` declaration.
             let pre_condense = last_assistant_report(&task_session).map(str::to_string);
-            llm_guard_handover_report(ctx, &mut task_session).await;
+            llm_guard_condense_final_message(
+                ctx,
+                &mut task_session,
+                "Handover Report",
+                &["Status", "Output", "Findings", "Next"],
+                HANDOVER_REPORT_MAX_CHARS,
+            )
+            .await;
             // Effective report: the last assistant message plus any
             // declarations the condense rewrite dropped.
             let mut raw_note = merge_condensed_report(
@@ -1081,7 +1095,14 @@ async fn run_todo_loop_mode2<'a>(
             // llm_guard_: condense an over-long handover report before logging.
             // Snapshot first: the rewrite may drop the `- Output:` declaration.
             let pre_condense = last_assistant_report(&task_session).map(str::to_string);
-            llm_guard_handover_report(ctx, &mut task_session).await;
+            llm_guard_condense_final_message(
+                ctx,
+                &mut task_session,
+                "Handover Report",
+                &["Status", "Output", "Findings", "Next"],
+                HANDOVER_REPORT_MAX_CHARS,
+            )
+            .await;
             // Record the executor's report (last assistant message; never a
             // tool response). Output paths stay on an untruncated `outputs:`
             // line; condense cannot drop them (merge_condensed_report).
