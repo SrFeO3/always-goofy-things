@@ -34,6 +34,7 @@
 
 use serde_json::{Value, json};
 
+use crate::model::ToolCall;
 use crate::pretty_data;
 use crate::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, C_YELLOW, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED,
@@ -641,15 +642,16 @@ fn pretty_print_calc_result(result: &Value) {
 /// Shows raw argument strings, any LLM text content produced alongside,
 /// and a full JSON dump of the tool call for debugging.
 pub fn pretty_print_broken_tool_call(
-    tool_name: &str,
-    tool_id: &str,
-    tool_type: &str,
-    raw_arguments: &Value,
+    call: &ToolCall,
     parsed_args: &Value,
     args_parse_error: Option<&str>,
-    thought_signature: Option<&str>,
     llm_content: &str,
 ) {
+    let tool_name = &call.function.name;
+    let tool_id = &call.id;
+    let tool_type = &call.tool_type;
+    let raw_arguments = &call.function.arguments;
+    let thought_signature = call.thought_signature.as_deref();
     let name_empty = tool_name.trim().is_empty();
     let id_empty = tool_id.trim().is_empty();
     let args_is_null = parsed_args.is_null();

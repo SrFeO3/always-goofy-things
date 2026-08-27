@@ -254,7 +254,7 @@ fn test_request_payload_has_no_measurement_junk() {
             "ttft_ms",
             "retry_count",
             "llm_stats",
-            "phase",
+            "call_label",
         ] {
             assert!(
                 !text.contains(banned),

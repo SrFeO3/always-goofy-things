@@ -3,11 +3,8 @@
 //! Verifies LLM work and fixes deviations the application can handle
 //! mechanically: replan feedback, condensing retries, or safer fallbacks.
 
-use crate::compat_provider::LlmProvider;
-use crate::llm_stats::Metrics;
-use crate::model::{Session, Settings};
-use crate::reasoning::run_reasoning_loop;
-use crate::startup;
+use crate::model::Session;
+use crate::reasoning::{LoopCtx, run_reasoning_loop};
 
 /// Advertised handover-report char limit shown in the system prompt.
 pub(crate) const HANDOVER_REPORT_MAX_CHARS: usize = 300;
@@ -550,11 +547,8 @@ pub(crate) fn merge_condensed_report(original: Option<&str>, condensed: &str) ->
 
 /// Ask the LLM once to rewrite an over-long Handover Report (skipped near
 /// the context budget; truncation is the fallback).
-pub(crate) async fn llm_guard_handover_report(
-    config: &startup::Config,
-    provider: LlmProvider,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
+pub(crate) async fn llm_guard_handover_report<'a>(
+    ctx: &mut LoopCtx<'a>,
     task_session: &mut Session,
 ) {
     let ctx_chars: usize = task_session
@@ -578,11 +572,8 @@ pub(crate) async fn llm_guard_handover_report(
     );
     // One retry at most; ignore errors (truncation fallback still applies).
     let _ = run_reasoning_loop(
-        config,
-        provider,
+        ctx,
         task_session,
-        settings,
-        metrics,
         "todo:guard:condense",
         feedback,
         Vec::new(),

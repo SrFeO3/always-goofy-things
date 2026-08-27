@@ -19,7 +19,7 @@ use crate::gui_pretty::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED};
 use crate::llm_stats::{Metrics, fmt_tokens};
 use crate::model::{LLM_STREAM_BUF, Message, Session, Settings};
 use crate::persistence;
-use crate::reasoning::run_reasoning_loop;
+use crate::reasoning::{LoopCtx, run_reasoning_loop};
 use crate::startup::{self, Config};
 use crate::todo;
 use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
@@ -879,17 +879,17 @@ impl GuiApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         let handle = tokio::spawn(async move {
+            // `ctx` is the egui context in the surrounding method; use a
+            // distinct name for the run context shared by the loops.
+            let mut loop_ctx = LoopCtx {
+                config: &config,
+                provider,
+                settings: &mut settings,
+                metrics: &mut metrics,
+            };
             let (done, err_msg) = if config.todo_mode > 0 {
-                match todo::run_todo_loop(
-                    &config,
-                    provider,
-                    &mut settings,
-                    &mut metrics,
-                    &mut session,
-                    query_text,
-                    attached_files,
-                )
-                .await
+                match todo::run_todo_loop(&mut loop_ctx, &mut session, query_text, attached_files)
+                    .await
                 {
                     Ok(summary) => {
                         session.messages.push(Message {
@@ -903,11 +903,8 @@ impl GuiApp {
                 }
             } else {
                 match run_reasoning_loop(
-                    &config,
-                    provider,
+                    &mut loop_ctx,
                     &mut session,
-                    &mut settings,
-                    &mut metrics,
                     "main",
                     query_text,
                     attached_files,

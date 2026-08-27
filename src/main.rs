@@ -59,7 +59,7 @@ use compat_provider::LlmProvider;
 use file::FileType;
 use llm_stats::Metrics;
 use model::{Session, Settings};
-use reasoning::run_reasoning_loop;
+use reasoning::{LoopCtx, run_reasoning_loop};
 use startup::{C_CYAN, RESET};
 
 /// Third-party licensing notices embedded into the binary; differs by feature.
@@ -298,17 +298,15 @@ async fn main() -> Result<()> {
         // --- Mode-aware execution ---
         let (done, final_answer) = match config.todo_mode {
             0 => {
-                let end_reason = run_reasoning_loop(
-                    &config,
+                let mut ctx = LoopCtx {
+                    config: &config,
                     provider,
-                    &mut session,
-                    &mut settings,
-                    &mut metrics,
-                    "main",
-                    query_text,
-                    attached_files,
-                )
-                .await?;
+                    settings: &mut settings,
+                    metrics: &mut metrics,
+                };
+                let end_reason =
+                    run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
+                        .await?;
                 let done = end_reason.is_completed();
                 let answer = if done {
                     session.messages.last().unwrap().content.clone()
@@ -318,16 +316,13 @@ async fn main() -> Result<()> {
                 (done, answer)
             }
             1 | 2 => {
-                match todo::run_todo_loop(
-                    &config,
+                let mut ctx = LoopCtx {
+                    config: &config,
                     provider,
-                    &mut settings,
-                    &mut metrics,
-                    &mut session,
-                    query_text,
-                    attached_files,
-                )
-                .await
+                    settings: &mut settings,
+                    metrics: &mut metrics,
+                };
+                match todo::run_todo_loop(&mut ctx, &mut session, query_text, attached_files).await
                 {
                     Ok(summary) => (true, summary),
                     Err(e) => {

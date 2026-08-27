@@ -125,7 +125,7 @@ fn test_stats_round_trip() {
         timestamp: chrono::Utc::now(),
         model: "gpt-4o".to_string(),
         provider: LlmProvider::OpenAi,
-        phase: "main".to_string(),
+        call_label: "main".to_string(),
         usage: Usage {
             prompt_tokens: 100,
             completion_tokens: 50,
@@ -145,7 +145,7 @@ fn test_stats_round_trip() {
     let l = &loaded[0];
     assert_eq!(l.model, "gpt-4o");
     assert_eq!(l.provider, LlmProvider::OpenAi);
-    assert_eq!(l.phase, "main");
+    assert_eq!(l.call_label, "main");
     assert_eq!(l.usage.prompt_tokens, 100);
     assert_eq!(l.latency_ms, 1234);
     assert_eq!(l.ttft_ms, 100);
@@ -176,7 +176,7 @@ fn test_stats_do_not_mix_into_conversation() {
             timestamp: chrono::Utc::now(),
             model: "gpt-4o".to_string(),
             provider: LlmProvider::OpenAi,
-            phase: "main".to_string(),
+            call_label: "main".to_string(),
             usage: Usage::default(),
             latency_ms: 1,
             ttft_ms: 1,

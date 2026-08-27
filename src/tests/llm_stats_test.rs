@@ -5,37 +5,20 @@ use crate::compat_provider::LlmProvider;
 use crate::model::{CompletionTokensDetails, PromptTokensDetails};
 
 /// Build a call record plus its tool-call count for aggregation tests.
-#[allow(clippy::too_many_arguments)]
 fn rec(
     model: &str,
-    phase: &str,
-    prompt: u32,
-    cached: u32,
-    write: u32,
-    completion: u32,
-    reasoning: u32,
+    call_label: &str,
+    usage: Usage,
     status: CallStatus,
     latency: u128,
     tool_calls: usize,
 ) -> (LlmCallRecord, usize) {
-    let usage = Usage {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        prompt_tokens_details: (cached > 0 || write > 0).then_some(PromptTokensDetails {
-            cached_tokens: cached,
-            cache_creation_tokens: write,
-            audio_tokens: 0,
-        }),
-        completion_tokens_details: (reasoning > 0).then_some(CompletionTokensDetails {
-            reasoning_tokens: reasoning,
-        }),
-    };
     (
         LlmCallRecord {
             timestamp: chrono::Utc::now(),
             model: model.to_string(),
             provider: LlmProvider::OpenAi,
-            phase: phase.to_string(),
+            call_label: call_label.to_string(),
             usage,
             latency_ms: latency,
             ttft_ms: 10,
@@ -54,11 +37,7 @@ fn test_accumulate_separates_cache_write_and_reasoning() {
     let (r, tc) = rec(
         "gpt-4o",
         "main",
-        1000,
-        200,
-        100,
-        300,
-        50,
+        usage(1000, 200, 100, 300, 50),
         CallStatus::Ok,
         100,
         2,
@@ -84,11 +63,7 @@ fn test_metrics_aggregates_by_model_and_counts_statuses() {
     let (r1, tc1) = rec(
         "gpt-4o",
         "main",
-        1000,
-        200,
-        100,
-        300,
-        50,
+        usage(1000, 200, 100, 300, 50),
         CallStatus::Ok,
         100,
         2,
@@ -96,11 +71,7 @@ fn test_metrics_aggregates_by_model_and_counts_statuses() {
     let (r2, tc2) = rec(
         "gemma4:12b",
         "todo:task:1",
-        50,
-        0,
-        0,
-        0,
-        0,
+        usage(50, 0, 0, 0, 0),
         CallStatus::Empty,
         20,
         0,
@@ -108,11 +79,7 @@ fn test_metrics_aggregates_by_model_and_counts_statuses() {
     let (mut r3, tc3) = rec(
         "gpt-4o",
         "todo:task:2",
-        0,
-        0,
-        0,
-        0,
-        0,
+        usage(0, 0, 0, 0, 0),
         CallStatus::Ok,
         150,
         0,
@@ -150,8 +117,8 @@ fn test_metrics_aggregates_by_model_and_counts_statuses() {
 
     // Call log holds all three records in order.
     assert_eq!(m.calls.len(), 3);
-    assert_eq!(m.calls[0].phase, "main");
-    assert_eq!(m.calls[1].phase, "todo:task:1");
+    assert_eq!(m.calls[0].call_label, "main");
+    assert_eq!(m.calls[1].call_label, "todo:task:1");
 }
 
 #[test]
@@ -159,16 +126,19 @@ fn test_from_records_rebuilds_aggregates() {
     let (r1, _) = rec(
         "gpt-4o",
         "main",
-        1000,
-        200,
-        100,
-        300,
-        50,
+        usage(1000, 200, 100, 300, 50),
         CallStatus::Ok,
         100,
         2,
     );
-    let (r2, _) = rec("gpt-4o", "main", 500, 0, 0, 100, 0, CallStatus::Ok, 50, 0);
+    let (r2, _) = rec(
+        "gpt-4o",
+        "main",
+        usage(500, 0, 0, 100, 0),
+        CallStatus::Ok,
+        50,
+        0,
+    );
     let m = Metrics::from_records(vec![r1, r2]);
     assert_eq!(m.totals.calls, 2);
     assert_eq!(m.calls.len(), 2);
@@ -183,7 +153,7 @@ fn test_from_records_rebuilds_aggregates() {
 fn test_call_log_is_capped() {
     let mut m = Metrics::default();
     for i in 0..(MAX_CALL_RECORDS + 50) {
-        let (r, _) = rec("gpt-4o", "main", 1, 0, 0, 1, 0, CallStatus::Ok, 1, 0);
+        let (r, _) = rec("gpt-4o", "main", usage(1, 0, 0, 1, 0), CallStatus::Ok, 1, 0);
         let _ = i;
         m.record_call(r, 0);
     }
@@ -226,7 +196,7 @@ fn line_after(usage: Usage, model: &str) -> String {
         timestamp: chrono::Utc::now(),
         model: model.to_string(),
         provider: LlmProvider::OpenAi,
-        phase: "main".to_string(),
+        call_label: "main".to_string(),
         usage: usage.clone(),
         latency_ms: 100,
         ttft_ms: 10,
@@ -276,7 +246,7 @@ fn test_token_line_numbers_compat_with_legacy() {
         timestamp: chrono::Utc::now(),
         model: "gpt-4o".to_string(),
         provider: LlmProvider::OpenAi,
-        phase: "main".to_string(),
+        call_label: "main".to_string(),
         usage: usage(1000, 200, 0, 300, 50),
         latency_ms: 100,
         ttft_ms: 10,
@@ -309,7 +279,7 @@ fn test_token_line_numbers_compat_with_legacy() {
         timestamp: chrono::Utc::now(),
         model: "gpt-4o".to_string(),
         provider: LlmProvider::OpenAi,
-        phase: "main".to_string(),
+        call_label: "main".to_string(),
         usage: usage(1000, 200, 100, 0, 0),
         latency_ms: 100,
         ttft_ms: 10,

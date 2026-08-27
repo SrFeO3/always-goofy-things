@@ -29,8 +29,8 @@ pub(crate) struct LlmCallRecord {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
     pub(crate) model: String,
     pub(crate) provider: LlmProvider,
-    /// Caller-supplied context tag, e.g. `"main"` / `"todo:task:3"`.
-    pub(crate) phase: String,
+    /// Caller-supplied call context label, e.g. `"main"` / `"todo:task:3"`.
+    pub(crate) call_label: String,
     pub(crate) usage: Usage,
     /// Request-send to stream-completion latency (ms).
     pub(crate) latency_ms: u128,

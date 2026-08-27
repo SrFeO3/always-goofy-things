@@ -6,10 +6,14 @@ async fn test_read_capped_keeps_tail() {
     read_capped(&b"0123456789"[..], 5, state.clone())
         .await
         .unwrap();
-    let s = state.lock().unwrap();
-    assert_eq!(s.buf.iter().copied().collect::<Vec<_>>(), b"56789");
-    assert!(s.truncated, "cap 5 < 10 bytes must be flagged");
-    assert_eq!(s.omitted, 5);
+    // Take the assertions in a block so the guard drops before the next
+    // `read_capped(...).await` (clippy::await_holding_lock).
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.buf.iter().copied().collect::<Vec<_>>(), b"56789");
+        assert!(s.truncated, "cap 5 < 10 bytes must be flagged");
+        assert_eq!(s.omitted, 5);
+    }
 
     let state = Arc::new(Mutex::new(CaptureState::with_capacity(100)));
     read_capped(&b"short"[..], 100, state.clone())

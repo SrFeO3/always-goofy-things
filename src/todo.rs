@@ -27,11 +27,9 @@
 use anyhow::{Context, Result, anyhow};
 
 use crate::attach::AttachedFile;
-use crate::compat_provider::LlmProvider;
-use crate::llm_stats::Metrics;
-use crate::model::{Message, Session, Settings};
+use crate::model::{Message, Session};
 use crate::persistence;
-use crate::reasoning::{EndReason, run_reasoning_loop};
+use crate::reasoning::{EndReason, LoopCtx, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
     build_handover_entry, has_deliverables_section, last_assistant_report,
@@ -339,16 +337,14 @@ fn replan_backoff(consecutive_failures: u32) -> std::time::Duration {
 /// ./next-task.md. Its final message (the plan-update notes) is appended to
 /// artifacts/handover.md by the application, like a task report. Returns
 /// `ReplanOutcome::Updated` with the todo.md content after the loop.
-async fn run_replan_loop(
-    config: &startup::Config,
-    settings: &mut Settings,
-    provider: LlmProvider,
-    metrics: &mut Metrics,
+async fn run_replan_loop<'a>(
+    ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
-    user_input: &str,
+    user_query: &str,
     app_feedback: Option<&str>,
 ) -> Result<ReplanOutcome> {
-    let q = user_input.trim();
+    let config = ctx.config;
+    let q = user_query.trim();
     let mut sections =
         vec!["Review and update `./todo.md` per the system instructions.".to_string()];
     if !q.is_empty() {
@@ -365,11 +361,8 @@ async fn run_replan_loop(
     // Move a leftover session file from an earlier replan/run aside.
     persistence::init_session(&replan_label)?;
     let end_reason = run_reasoning_loop(
-        config,
-        provider,
+        ctx,
         &mut replan_session,
-        settings,
-        metrics,
         "todo:replan",
         replan_prompt,
         Vec::new(),
@@ -425,13 +418,10 @@ async fn run_replan_loop(
 ///
 /// A failed final replan propagates `Err` (completion unconfirmed, exit 1);
 /// a Ctrl+C stops with exit 0 but prints "completion NOT confirmed".
-async fn final_replan_confirms_completion(
-    config: &startup::Config,
-    settings: &mut Settings,
-    provider: LlmProvider,
-    metrics: &mut Metrics,
+async fn final_replan_confirms_completion<'a>(
+    ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
-    user_input: &str,
+    user_query: &str,
     app_feedback: Option<&str>,
 ) -> Result<bool> {
     println!(
@@ -446,16 +436,7 @@ async fn final_replan_confirms_completion(
     );
 
     // One backoff retry before treating the completion as unconfirmed.
-    let first = run_replan_loop(
-        config,
-        settings,
-        provider,
-        metrics,
-        gui_log,
-        user_input,
-        app_feedback,
-    )
-    .await;
+    let first = run_replan_loop(ctx, gui_log, user_query, app_feedback).await;
     let replan_outcome = match first {
         Ok(replan_outcome) => replan_outcome,
         Err(e) => {
@@ -468,17 +449,7 @@ async fn final_replan_confirms_completion(
                 startup::RESET
             );
             tokio::time::sleep(wait).await;
-            match run_replan_loop(
-                config,
-                settings,
-                provider,
-                metrics,
-                gui_log,
-                user_input,
-                app_feedback,
-            )
-            .await
-            {
+            match run_replan_loop(ctx, gui_log, user_query, app_feedback).await {
                 Ok(replan_outcome) => replan_outcome,
                 Err(e2) => {
                     println!(
@@ -602,15 +573,13 @@ fn finalize_with_sweep(mut summary: String) -> String {
 }
 
 /// Run the Plan-Exec todo loop for Mode 1 and Mode 2.
-pub(crate) async fn run_todo_loop(
-    config: &startup::Config,
-    provider: LlmProvider,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
+pub(crate) async fn run_todo_loop<'a>(
+    ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
-    user_input: String,
+    user_query: String,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
+    let config = ctx.config;
     if !std::path::Path::new(TODO_MD_PATH).exists() {
         anyhow::bail!(
             "./todo.md not found. Create a task plan with ## Tasks section (Mode 1) or let the AI generate one (Mode 2)."
@@ -671,36 +640,17 @@ pub(crate) async fn run_todo_loop(
     seed_handover()?;
 
     let summary = if config.todo_mode == 2 {
-        run_todo_loop_mode2(
-            config,
-            provider,
-            settings,
-            metrics,
-            gui_log,
-            &user_input,
-            attached_files,
-        )
-        .await?
+        run_todo_loop_mode2(ctx, gui_log, &user_query, attached_files).await?
     } else {
-        run_todo_loop_mode1(
-            config,
-            provider,
-            settings,
-            metrics,
-            gui_log,
-            &user_input,
-            attached_files,
-            pending,
-        )
-        .await?
+        run_todo_loop_mode1(ctx, gui_log, &user_query, attached_files, pending).await?
     };
     Ok(finalize_with_sweep(summary))
 }
 
 /// Build the task user message: the task description plus the `-q` addendum
 /// (if any). The system prompt binds this to ./todo.md.
-fn task_prompt(description: &str, user_input: &str) -> String {
-    let q = user_input.trim();
+fn task_prompt(description: &str, user_query: &str) -> String {
+    let q = user_query.trim();
     if q.is_empty() {
         format!("Task: {}", description)
     } else {
@@ -712,16 +662,14 @@ fn task_prompt(description: &str, user_input: &str) -> String {
 }
 
 /// Mode 1: Static sequential execution with application-side `[x]` marking.
-async fn run_todo_loop_mode1(
-    config: &startup::Config,
-    provider: LlmProvider,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
+async fn run_todo_loop_mode1<'a>(
+    ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
-    user_input: &str,
+    user_query: &str,
     attached_files: Vec<AttachedFile>,
     pending: Vec<&TaskItem>,
 ) -> Result<String> {
+    let config = ctx.config;
     let pending_count = pending.len();
     let mut completed = 0usize;
 
@@ -753,13 +701,10 @@ async fn run_todo_loop_mode1(
         persistence::init_session(&task_label)?;
 
         let end_reason = run_reasoning_loop(
-            config,
-            provider,
+            ctx,
             &mut task_session,
-            settings,
-            metrics,
             &format!("todo:task:{}", task.index),
-            task_prompt(&task.description, user_input),
+            task_prompt(&task.description, user_query),
             attached_files.clone(),
         )
         .await?;
@@ -768,7 +713,7 @@ async fn run_todo_loop_mode1(
             // llm_guard_: condense an over-long handover report before logging.
             // Snapshot first: the rewrite may drop the `- Output:` declaration.
             let pre_condense = last_assistant_report(&task_session).map(str::to_string);
-            llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
+            llm_guard_handover_report(ctx, &mut task_session).await;
             // Effective report: the last assistant message plus any
             // declarations the condense rewrite dropped.
             let mut raw_note = merge_condensed_report(
@@ -790,11 +735,8 @@ async fn run_todo_loop_mode1(
                     missing.join(", ")
                 );
                 let _ = run_reasoning_loop(
-                    config,
-                    provider,
+                    ctx,
                     &mut task_session,
-                    settings,
-                    metrics,
                     "todo:guard:fix-outputs",
                     feedback,
                     Vec::new(),
@@ -918,15 +860,13 @@ async fn run_todo_loop_mode1(
 }
 
 /// Mode 2: Dynamic replanning with LLM-driven todo.md updates.
-async fn run_todo_loop_mode2(
-    config: &startup::Config,
-    provider: LlmProvider,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
+async fn run_todo_loop_mode2<'a>(
+    ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
-    user_input: &str,
+    user_query: &str,
     attached_files: Vec<AttachedFile>,
 ) -> Result<String> {
+    let config = ctx.config;
     let mut completed = 0usize;
     let mut replan_stalls = 0u32;
     // Consecutive failed replans; drives the backoff. Reset on success.
@@ -944,12 +884,9 @@ async fn run_todo_loop_mode2(
         // only when the plan is still complete after that final replan.
         if check_completion(&todo_content) {
             if final_replan_confirms_completion(
-                config,
-                settings,
-                provider,
-                metrics,
+                ctx,
                 gui_log,
-                user_input,
+                user_query,
                 build_replan_feedback(&app_feedback).as_deref(),
             )
             .await?
@@ -995,17 +932,7 @@ async fn run_todo_loop_mode2(
             Some(app_feedback.join("\n"))
         };
         let mut replan_failed = false;
-        let updated = match run_replan_loop(
-            config,
-            settings,
-            provider,
-            metrics,
-            gui_log,
-            user_input,
-            feedback.as_deref(),
-        )
-        .await
-        {
+        let updated = match run_replan_loop(ctx, gui_log, user_query, feedback.as_deref()).await {
             Ok(ReplanOutcome::Updated(u)) => {
                 // The planner saw the pending app reports; drop them.
                 app_feedback.clear();
@@ -1032,17 +959,7 @@ async fn run_todo_loop_mode2(
                     startup::RESET
                 );
                 tokio::time::sleep(wait).await;
-                match run_replan_loop(
-                    config,
-                    settings,
-                    provider,
-                    metrics,
-                    gui_log,
-                    user_input,
-                    feedback.as_deref(),
-                )
-                .await
-                {
+                match run_replan_loop(ctx, gui_log, user_query, feedback.as_deref()).await {
                     Ok(ReplanOutcome::Updated(u)) => {
                         app_feedback.clear();
                         replan_consecutive_failures = 0;
@@ -1074,12 +991,9 @@ async fn run_todo_loop_mode2(
 
         if check_completion(&updated) {
             if final_replan_confirms_completion(
-                config,
-                settings,
-                provider,
-                metrics,
+                ctx,
                 gui_log,
-                user_input,
+                user_query,
                 build_replan_feedback(&app_feedback).as_deref(),
             )
             .await?
@@ -1155,13 +1069,10 @@ async fn run_todo_loop_mode2(
         persistence::init_session(&task_label)?;
 
         let end_reason = run_reasoning_loop(
-            config,
-            provider,
+            ctx,
             &mut task_session,
-            settings,
-            metrics,
             &format!("todo:task:{}", task.index),
-            task_prompt(&task.description, user_input),
+            task_prompt(&task.description, user_query),
             attached_files.clone(),
         )
         .await?;
@@ -1170,7 +1081,7 @@ async fn run_todo_loop_mode2(
             // llm_guard_: condense an over-long handover report before logging.
             // Snapshot first: the rewrite may drop the `- Output:` declaration.
             let pre_condense = last_assistant_report(&task_session).map(str::to_string);
-            llm_guard_handover_report(config, provider, settings, metrics, &mut task_session).await;
+            llm_guard_handover_report(ctx, &mut task_session).await;
             // Record the executor's report (last assistant message; never a
             // tool response). Output paths stay on an untruncated `outputs:`
             // line; condense cannot drop them (merge_condensed_report).

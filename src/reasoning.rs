@@ -66,25 +66,33 @@ impl EndReason {
     }
 }
 
+/// Reasoning loop context: the run-scoped state every reasoning/todo loop
+/// needs - the static CLI `config`, the startup-resolved `provider`, the
+/// slash-command-tunable `settings`, and the run-wide `metrics`.
+pub(crate) struct LoopCtx<'a> {
+    pub config: &'a startup::Config,
+    pub provider: LlmProvider,
+    pub settings: &'a mut Settings,
+    pub metrics: &'a mut Metrics,
+}
+
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
-///
-/// `tools::confirm_execute_tool`, `persistence::save_message`, and
-/// `tokio::signal::ctrl_c` are called directly.
 ///
 /// Returns `Ok(EndReason::Completed)` (final answer = last message) or a
 /// termination reason (Ctrl+C / connection error / limits). `Err(_)` on
 /// persistence failure or batch max-turns.
-#[allow(clippy::too_many_arguments)] // `phase` tags main vs todo context for stats
-pub(crate) async fn run_reasoning_loop(
-    config: &startup::Config,
-    provider: LlmProvider,
+pub(crate) async fn run_reasoning_loop<'a>(
+    ctx: &mut LoopCtx<'a>,
     session: &mut Session,
-    settings: &mut Settings,
-    metrics: &mut Metrics,
-    phase: &str,
-    user_input: String,
+    call_label: &str,
+    user_query: String,
     attached_files: Vec<AttachedFile>,
 ) -> Result<EndReason> {
+    // Destructure the shared run context so the loop body below reads unchanged.
+    let config = ctx.config;
+    let provider = ctx.provider;
+    let settings = &mut *ctx.settings;
+    let metrics = &mut *ctx.metrics;
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
     // signature smaller and avoids the caller having to pass it through.
     let is_batch = config.query.is_some();
@@ -93,13 +101,13 @@ pub(crate) async fn run_reasoning_loop(
     let user_msg_count = session.messages.iter().filter(|m| m.role == "user").count();
     if user_msg_count >= session.turn as usize {
         if let Some(m) = session.messages.iter_mut().rev().find(|m| m.role == "user") {
-            m.content = user_input.clone();
+            m.content = user_query.clone();
             m.attached_files = attached_files.clone();
         }
     } else {
         session.messages.push(Message {
             role: "user".to_string(),
-            content: user_input.clone(),
+            content: user_query.clone(),
             attached_files: attached_files.clone(),
             ..Default::default()
         });
@@ -111,7 +119,7 @@ pub(crate) async fn run_reasoning_loop(
         .lock()
         .unwrap()
         .3
-        .push_str(&format!("{}\n", user_input));
+        .push_str(&format!("{}\n", user_query));
 
     // Inner loop to handle tool execution and sequential LLM reasoning.
     // `Completed` by default; every non-completing break overrides it.
@@ -162,7 +170,7 @@ pub(crate) async fn run_reasoning_loop(
                            timestamp: chrono::Utc::now(),
                            model: settings.llm_model.clone(),
                            provider,
-                           phase: phase.to_string(),
+                           call_label: call_label.to_string(),
                            usage: Usage::default(),
                            latency_ms: llm_start.elapsed().as_millis(),
                            ttft_ms: 0,
@@ -208,7 +216,7 @@ pub(crate) async fn run_reasoning_loop(
             timestamp: chrono::Utc::now(),
             model: settings.llm_model.clone(),
             provider,
-            phase: phase.to_string(),
+            call_label: call_label.to_string(),
             usage: usage_opt.clone().unwrap_or_default(),
             latency_ms: request_info.latency_ms,
             ttft_ms: request_info.ttft_ms,
@@ -307,13 +315,9 @@ pub(crate) async fn run_reasoning_loop(
 
                 // 0. Broken tool call diagnostic
                 pretty::pretty_print_broken_tool_call(
-                    &call.function.name,
-                    &call.id,
-                    &call.tool_type,
-                    &call.function.arguments,
+                    &call,
                     &args,
                     args_parse_error.as_deref(),
-                    call.thought_signature.as_deref(),
                     &assistant_msg.content,
                 );
 
@@ -601,7 +605,6 @@ pub(crate) async fn call_llm(
     let mut ttft_ms: Option<u128> = None;
     // Raw bytes received across chunks (SSE overhead included).
     let mut response_bytes: usize = 0;
-    #[allow(unused_mut, unused_variables)]
     let mut anth_tool_index = 0;
     let mut used_nonstandard_format = false;
 
