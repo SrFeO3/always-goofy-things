@@ -332,7 +332,7 @@ pub(crate) fn llm_guard_verified_outputs(
 ) -> (Vec<String>, Vec<String>) {
     let mut goal: Vec<String> = Vec::new();
     let mut tasks: Vec<String> = Vec::new();
-    let mut push = |out: &mut Vec<String>, p: &str| {
+    let push = |out: &mut Vec<String>, p: &str| {
         if is_unverifiable_path(p) || !is_deliverable_file(p) {
             return;
         }
