@@ -91,7 +91,7 @@ fn test_conversation_round_trip_preserves_wire_format() {
     ];
 
     for m in &msgs {
-        save_message(label, m).unwrap();
+        append_message_to_session(label, m).unwrap();
     }
 
     let path = last_session_path(label).unwrap();
@@ -111,6 +111,114 @@ fn test_conversation_round_trip_preserves_wire_format() {
         assert_eq!(
             serde_json::to_string(&saved.attached_files).unwrap(),
             serde_json::to_string(&restored.attached_files).unwrap()
+        );
+    }
+}
+
+/// `rewrite_session` must fully overwrite the on-disk session to match the
+/// in-memory `messages`: a truncated conversation must not leave the discarded
+/// turns in the file, and the rewritten wire format must round-trip exactly
+/// (including manually injected `attached_files`).
+#[test]
+fn test_rewrite_session_overwrites_and_round_trips() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "rewrite_test";
+
+    // First append a 3-turn history as if turns 1..3 were completed.
+    let full = vec![
+        Message {
+            role: "system".to_string(),
+            content: "sys".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "q1".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: "a1".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "q2".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: "a2".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "q3".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: "a3".to_string(),
+            ..Default::default()
+        },
+    ];
+    for m in &full {
+        append_message_to_session(label, m).unwrap();
+    }
+
+    // /rewind to turn 1: rewrite with only system + turn 1.
+    let kept: Vec<Message> = full[..3].to_vec();
+    rewrite_session(label, &kept).unwrap();
+
+    let path = last_session_path(label).unwrap();
+    let restored = read_messages_from(&path).unwrap();
+
+    // The file must now hold exactly `kept`; discarded turns (q2/q3) are gone.
+    assert_eq!(restored.len(), kept.len());
+    assert_eq!(
+        serde_json::to_string(&restored).unwrap(),
+        serde_json::to_string(&kept).unwrap()
+    );
+    assert!(
+        !restored
+            .iter()
+            .any(|m| m.content == "q2" || m.content == "q3"),
+        "discarded turns must not survive a rewrite"
+    );
+
+    // Attached-file metadata must survive the rewrite with the same wire
+    // format `append_message_to_session` produces.
+    let with_attach = Message {
+        role: "user".to_string(),
+        content: "hi @file".to_string(),
+        attached_files: vec![crate::attach::AttachedFile {
+            path: "a.txt".to_string(),
+            content: "excluded (not serialized)".to_string(),
+            attach_type: crate::file::FileType::Text,
+            page_range: None,
+        }],
+        ..Default::default()
+    };
+    let with_tool = Message {
+        role: "assistant".to_string(),
+        content: "answer".to_string(),
+        reasoning_content: Some("thought".to_string()),
+        ..Default::default()
+    };
+    let msgs = vec![kept[0].clone(), with_attach, with_tool];
+    rewrite_session(label, &msgs).unwrap();
+
+    let restored2 = read_messages_from(&path).unwrap();
+    assert_eq!(restored2.len(), msgs.len());
+    for (saved, got) in msgs.iter().zip(restored2.iter()) {
+        assert_eq!(
+            serde_json::to_string(saved).unwrap(),
+            serde_json::to_string(got).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&saved.attached_files).unwrap(),
+            serde_json::to_string(&got.attached_files).unwrap()
         );
     }
 }
@@ -207,7 +315,7 @@ fn test_todo_archive_preserves_existing_archive() {
         std::path::Path::new(&data_dir).join(format!("todo_loop_{}_{}.jsonl", task_index, label));
 
     // Archive, then re-archive the same task (resume).
-    save_message(
+    append_message_to_session(
         label,
         &Message {
             role: "user".to_string(),
@@ -219,7 +327,7 @@ fn test_todo_archive_preserves_existing_archive() {
     archive_todo_session(label, task_index).unwrap();
     assert!(archive.exists(), "first archive must exist");
 
-    save_message(
+    append_message_to_session(
         label,
         &Message {
             role: "user".to_string(),
@@ -263,7 +371,7 @@ fn test_todo_archive_uses_data_dir_override() {
     let task_index = 3usize;
 
     // Create the session file that would be archived.
-    save_message(
+    append_message_to_session(
         label,
         &Message {
             role: "user".to_string(),

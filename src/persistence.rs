@@ -101,14 +101,14 @@ pub fn init_session(label: &str) -> Result<()> {
     Ok(())
 }
 
-/// Append a single message as one JSON line to the current session file.
+/// Serialize one `Message` to its JSONL line, the exact wire format that both
+/// `append_message_to_session` (append one) and `rewrite_session` (overwrite all)
+/// write.
 ///
-/// Note: `attached_files` is `#[serde(skip)]` on `Message`, so it is injected
-/// manually here to persist paths (content is excluded to keep JSONL lean).
-pub fn save_message(label: &str, message: &Message) -> Result<()> {
-    let path =
-        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
-
+/// `attached_files` is `#[serde(skip)]` on `Message`, so its metadata (path +
+/// attach_type; content is excluded to keep JSONL lean) is injected manually
+/// here.
+fn serialize_message(message: &Message) -> Result<String> {
     let mut json_val = serde_json::to_value(message)
         .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
 
@@ -122,8 +122,18 @@ pub fn save_message(label: &str, message: &Message) -> Result<()> {
         json_val["attached_files"] = serde_json::Value::Array(files);
     }
 
-    let json = serde_json::to_string(&json_val)
-        .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
+    serde_json::to_string(&json_val)
+        .with_context(|| format!("Failed to serialize message: role={}", message.role))
+}
+
+/// Append one `Message` as a JSON line to `last_session_{label}.jsonl`.
+///
+/// Serialization, including the `attached_files` injection, is delegated to
+/// `serialize_message` (the shared wire format for the session file).
+pub fn append_message_to_session(label: &str, message: &Message) -> Result<()> {
+    let path =
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
+    let json = serialize_message(message)?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -133,6 +143,39 @@ pub fn save_message(label: &str, message: &Message) -> Result<()> {
 
     writeln!(file, "{}", json)
         .with_context(|| format!("Failed to write to session file {:?}", path))?;
+    Ok(())
+}
+
+/// Overwrite `last_session_{label}.jsonl` with exactly `messages`, one JSON
+/// line per message, via the same `serialize_message` wire format as
+/// `append_message_to_session`.
+///
+/// Writes to a sibling temp file then `rename`s it into place so a crash
+/// mid-write cannot leave the session file half-written (rename is atomic
+/// within the same directory).
+pub fn rewrite_session(label: &str, messages: &[Message]) -> Result<()> {
+    let path =
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {:?}", parent))?;
+    }
+
+    // Build the full file content first (one line per message).
+    let mut content = String::new();
+    for m in messages {
+        content.push_str(&serialize_message(m)?);
+        content.push('\n');
+    }
+
+    // Write to a sibling temp file, then rename atomically over the target.
+    let tmp = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, content)
+        .with_context(|| format!("Failed to write temp session file {:?}", tmp))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("Failed to replace session file {:?} with {:?}", tmp, path))?;
+
     Ok(())
 }
 
@@ -154,6 +197,15 @@ pub fn restore_previous_session(label: &str) -> Result<Vec<Message>> {
     std::fs::copy(&prev_path, &last_path)?;
 
     Ok(messages)
+}
+
+/// Read the current session (`last_session_{label}.jsonl`) back into memory.
+/// Test-only (no production path reads it back).
+#[cfg(test)]
+pub fn load_current_session(label: &str) -> Result<Vec<Message>> {
+    let path =
+        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
+    read_messages_from(&path)
 }
 
 /// Archive a todo task's session: rename `last_session_{label}.jsonl` -> `todo_loop_{task_index}_{label}.jsonl`.

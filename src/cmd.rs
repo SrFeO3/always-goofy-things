@@ -70,13 +70,15 @@ pub fn try_handle_slash_command(
             print_help();
             Some(SlashCmdResult::NoAdvance)
         }
-        "/rewind" => match handle_rewind(arg, &mut session.messages, session.turn) {
-            Ok(target) => Some(SlashCmdResult::RewoundTo(target)),
-            Err(e) => {
-                eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
-                Some(SlashCmdResult::NoAdvance)
+        "/rewind" => {
+            match handle_rewind(arg, &session.label, &mut session.messages, session.turn) {
+                Ok(target) => Some(SlashCmdResult::RewoundTo(target)),
+                Err(e) => {
+                    eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
+                    Some(SlashCmdResult::NoAdvance)
+                }
             }
-        },
+        }
         "/history" => {
             handle_history(arg, &session.messages);
             Some(SlashCmdResult::NoAdvance)
@@ -336,13 +338,17 @@ fn print_help() {
 /// Handle `/rewind <turn>`.
 ///
 /// Finds the turn boundary by counting user messages (each user message
-/// starts a new turn), truncates messages from that point, and returns
-/// the `target` turn number so the caller can reset the turn counter.
+/// starts a new turn), truncates messages from that point, rewrites the
+/// on-disk session to match, and returns the `target` turn number so the
+/// caller can reset the turn counter.
 pub(crate) fn handle_rewind(
     arg: Option<&str>,
+    label: &str,
     messages: &mut Vec<Message>,
     current_turn: i32,
 ) -> Result<i32> {
+    use crate::persistence;
+
     let target: i32 = match arg {
         Some(s) => s
             .parse()
@@ -360,6 +366,11 @@ pub(crate) fn handle_rewind(
         ));
     }
 
+    // Count user messages = turns that have begun (including an in-progress
+    // turn whose user message has no assistant reply yet). This is the upper
+    // bound of the discard range.
+    let user_msg_count = messages.iter().filter(|m| m.role == "user").count() as i32;
+
     // Calculate truncation point by finding where turn `target+1` starts.
     // Messages: [system(0), t1_user, t1_asst..., t2_user, t2_asst..., ...]
     // system(0) is skipped. User messages delimit each turn.
@@ -376,35 +387,43 @@ pub(crate) fn handle_rewind(
         })
     };
 
+    // No (target+1)-th user message means there is nothing to discard.
+    if truncate_at.is_none() {
+        return Err(anyhow!(
+            "Nothing to discard: turns after {} do not exist",
+            target
+        ));
+    }
+    let truncate_at = truncate_at.unwrap();
+
+    // A truncation point exists, so there is at least one turn to discard;
+    // always confirm before truncating.
     let discarded_start = target + 1;
-    let discarded_end = current_turn - 1;
+    let discarded_end = user_msg_count;
+    println!(
+        "\x1b[91m⚠️  WARNING: This will discard conversation turns {}-{}.\x1b[0m",
+        discarded_start, discarded_end
+    );
+    println!(
+        "\x1b[93m   Note that any local file changes made during these turns CANNOT be undone.\x1b[0m"
+    );
+    print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
+    io::stdout().flush().context("Failed to flush stdout")?;
 
-    // Warn the user only if there are actually turns to discard
-    if discarded_start <= discarded_end {
-        println!(
-            "\x1b[91m⚠️  ARNING: This will discard conversation turns {}-{}.\x1b[0m",
-            discarded_start, discarded_end
-        );
-        println!(
-            "\x1b[93m   Note that any local file changes made during these turns CANNOT be undone.\x1b[0m"
-        );
-        print!("\x1b[1m   Proceed? (y/n) > \x1b[0m");
-        io::stdout().flush().context("Failed to flush stdout")?;
-
-        let mut confirm = String::new();
-        io::stdin()
-            .read_line(&mut confirm)
-            .context("Failed to read confirmation")?;
-        if !confirm.trim().eq_ignore_ascii_case("y") {
-            println!("\x1b[93mCancelled.\x1b[0m");
-            return Err(anyhow!("User cancelled the rewind"));
-        }
+    let mut confirm = String::new();
+    io::stdin()
+        .read_line(&mut confirm)
+        .context("Failed to read confirmation")?;
+    if !confirm.trim().eq_ignore_ascii_case("y") {
+        println!("\x1b[93mCancelled.\x1b[0m");
+        return Err(anyhow!("User cancelled the rewind"));
     }
 
-    // Truncate at the start of turn `target+1` if it exists
-    if let Some(pos) = truncate_at {
-        messages.truncate(pos);
-    }
+    // Truncate at the start of turn `target+1`.
+    messages.truncate(truncate_at);
+
+    // Rewrite the on-disk session to match the truncated conversation.
+    persistence::rewrite_session(label, messages)?;
 
     println!(
         "\x1b[32m⏮ Rewound to Turn {}. Ready for your next input (Turn {}).\x1b[0m",
@@ -700,6 +719,14 @@ pub(crate) fn handle_restore(
             restored_turns += 1;
         }
         i += 1;
+    }
+
+    // If the last message is a user message, the restored session ends on an
+    // unfinished turn (a query with no assistant reply). Don't count it as a
+    // completed turn, so the caller sets turn = N and the next input reuses
+    // that user message instead of pushing a duplicate.
+    if messages.last().is_some_and(|m| m.role == "user") {
+        restored_turns -= 1;
     }
 
     println!(

@@ -104,6 +104,10 @@ pub(crate) async fn run_reasoning_loop<'a>(
             m.content = user_query.clone();
             m.attached_files = attached_files.clone();
         }
+        // The in-memory overwrite above must be mirrored on disk so a later
+        // /restore returns the retried text (the push branch does this via
+        // append_message_to_session).
+        persistence::rewrite_session(&session.label, &session.messages)?;
     } else {
         session.messages.push(Message {
             role: "user".to_string(),
@@ -111,7 +115,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
             attached_files: attached_files.clone(),
             ..Default::default()
         });
-        persistence::save_message(&session.label, session.messages.last().unwrap())?;
+        persistence::append_message_to_session(&session.label, session.messages.last().unwrap())?;
     }
     // Push user message to GUI live stream so turn numbers appear correctly.
     #[cfg(feature = "gui")]
@@ -266,7 +270,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
 
         session.messages.push(assistant_msg.clone());
         // Was `let _ =` (swallowed). Propagate persistence errors now.
-        persistence::save_message(&session.label, session.messages.last().unwrap())?;
+        persistence::append_message_to_session(&session.label, session.messages.last().unwrap())?;
         // Cache snapshot after assistant push but BEFORE tool pushes: drives
         // verbose-2 incremental display on the next `call_llm` (see Settings).
         settings.last_sent_count = session.messages.len();
@@ -453,7 +457,10 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     tool_call_decision: Some(tool_call_decision),
                     ..Default::default()
                 });
-                persistence::save_message(&session.label, session.messages.last().unwrap())?;
+                persistence::append_message_to_session(
+                    &session.label,
+                    session.messages.last().unwrap(),
+                )?;
             }
             // Re-query LLM with tool execution results
             continue 'reasoning_loop;

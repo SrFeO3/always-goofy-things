@@ -71,8 +71,9 @@ impl GuiApp {
         if let Err(e) = persistence::init_session(&session.label) {
             eprintln!("[GUI] persistence init: {}", e);
         }
-        if let Err(e) = persistence::save_message(&session.label, &session.messages[0]) {
-            eprintln!("[GUI] persistence save: {}", e);
+        if let Err(e) = persistence::append_message_to_session(&session.label, &session.messages[0])
+        {
+            eprintln!("[GUI] persistence append: {}", e);
         }
 
         GuiApp {

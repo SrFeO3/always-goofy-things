@@ -122,8 +122,8 @@ async fn main() -> Result<()> {
     );
     // On startup: move meaningful last_session -> previous_session if it exists
     persistence::init_session(&session.label)?;
-    // Save system message as the first line of the new session
-    persistence::save_message(&session.label, &session.messages[0])?;
+    // Append the system message as the first line of the new session
+    persistence::append_message_to_session(&session.label, &session.messages[0])?;
 
     // Main conversation loop
     let mut batch_input: Option<String> = if config.todo_mode > 0 {
