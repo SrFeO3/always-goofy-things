@@ -711,3 +711,7 @@ pub(crate) fn handle_restore(
 
     Ok((restored_turns, label))
 }
+
+#[cfg(test)]
+#[path = "tests/cmd_rewind_test.rs"]
+mod tests;
