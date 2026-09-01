@@ -11,6 +11,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         &json!({ "content": "x", "path": "artifacts/handover.md" }),
         None,
         None,
+        None,
         2,
         |_| true,
     )
@@ -28,6 +29,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         }),
         None,
         None,
+        None,
         2,
         |_| true,
     )
@@ -42,6 +44,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
     let ok = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": outside.to_str().unwrap() }),
+        None,
         None,
         None,
         2,
@@ -61,6 +64,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
             &json!({ "content": "x", "path": outside.to_str().unwrap() }),
             None,
             None,
+            None,
             mode,
             |_| true,
         )
@@ -72,6 +76,68 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
             ok.err()
         );
     }
+}
+
+#[tokio::test]
+async fn test_execute_tool_mode2_plan_write_guard() {
+    // The plan-write decision lives in todo_guard; here we prove
+    // execute_tool wires it (denied at dispatch, other files pass).
+    crate::tools::set_workspace_root(std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let plan = "# Plan\n\n## Tasks\n- [ ] a\n- [ ] b\n";
+    let guard = crate::todo_guard::PlanWriteGuard::capture(plan, 0);
+
+    // Violation: the executor flips a task it was not assigned.
+    let violated = execute_tool(
+        "write_file",
+        &json!({
+            "content": "# Plan\n\n## Tasks\n- [x] a\n- [x] b\n",
+            "path": "./todo.md"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    let err = violated.unwrap_err().to_string();
+    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
+
+    // str_replace_editor on the plan file is rejected too (full rewrites).
+    let denied = execute_tool(
+        "str_replace_editor",
+        &json!({
+            "path": "todo.md",
+            "old_string": "- [ ] b",
+            "new_string": "- [x] b"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
+
+    // Non-plan files are not guarded: the write proceeds (lands in tmp).
+    let tmp = get_temp_path("plan_guard_ok");
+    let other = tmp.join("note.md");
+    let ok = execute_tool(
+        "write_file",
+        &json!({ "content": "x", "path": other.to_str().unwrap() }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "non-plan writes must pass the guard: {:?}",
+        ok.err()
+    );
 }
 
 // Helper to generate a unique temporary path for testing (relative path)
@@ -719,6 +785,7 @@ fn test_validate_path_symlink_escape() {
             &json!({ "path": link_str }),
             None,
             None,
+            None,
             0,
             |_| true,
         ));
@@ -872,6 +939,7 @@ async fn test_execute_tool_rejects_disabled() {
     let res = execute_tool(
         "execute_bash",
         &json!({ "command": "ls" }),
+        None,
         None,
         None,
         0,

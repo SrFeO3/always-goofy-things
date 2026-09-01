@@ -636,6 +636,7 @@ async fn tool_definition_and_dispatch() {
         &json!({ "expressions": ["1425 * 32"] }),
         None,
         None,
+        None,
         0,
         |_| true,
     )
@@ -647,6 +648,7 @@ async fn tool_definition_and_dispatch() {
     let res = crate::tools::execute_tool(
         "calc",
         &json!({ "expressions": ["1 + 1"] }),
+        None,
         None,
         None,
         0,

@@ -303,6 +303,7 @@ async fn main() -> Result<()> {
                     provider,
                     settings: &mut settings,
                     metrics: &mut metrics,
+                    plan_guard: None,
                 };
                 let end_reason =
                     run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
@@ -321,6 +322,7 @@ async fn main() -> Result<()> {
                     provider,
                     settings: &mut settings,
                     metrics: &mut metrics,
+                    plan_guard: None,
                 };
                 match todo::run_todo_loop(&mut ctx, &mut session, query_text, attached_files).await
                 {

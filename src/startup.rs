@@ -437,7 +437,7 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
          - Read `./todo.md` and `./next-task.md` FIRST with read_file; todo.md is the plan, next-task.md is the brief for your task: your scope, the files to read (marked must-read or optional), the previous task's `outputs:`, and warnings. If next-task.md is missing or the brief is insufficient, explore `artifacts/` with list_directory and read only the files your task needs.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
-         - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed. Do NOT edit the `## Deliverables` section (the planner owns it).\n\
+         - After completing, update `./todo.md` with write_file: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed. Do NOT edit the `## Deliverables` section (the planner owns it) or existing tasks.\n\
          - Check `artifacts/` for previous work; save your outputs there.\n\
          - Your final message must be a Handover Report in exactly this format (keep the entire report within {} characters; nothing else; the application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself):\n\
            - Status: done / blocked\n\

@@ -1,6 +1,7 @@
 //! Tests for `src/todo_guard.rs` (LLM output guards for the todo modes).
 
 use super::*;
+use serde_json::json;
 
 /// Removes the given workspace files on drop (panic-safe cleanup) for tests
 /// that create Goal artifacts under `./artifacts/`.
@@ -834,4 +835,223 @@ fn test_merge_condensed_report_normalizes_dot_slash() {
 fn test_merge_condensed_report_noop_without_original() {
     let condensed = "- Status: done\n- Output: artifacts/a.md";
     assert_eq!(merge_condensed_report(None, condensed), condensed);
+}
+
+// ---------------------------------------------------------------------------
+// Plan-write guard: `./todo.md` rewrites vs. the session-start snapshot
+// (own `[x]` + added subtasks allowed; existing tasks frozen).
+// ---------------------------------------------------------------------------
+
+const PLAN: &str = "# Plan\n\n## Goal\nDo the thing.\n\n## Tasks\n- [ ] a\n- [x] b\n- [ ] c\n\n## Deliverables\n- artifacts/out.md\n";
+
+/// Rewrite `./todo.md` (via write_file) with the given content; returns the
+/// denial message when the guard rejects it.
+fn plan_write(content: &str, assigned: usize) -> Option<String> {
+    let guard = PlanWriteGuard::capture(PLAN, assigned);
+    llm_guard_plan_file_write(
+        "write_file",
+        "./todo.md",
+        &json!({ "path": "todo.md", "content": content }),
+        &guard,
+    )
+}
+
+#[test]
+fn test_plan_write_own_flip_and_noop_allowed() {
+    // Exact copy: allowed.
+    assert_eq!(plan_write(PLAN, 0), None);
+    // Assigned task `a` ([ ]->[x]): allowed.
+    let done = PLAN.replace("- [ ] a", "- [x] a");
+    assert_eq!(plan_write(&done, 0), None);
+}
+
+#[test]
+fn test_plan_write_added_subtasks_any_position_allowed() {
+    let after_own = PLAN.replace("- [ ] a\n- [x] b", "- [ ] a\n- [ ] own-sub\n- [x] b");
+    assert_eq!(plan_write(&after_own, 0), None);
+    let before_own = PLAN.replace("- [ ] a", "- [ ] prep\n- [ ] a");
+    assert_eq!(plan_write(&before_own, 0), None);
+    let at_end = PLAN.replace(
+        "- [ ] c\n\n## Deliverables",
+        "- [ ] c\n- [ ] tail-sub\n\n## Deliverables",
+    );
+    assert_eq!(plan_write(&at_end, 0), None);
+}
+
+#[test]
+fn test_plan_write_checked_subtask_allowed() {
+    // Added subtasks may be `[x]` in the same write.
+    let with_done_sub = PLAN.replace("- [ ] c", "- [ ] c\n- [x] done-sub");
+    assert_eq!(plan_write(&with_done_sub, 0), None);
+}
+
+#[test]
+fn test_plan_write_added_subtask_flip_in_later_write() {
+    // A subtask added in the first write can be flipped to `[x]` in the
+    // second (both validated against the same session snapshot).
+    let w1 = PLAN.replace("- [ ] c", "- [ ] c\n- [ ] s1");
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    assert!(
+        llm_guard_plan_file_write("write_file", "./todo.md", &json!({ "content": w1 }), &guard)
+            .is_none()
+    );
+    let w2 = w1.replace("- [ ] s1", "- [x] s1");
+    assert!(
+        llm_guard_plan_file_write("write_file", "./todo.md", &json!({ "content": w2 }), &guard)
+            .is_none()
+    );
+}
+
+#[test]
+fn test_plan_write_other_task_flip_denied() {
+    let msg = plan_write(&PLAN.replace("- [ ] c", "- [x] c"), 0).expect("must deny");
+    assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
+    assert!(msg.contains("checkbox changed"), "{}", msg);
+}
+
+#[test]
+fn test_plan_write_rename_removal_reorder_denied() {
+    let rename = plan_write(&PLAN.replace("- [ ] c", "- [ ] c2"), 0).expect("must deny");
+    assert!(rename.contains("removed or renamed"), "{}", rename);
+    let removal = plan_write(&PLAN.replace("- [ ] c\n", ""), 0).expect("must deny");
+    assert!(removal.contains("removed or renamed"), "{}", removal);
+    let reorder = "# Plan\n\n## Goal\nDo the thing.\n\n## Tasks\n- [ ] c\n- [x] b\n- [ ] a\n\n## Deliverables\n- artifacts/out.md\n";
+    let msg = plan_write(reorder, 0).expect("must deny");
+    assert!(msg.contains("order"), "{}", msg);
+}
+
+#[test]
+fn test_plan_write_unflip_denied() {
+    // Unchecking a session-start `[x]` task is never allowed.
+    let msg = plan_write(&PLAN.replace("- [x] b", "- [ ] b"), 0).expect("must deny");
+    assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
+}
+
+#[test]
+fn test_plan_write_mixed_write_denied_atomically() {
+    // A mixed write (own flip + other flip) is rejected whole.
+    let mixed = PLAN
+        .replace("- [ ] a", "- [x] a")
+        .replace("- [ ] c", "- [x] c");
+    assert!(plan_write(&mixed, 0).is_some());
+}
+
+#[test]
+fn test_plan_write_section_changes_denied() {
+    let goal = PLAN.replace("Do the thing.", "Do the other thing.");
+    assert!(plan_write(&goal, 0).is_some());
+    let deliverables = PLAN.replace("- artifacts/out.md", "- artifacts/out2.md");
+    assert!(plan_write(&deliverables, 0).is_some());
+    let prose = PLAN.replace("- [ ] c", "- [ ] c\n- note prose");
+    assert!(plan_write(&prose, 0).is_some());
+    // Removing the `## Tasks` heading is denied too.
+    let no_heading = PLAN.replace("## Tasks\n", "");
+    assert!(plan_write(&no_heading, 0).is_some());
+}
+
+#[test]
+fn test_plan_write_empty_desc_subtask_denied() {
+    let empty = PLAN.replace("- [ ] c", "- [ ] c\n- [ ] ");
+    let msg = plan_write(&empty, 0).expect("must deny");
+    assert!(msg.contains("empty description"), "{}", msg);
+}
+
+#[test]
+fn test_plan_write_whitespace_and_blank_lines_tolerated() {
+    // Line whitespace and blank lines are normalized by the parser.
+    let cosmetically_different = "# Plan\n\n## Goal\nDo the thing.\n\n## Tasks\n\n- [ ] a  \n- [x] b\n  - [ ] c\n\n## Deliverables\n- artifacts/out.md\n";
+    assert_eq!(plan_write(cosmetically_different, 0), None);
+}
+
+#[test]
+fn test_plan_write_assigned_out_of_range_denies_flip() {
+    // Capture with a stale index: no flip may be allowed anywhere.
+    assert!(plan_write(&PLAN.replace("- [ ] a", "- [x] a"), 9).is_some());
+}
+
+#[test]
+fn test_plan_write_duplicate_descriptions_stay_frozen() {
+    let dup_plan = "## Tasks\n- [ ] a\n- [ ] a\n";
+    // Checking a second pre-existing bullet is not the assigned flip.
+    let guard = PlanWriteGuard::capture(dup_plan, 0);
+    let both_checked = "## Tasks\n- [x] a\n- [x] a\n";
+    let msg = llm_guard_plan_file_write(
+        "write_file",
+        "./todo.md",
+        &json!({ "content": both_checked }),
+        &guard,
+    )
+    .expect("must deny");
+    assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
+    // Assigned flip + unchanged duplicate: allowed.
+    let one_flip = "## Tasks\n- [x] a\n- [ ] a\n";
+    assert!(
+        llm_guard_plan_file_write(
+            "write_file",
+            "./todo.md",
+            &json!({ "content": one_flip }),
+            &guard
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn test_plan_write_path_normalization() {
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    let args = json!({ "content": PLAN });
+    // `./`-prefix and `dir/..` spellings name the same plan file.
+    for path in ["./todo.md", "todo.md", "artifacts/../todo.md"] {
+        assert!(
+            llm_guard_plan_file_write("write_file", path, &args, &guard).is_none(),
+            "{path} must pass"
+        );
+    }
+    let bad = json!({ "content": PLAN.replace("- [ ] c", "- [x] c") });
+    for path in ["todo.md", "artifacts/../todo.md"] {
+        assert!(
+            llm_guard_plan_file_write("write_file", path, &bad, &guard).is_some(),
+            "{path} must be guarded"
+        );
+    }
+    // Other files are never guarded by the plan guard.
+    for path in [
+        "work/todo.md",
+        "artifacts/todo.md",
+        "sub/next-task.md",
+        "notes.md",
+    ] {
+        assert!(
+            llm_guard_plan_file_write("write_file", path, &bad, &guard).is_none(),
+            "{path} must not be guarded"
+        );
+    }
+}
+
+#[test]
+fn test_plan_write_next_task_and_str_replace_denied() {
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    // next-task.md: any executor write is denied (planner-owned).
+    for args in [
+        json!({ "content": "brief" }),
+        json!({ "old_string": "a", "new_string": "b" }),
+    ] {
+        let msg = llm_guard_plan_file_write("write_file", "./next-task.md", &args, &guard)
+            .or_else(|| {
+                llm_guard_plan_file_write("str_replace_editor", "next-task.md", &args, &guard)
+            })
+            .expect("next-task.md write must be denied");
+        assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
+    }
+    // str_replace_editor on todo.md: full rewrites only.
+    let msg = llm_guard_plan_file_write(
+        "str_replace_editor",
+        "./todo.md",
+        &json!({ "old_string": "[ ] c", "new_string": "[x] c" }),
+        &guard,
+    )
+    .expect("str_replace on todo.md must be denied");
+    assert!(msg.contains("write_file"), "{}", msg);
+    // Missing `content`: left to the tool's own error.
+    assert!(llm_guard_plan_file_write("write_file", "./todo.md", &json!({}), &guard).is_none());
 }

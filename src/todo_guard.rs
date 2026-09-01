@@ -605,6 +605,291 @@ pub(crate) async fn llm_guard_condense_final_message<'a>(
     let _ = run_reasoning_loop(ctx, session, "todo:guard:condense", feedback, Vec::new()).await;
 }
 
+// ---------------------------------------------------------------------------
+// Plan-write guard (Mode 2 executor): `./todo.md` rewrites are validated
+// against a session-start snapshot at the tool boundary before they land.
+// ---------------------------------------------------------------------------
+
+/// Session-start plan snapshot plus the assigned task's absolute index.
+pub(crate) struct PlanWriteGuard {
+    /// Absolute index (all `## Tasks` bullets) of the assigned task
+    /// (== `TaskItem.index`).
+    assigned_index: usize,
+    /// The plan at session start.
+    plan: PlanView,
+}
+
+impl PlanWriteGuard {
+    /// Snapshot `todo_md` (the caller has already parsed it, so a
+    /// `## Tasks` section exists).
+    pub(crate) fn capture(todo_md: &str, assigned_index: usize) -> Self {
+        let plan = PlanView::parse(todo_md)
+            .expect("plan-write guard: todo.md must have a ## Tasks section");
+        Self {
+            assigned_index,
+            plan,
+        }
+    }
+}
+
+/// One `## Tasks` bullet (`- [ ]` / `- [x]`), in `parse_todo_md`'s syntax so
+/// the bullet index matches `TaskItem.index`.
+#[derive(Clone)]
+struct TaskBullet {
+    checked: bool,
+    desc: String,
+}
+
+/// A `## Tasks` line: bullet, or other (prose/blank).
+#[derive(Clone)]
+enum TasksLine {
+    Bullet(TaskBullet),
+    Other(String),
+}
+
+/// One plan file split into its `## Tasks` content and the rest, using the
+/// same section rules as `parse_todo_md` (`## Tasks` heading, ends at the
+/// next `##` line).
+struct PlanView {
+    /// Lines outside `## Tasks` (headings and other sections), trailing
+    /// whitespace trimmed.
+    outside: Vec<String>,
+    /// `## Tasks` lines in order.
+    tasks: Vec<TasksLine>,
+}
+
+impl PlanView {
+    /// Parses; `Err` if there is no `## Tasks` section.
+    fn parse(content: &str) -> Result<Self, String> {
+        let mut outside: Vec<String> = Vec::new();
+        let mut tasks: Vec<TasksLine> = Vec::new();
+        let mut in_tasks = false;
+        let mut saw_tasks = false;
+        for line in content.lines() {
+            let t = line.trim();
+            if t.starts_with("## Tasks") {
+                in_tasks = true;
+                saw_tasks = true;
+                continue;
+            }
+            if in_tasks && t.starts_with("##") {
+                in_tasks = false;
+                outside.push(t.to_string());
+                continue;
+            }
+            if in_tasks {
+                if let Some(rest) = t.strip_prefix("- [x]") {
+                    tasks.push(TasksLine::Bullet(TaskBullet {
+                        checked: true,
+                        desc: rest.trim().to_string(),
+                    }));
+                } else if let Some(rest) = t.strip_prefix("- [ ]") {
+                    tasks.push(TasksLine::Bullet(TaskBullet {
+                        checked: false,
+                        desc: rest.trim().to_string(),
+                    }));
+                } else {
+                    tasks.push(TasksLine::Other(t.to_string()));
+                }
+            } else {
+                outside.push(t.to_string());
+            }
+        }
+        if !saw_tasks {
+            return Err("the plan has no `## Tasks` section".to_string());
+        }
+        Ok(Self { outside, tasks })
+    }
+}
+
+/// The `## Tasks` bullets of a parsed plan, in order.
+fn tasks_bullets(view: &PlanView) -> Vec<TaskBullet> {
+    view.tasks
+        .iter()
+        .filter_map(|l| match l {
+            TasksLine::Bullet(b) => Some(b.clone()),
+            TasksLine::Other(_) => None,
+        })
+        .collect()
+}
+
+/// The non-bullet lines of a parsed plan's `## Tasks`, in order.
+fn tasks_other_lines(view: &PlanView) -> Vec<String> {
+    view.tasks
+        .iter()
+        .filter_map(|l| match l {
+            TasksLine::Other(s) => Some(s.clone()),
+            TasksLine::Bullet(_) => None,
+        })
+        .collect()
+}
+
+/// Equality ignoring blank lines; parse already trimmed line whitespace.
+fn same_lines_ignoring_blanks(a: &[String], b: &[String]) -> bool {
+    a.iter()
+        .filter(|l| !l.is_empty())
+        .eq(b.iter().filter(|l| !l.is_empty()))
+}
+
+/// Checkbox rule for aligning old[i] onto new[j]: identical, or the assigned
+/// task's `[ ]`->`[x]` flip; never anything else.
+fn bullet_state_ok(old: &TaskBullet, new: &TaskBullet, i: usize, assigned: usize) -> bool {
+    old.checked == new.checked || (i == assigned && !old.checked && new.checked)
+}
+
+/// Whether `new` keeps every start bullet in order, unchanged except the
+/// assigned task's `[ ]`->`[x]`; unmatched new bullets are added subtasks
+/// (any checkbox), requiring a non-empty description.
+fn tasks_preserved(old: &[TaskBullet], new: &[TaskBullet], assigned: usize) -> bool {
+    let (n, m) = (old.len(), new.len());
+    // dp[i][j]: can old[i..] be aligned into new[j..]?
+    let mut dp = vec![vec![false; m + 1]; n + 1];
+    dp[n][m] = true;
+    // Base: all old bullets matched; the remaining new bullets are additions.
+    for j in (0..m).rev() {
+        dp[n][j] = !new[j].desc.is_empty() && dp[n][j + 1];
+    }
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            // new[j] as an added subtask (skip it): requires a description.
+            let skip = !new[j].desc.is_empty() && dp[i][j + 1];
+            // Or align old[i] onto new[j].
+            let align = old[i].desc == new[j].desc
+                && bullet_state_ok(&old[i], &new[j], i, assigned)
+                && dp[i + 1][j + 1];
+            dp[i][j] = skip || align;
+        }
+    }
+    dp[0][0]
+}
+
+/// First violation found, phrased for a denial message (best effort).
+fn describe_tasks_violation(old: &[TaskBullet], new: &[TaskBullet], assigned: usize) -> String {
+    if !old.iter().any(|b| b.desc.is_empty())
+        && let Some(b) = new.iter().find(|b| b.desc.is_empty())
+    {
+        return format!(
+            "a subtask has an empty description (`- {}` followed by nothing)",
+            if b.checked { "[x]" } else { "[ ]" }
+        );
+    }
+    for (i, ob) in old.iter().enumerate() {
+        if !new.iter().any(|nb| nb.desc == ob.desc) {
+            return format!(
+                "pre-existing task #{} ('{}') was removed or renamed; every task that existed at session start must stay unchanged",
+                i + 1,
+                ob.desc
+            );
+        }
+        if !new.iter().any(|nb| {
+            nb.desc == ob.desc
+                && (nb.checked == ob.checked || (i == assigned && !ob.checked && nb.checked))
+        }) {
+            return format!(
+                "pre-existing task #{} ('{}') had its checkbox changed; only your own task (#{}) may be marked [x]",
+                i + 1,
+                ob.desc,
+                assigned + 1
+            );
+        }
+    }
+    "the order of the existing tasks changed; keep the `## Tasks` order unchanged".to_string()
+}
+
+/// Validate a `./todo.md` rewrite against the snapshot; `Err(reason)` rejects.
+fn validate_plan_write(guard: &PlanWriteGuard, intended: &str) -> Result<(), String> {
+    let new_view = PlanView::parse(intended)?;
+    let old = &guard.plan;
+    if !same_lines_ignoring_blanks(&old.outside, &new_view.outside) {
+        return Err(
+            "content outside the `## Tasks` section changed (## Goal / ## Deliverables / headings / Status must stay exactly as they were)"
+                .to_string(),
+        );
+    }
+    let old_other = tasks_other_lines(old);
+    let new_other = tasks_other_lines(&new_view);
+    if !same_lines_ignoring_blanks(&old_other, &new_other) {
+        return Err(
+            "non-task lines inside the `## Tasks` section changed; keep them as they were"
+                .to_string(),
+        );
+    }
+    let old_bullets = tasks_bullets(old);
+    let new_bullets = tasks_bullets(&new_view);
+    if !tasks_preserved(&old_bullets, &new_bullets, guard.assigned_index) {
+        return Err(describe_tasks_violation(
+            &old_bullets,
+            &new_bullets,
+            guard.assigned_index,
+        ));
+    }
+    Ok(())
+}
+
+/// The plan file a tool `path` names, `.`/`..` resolved (`todo.md` /
+/// `next-task.md`); `None` for other files. (`validate_path` already rejects
+/// absolute paths and `..` escapes.)
+fn plan_file_name(path: &str) -> Option<&'static str> {
+    let mut comps: Vec<&str> = Vec::new();
+    for c in path.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                comps.pop();
+            }
+            c => comps.push(c),
+        }
+    }
+    match comps.as_slice() {
+        [name] if *name == "todo.md" => Some("todo.md"),
+        [name] if *name == "next-task.md" => Some("next-task.md"),
+        _ => None,
+    }
+}
+
+/// Validate a plan-file write before it lands:
+/// - `todo.md`: `write_file` rewrites are checked against the snapshot;
+///   `str_replace_editor` is rejected (whole-file rewrites only).
+/// - `next-task.md`: any write is rejected (planner-owned).
+///
+/// `None` = allowed. Denials are tool errors; the reasoning loop feeds them
+/// back to the LLM, which rewrites and retries.
+pub(crate) fn llm_guard_plan_file_write(
+    name: &str,
+    path: &str,
+    args: &serde_json::Value,
+    guard: &PlanWriteGuard,
+) -> Option<String> {
+    let plan_file = plan_file_name(path)?;
+    if plan_file == "next-task.md" {
+        if matches!(name, "write_file" | "str_replace_editor") {
+            return Some("[TOOL_DENIED] './next-task.md' is owned by the replan planner; the executor must not write it (the planner rewrites it before the next task).".to_string());
+        }
+        return None;
+    }
+    match name {
+        "write_file" => {
+            let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
+                return None; // missing content: the tool reports it
+            };
+            if let Err(reason) = validate_plan_write(guard, content) {
+                return Some(format!(
+                    "[TOOL_DENIED] './todo.md' write rejected by the todo-mode guard (the plan is frozen except your task): {}. \
+                     Allowed: mark your task (#{}) `[x]`, and add subtasks - checked or unchecked - for work you discovered. \
+                     Forbidden: changing, removing, reordering, or marking `[x]` any task that existed at session start, \
+                     changing other sections, or editing `./next-task.md`. \
+                     Rewrite `./todo.md` with write_file so only the allowed changes remain.",
+                    reason,
+                    guard.assigned_index + 1
+                ));
+            }
+            None
+        }
+        "str_replace_editor" => Some("[TOOL_DENIED] './todo.md' edits via str_replace_editor are rejected in task sessions; the guard validates whole-file rewrites - use write_file with the full, compliant content.".to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/todo_guard_test.rs"]
 mod tests;

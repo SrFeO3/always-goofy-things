@@ -74,6 +74,10 @@ pub(crate) struct LoopCtx<'a> {
     pub provider: LlmProvider,
     pub settings: &'a mut Settings,
     pub metrics: &'a mut Metrics,
+    /// Plan-write guard for `execute_tool` while a Mode-2 executor session
+    /// runs; `None` otherwise (set by `run_todo_loop_mode2`, cleared by
+    /// `run_replan_loop`).
+    pub plan_guard: Option<crate::todo_guard::PlanWriteGuard>,
 }
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
@@ -93,6 +97,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let provider = ctx.provider;
     let settings = &mut *ctx.settings;
     let metrics = &mut *ctx.metrics;
+    let plan_guard = ctx.plan_guard.as_ref();
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
     // signature smaller and avoids the caller having to pass it through.
     let is_batch = config.query.is_some();
@@ -416,6 +421,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                         &args,
                         db_ctx.as_ref(),
                         Some(&calc_ledger),
+                        plan_guard,
                         config.todo_mode,
                         |name| config.is_tool_enabled(name),
                     )

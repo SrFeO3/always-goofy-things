@@ -352,6 +352,7 @@ pub async fn execute_tool(
     args: &serde_json::Value,
     db_ctx: Option<&tools_data::DbContext>,
     calc_ledger: Option<&tools_calc::CalcLedger>,
+    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
     todo_mode: u8,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Result<serde_json::Value> {
@@ -369,6 +370,13 @@ pub async fn execute_tool(
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
         if let Some(msg) = crate::todo_guard::llm_guard_state_file_write(name, path, todo_mode) {
+            return Err(anyhow!("{}", msg));
+        }
+        // Executor sessions: validate plan-file writes against the session
+        // snapshot before they land (`./next-task.md` is denied too).
+        if let Some(guard) = plan_guard
+            && let Some(msg) = crate::todo_guard::llm_guard_plan_file_write(name, path, args, guard)
+        {
             return Err(anyhow!("{}", msg));
         }
     }

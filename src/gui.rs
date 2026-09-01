@@ -887,6 +887,7 @@ impl GuiApp {
                 provider,
                 settings: &mut settings,
                 metrics: &mut metrics,
+                plan_guard: None,
             };
             let (done, err_msg) = if config.todo_mode > 0 {
                 match todo::run_todo_loop(&mut loop_ctx, &mut session, query_text, attached_files)

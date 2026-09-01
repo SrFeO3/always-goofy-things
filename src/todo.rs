@@ -32,7 +32,7 @@ use crate::persistence;
 use crate::reasoning::{EndReason, LoopCtx, run_reasoning_loop};
 use crate::startup;
 use crate::todo_guard::{
-    HANDOVER_REPORT_MAX_CHARS, build_handover_entry, has_deliverables_section,
+    HANDOVER_REPORT_MAX_CHARS, PlanWriteGuard, build_handover_entry, has_deliverables_section,
     last_assistant_report, llm_guard_completion_report, llm_guard_condense_final_message,
     llm_guard_declared_outputs, llm_guard_goal_outputs_missing, llm_guard_tasks_declaring_outputs,
     llm_guard_unfinished_outputs, llm_guard_unverifiable_declared, llm_guard_verified_outputs,
@@ -389,6 +389,8 @@ async fn run_replan_loop<'a>(
     user_query: &str,
     app_feedback: Option<&str>,
 ) -> Result<ReplanOutcome> {
+    // The replanner restructures the plan freely; no plan-write guard here.
+    ctx.plan_guard = None;
     let config = ctx.config;
     let q = user_query.trim();
     let mut sections =
@@ -1117,6 +1119,13 @@ async fn run_todo_loop_mode2<'a>(
             gui_log,
             &format!("--- [Task {}] {} ---", task.index + 1, task.description),
         );
+
+        // Snapshot the plan as this session sees it: every `./todo.md`
+        // rewrite is validated against it (own `[x]` + added subtasks only;
+        // the next replanner session clears it).
+        let session_plan =
+            std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
+        ctx.plan_guard = Some(PlanWriteGuard::capture(&session_plan, task.index));
 
         // Mode 2 system message: plan read via read_file, updated via write_file
         let system_msg = startup::system_message_mode2_task_loop(config);
