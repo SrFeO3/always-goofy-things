@@ -135,6 +135,96 @@ fn test_mark_task_done_missing_file_errors() {
     assert!(mark_task_done(0).is_err());
 }
 
+// ---------------------------------------------------------------------------
+// unmark_task_by_index (Mode 2 false-[x] rejection).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unmark_task_by_index_flips_checked_to_unchecked() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(
+        TODO_MD_PATH,
+        "# Plan\n\n## Tasks\n- [ ] a\n- [x] b\n- [ ] c\n",
+    )
+    .unwrap();
+    // Absolute index 1 is the `- [x] b` bullet (index 0 is the `- [ ] a`).
+    unmark_task_by_index(1).unwrap();
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, "# Plan\n\n## Tasks\n- [ ] a\n- [ ] b\n- [ ] c\n");
+}
+
+#[test]
+fn test_unmark_task_by_index_absolute_index_counts_all_tasks() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(TODO_MD_PATH, "## Tasks\n- [x] a\n- [x] b\n- [x] c\n").unwrap();
+    // Every bullet is `- [x]`; the absolute index 1 is the second bullet (b),
+    // not a `- [ ]`-relative index (mark_task_done(1) would be a no-op here).
+    unmark_task_by_index(1).unwrap();
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, "## Tasks\n- [x] a\n- [ ] b\n- [x] c\n");
+}
+
+#[test]
+fn test_unmark_task_by_index_already_unchecked_is_noop() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    let original = "## Tasks\n- [x] a\n- [ ] b\n";
+    std::fs::write(TODO_MD_PATH, original).unwrap();
+    // Index 1 is already `- [ ]`; unmarking it is a no-op (no write).
+    unmark_task_by_index(1).unwrap();
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, original);
+}
+
+#[test]
+fn test_unmark_task_by_index_out_of_range_is_noop() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    let original = "## Tasks\n- [x] a\n";
+    std::fs::write(TODO_MD_PATH, original).unwrap();
+    unmark_task_by_index(5).unwrap(); // no task at absolute index 5
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, original);
+}
+
+#[test]
+fn test_unmark_task_by_index_no_tasks_section_is_noop() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    let original = "## Status\nStatus: In Progress\n";
+    std::fs::write(TODO_MD_PATH, original).unwrap();
+    unmark_task_by_index(0).unwrap(); // no `## Tasks` section
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, original);
+}
+
+#[test]
+fn test_unmark_task_by_index_does_not_touch_later_sections() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    std::fs::write(
+        TODO_MD_PATH,
+        "## Tasks\n- [x] a\n- [x] b\n\n## Status\nStatus: In Progress\n",
+    )
+    .unwrap();
+    unmark_task_by_index(0).unwrap();
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(
+        content,
+        "## Tasks\n- [ ] a\n- [x] b\n\n## Status\nStatus: In Progress\n"
+    );
+}
+
+#[test]
+fn test_unmark_task_by_index_missing_file_errors() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    let _ = std::fs::remove_file(TODO_MD_PATH);
+    assert!(unmark_task_by_index(0).is_err());
+}
+
 #[test]
 fn test_check_completion_plain_line() {
     // The prompt asks for `Status: Completed`; the list dash is optional.

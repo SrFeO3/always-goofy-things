@@ -203,6 +203,51 @@ fn mark_task_done(task_index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Unmark the task at the absolute index by replacing `- [x]` with `- [ ]`.
+///
+/// Counts every `## Tasks` bullet (both `- [x]` and `- [ ]`), unlike
+/// `mark_task_done` (only `- [ ]`); the absolute basis matches `task.index`.
+/// No-op (no write) if already `- [ ]`, out of range, or no `## Tasks`.
+fn unmark_task_by_index(index: usize) -> Result<()> {
+    let content = std::fs::read_to_string(TODO_MD_PATH).context("Failed to read ./todo.md")?;
+
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut in_tasks_section = false;
+    let mut task_count: usize = 0;
+    let mut changed = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("## Tasks") {
+            in_tasks_section = true;
+        }
+        if in_tasks_section && trimmed.starts_with("##") && !trimmed.starts_with("## Tasks") {
+            in_tasks_section = false;
+        }
+
+        if in_tasks_section && (trimmed.starts_with("- [x]") || trimmed.starts_with("- [ ]")) {
+            if task_count == index && trimmed.starts_with("- [x]") {
+                let desc = trimmed.strip_prefix("- [x]").unwrap();
+                new_lines.push(format!("- [ ]{}", desc));
+                changed = true;
+                task_count += 1;
+                continue;
+            }
+            task_count += 1;
+        }
+
+        new_lines.push(line.to_string());
+    }
+
+    if changed {
+        let mut new_content = new_lines.join("\n");
+        new_content.push('\n');
+        std::fs::write(TODO_MD_PATH, &new_content).context("Failed to write ./todo.md")?;
+    }
+    Ok(())
+}
+
 /// Path of the free-form handover log (inside `artifacts/`, never parsed).
 pub(crate) const HANDOVER_MD_PATH: &str = "./artifacts/handover.md";
 
@@ -1136,6 +1181,14 @@ async fn run_todo_loop_mode2<'a>(
                     task.index + 1,
                     missing.join(", ")
                 ));
+                // Reject the false [x]: flip this task back to `- [ ]` so
+                // check_completion (which counts only unchecked tasks) sees it
+                // as pending and does not report a false completion. A read/
+                // write I/O failure is non-fatal: the app_feedback above and
+                // the Goal gate remain backstops.
+                if let Err(e) = unmark_task_by_index(task.index) {
+                    eprintln!("[App] unmark failed: {e}");
+                }
             }
 
             persistence::archive_todo_session(&task_label, task.index)?;
@@ -1144,8 +1197,25 @@ async fn run_todo_loop_mode2<'a>(
             for msg in task_session.messages.iter().skip(1) {
                 gui_log.messages.push(msg.clone());
             }
-            let done_msg = format!("--- Task {} done ---", task.index + 1);
-            println!("{}{}{}", startup::C_CYAN, done_msg, startup::RESET);
+            // A task whose declared Output paths are missing is not
+            // verified-complete (its false [x] was unmarked to pending above);
+            // report it as not completed instead of done.
+            let (done_msg, done_color) = if missing.is_empty() {
+                (
+                    format!("--- Task {} done ---", task.index + 1),
+                    startup::C_CYAN,
+                )
+            } else {
+                (
+                    format!(
+                        "--- Task {} not completed (declared Output paths missing: {}) ---",
+                        task.index + 1,
+                        missing.join(", ")
+                    ),
+                    startup::C_YELLOW,
+                )
+            };
+            println!("{}{}{}", done_color, done_msg, startup::RESET);
             gui_log.messages.push(Message {
                 role: "system".to_string(),
                 content: done_msg.clone(),
