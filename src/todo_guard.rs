@@ -847,9 +847,23 @@ fn plan_file_name(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Shared `[TOOL_DENIED]` message for plan-write rejections.
+fn plan_write_denied_message(reason: &str, assigned: usize) -> String {
+    format!(
+        "[TOOL_DENIED] './todo.md' write rejected by the todo-mode guard (the plan is frozen except your task): {}. \
+         Allowed: mark your task (#{}) `[x]`, and add subtasks - checked or unchecked - for work you discovered. \
+         Forbidden: changing, removing, reordering, or marking `[x]` any task that existed at session start, \
+         changing other sections, or editing `./next-task.md`. \
+         Make the edit so only the allowed changes remain.",
+        reason,
+        assigned + 1
+    )
+}
+
 /// Validate a plan-file write before it lands:
-/// - `todo.md`: `write_file` rewrites are checked against the snapshot;
-///   `str_replace_editor` is rejected (whole-file rewrites only).
+/// - `todo.md` + `write_file`: checked against the snapshot at dispatch.
+/// - `todo.md` + `str_replace_editor`: checked in the tool before the write
+///   (`llm_guard_plan_write_validate`).
 /// - `next-task.md`: any write is rejected (planner-owned).
 ///
 /// `None` = allowed. Denials are tool errors; the reasoning loop feeds them
@@ -873,20 +887,29 @@ pub(crate) fn llm_guard_plan_file_write(
                 return None; // missing content: the tool reports it
             };
             if let Err(reason) = validate_plan_write(guard, content) {
-                return Some(format!(
-                    "[TOOL_DENIED] './todo.md' write rejected by the todo-mode guard (the plan is frozen except your task): {}. \
-                     Allowed: mark your task (#{}) `[x]`, and add subtasks - checked or unchecked - for work you discovered. \
-                     Forbidden: changing, removing, reordering, or marking `[x]` any task that existed at session start, \
-                     changing other sections, or editing `./next-task.md`. \
-                     Rewrite `./todo.md` with write_file so only the allowed changes remain.",
-                    reason,
-                    guard.assigned_index + 1
-                ));
+                return Some(plan_write_denied_message(&reason, guard.assigned_index));
             }
             None
         }
-        "str_replace_editor" => Some("[TOOL_DENIED] './todo.md' edits via str_replace_editor are rejected in task sessions; the guard validates whole-file rewrites - use write_file with the full, compliant content.".to_string()),
+        "str_replace_editor" => None, // result checked in the tool, before the write
         _ => None,
+    }
+}
+
+/// Validate `./todo.md` content a tool computed (e.g. a `str_replace_editor`
+/// result) with the same snapshot check as `llm_guard_plan_file_write`.
+/// `None` = allowed.
+pub(crate) fn llm_guard_plan_write_validate(
+    path: &str,
+    content: &str,
+    guard: &PlanWriteGuard,
+) -> Option<String> {
+    if plan_file_name(path) != Some("todo.md") {
+        return None;
+    }
+    match validate_plan_write(guard, content) {
+        Ok(()) => None,
+        Err(reason) => Some(plan_write_denied_message(&reason, guard.assigned_index)),
     }
 }
 

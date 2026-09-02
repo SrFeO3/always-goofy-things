@@ -103,22 +103,8 @@ async fn test_execute_tool_mode2_plan_write_guard() {
     let err = violated.unwrap_err().to_string();
     assert!(err.contains("[TOOL_DENIED]"), "{}", err);
 
-    // str_replace_editor on the plan file is rejected too (full rewrites).
-    let denied = execute_tool(
-        "str_replace_editor",
-        &json!({
-            "path": "todo.md",
-            "old_string": "- [ ] b",
-            "new_string": "- [x] b"
-        }),
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
-    )
-    .await;
-    assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
+    // str_replace_editor on ./todo.md is guarded inside the tool, not at
+    // dispatch (end-to-end test in todo_test.rs).
 
     // Non-plan files are not guarded: the write proceeds (lands in tmp).
     let tmp = get_temp_path("plan_guard_ok");

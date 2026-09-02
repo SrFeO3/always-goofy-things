@@ -351,3 +351,124 @@ fn test_seed_handover_creates_once() {
     assert!(seeded.starts_with("# Handover Log"));
     assert_eq!(seeded, after);
 }
+
+// ---------------------------------------------------------------------------
+// Plan-write guard through execute_tool (str_replace_editor path).
+// ---------------------------------------------------------------------------
+
+/// End to end: `str_replace_editor` edits of `./todo.md` are guarded like
+/// write_file rewrites (the computed result is checked before the write).
+///
+/// Lock held across await is safe: the sync tests block on it from plain
+/// threads (no same-runtime waiters).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
+    let _guard = HANDOVER_TEST_LOCK.lock().unwrap();
+    let _backup = TodoFileBackup::capture();
+    crate::tools::set_workspace_root(
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    );
+    let plan = "# Plan\n\n## Tasks\n- [ ] a\n- [ ] b\n";
+    std::fs::write(TODO_MD_PATH, plan).unwrap();
+    let session_plan = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    let guard = crate::todo_guard::PlanWriteGuard::capture(&session_plan, 0);
+
+    // Allowed: the executor marks its own task with a targeted edit.
+    let ok = crate::tools::execute_tool(
+        "str_replace_editor",
+        &serde_json::json!({
+            "path": "./todo.md",
+            "old_string": "- [ ] a",
+            "new_string": "- [x] a"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "own-task flip via str_replace_editor must be allowed: {:?}",
+        ok.err()
+    );
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(content, "# Plan\n\n## Tasks\n- [x] a\n- [ ] b\n");
+
+    // Denied: flipping a task the executor was not assigned is rejected
+    // before the write lands (the file stays unchanged).
+    let denied = crate::tools::execute_tool(
+        "str_replace_editor",
+        &serde_json::json!({
+            "path": "./todo.md",
+            "old_string": "- [ ] b",
+            "new_string": "- [x] b"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    let err = denied.unwrap_err().to_string();
+    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(
+        content, "# Plan\n\n## Tasks\n- [x] a\n- [ ] b\n",
+        "a denied edit must not land"
+    );
+
+    // Fuzzy path: whitespace-sloppy old_string, same guard on the result.
+    // Allowed: adding a subtask below the pending task.
+    let ok = crate::tools::execute_tool(
+        "str_replace_editor",
+        &serde_json::json!({
+            "path": "./todo.md",
+            "old_string": "- [ ]  b",
+            "new_string": "- [ ] b\n- [ ] fuzzy-sub"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "fuzzy subtask add via str_replace_editor must be allowed: {:?}",
+        ok.err()
+    );
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(
+        content,
+        "# Plan\n\n## Tasks\n- [x] a\n- [ ] b\n- [ ] fuzzy-sub\n"
+    );
+
+    // Denied: fuzzy-matching the other task's flip is rejected before the
+    // write (the file stays unchanged).
+    let denied = crate::tools::execute_tool(
+        "str_replace_editor",
+        &serde_json::json!({
+            "path": "./todo.md",
+            "old_string": "- [ ]  b",
+            "new_string": "- [x] b"
+        }),
+        None,
+        None,
+        Some(&guard),
+        2,
+        |_| true,
+    )
+    .await;
+    let err = denied.unwrap_err().to_string();
+    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
+    let content = std::fs::read_to_string(TODO_MD_PATH).unwrap();
+    assert_eq!(
+        content, "# Plan\n\n## Tasks\n- [x] a\n- [ ] b\n- [ ] fuzzy-sub\n",
+        "a denied fuzzy edit must not land"
+    );
+}

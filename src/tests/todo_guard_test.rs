@@ -1029,7 +1029,7 @@ fn test_plan_write_path_normalization() {
 }
 
 #[test]
-fn test_plan_write_next_task_and_str_replace_denied() {
+fn test_plan_write_next_task_denied_and_missing_content_deferred() {
     let guard = PlanWriteGuard::capture(PLAN, 0);
     // next-task.md: any executor write is denied (planner-owned).
     for args in [
@@ -1043,15 +1043,63 @@ fn test_plan_write_next_task_and_str_replace_denied() {
             .expect("next-task.md write must be denied");
         assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
     }
-    // str_replace_editor on todo.md: full rewrites only.
-    let msg = llm_guard_plan_file_write(
-        "str_replace_editor",
-        "./todo.md",
-        &json!({ "old_string": "[ ] c", "new_string": "[x] c" }),
-        &guard,
-    )
-    .expect("str_replace on todo.md must be denied");
-    assert!(msg.contains("write_file"), "{}", msg);
+    // str_replace_editor on todo.md is NOT denied at dispatch: its result is
+    // validated inside the tool (llm_guard_plan_write_validate) instead.
+    assert!(
+        llm_guard_plan_file_write(
+            "str_replace_editor",
+            "./todo.md",
+            &json!({ "old_string": "- [ ] c", "new_string": "- [x] c" }),
+            &guard,
+        )
+        .is_none()
+    );
     // Missing `content`: left to the tool's own error.
     assert!(llm_guard_plan_file_write("write_file", "./todo.md", &json!({}), &guard).is_none());
+}
+
+#[test]
+fn test_plan_write_validate_str_replace_result_allowed() {
+    // A partial edit that fits the executor's scope (own `[x]` + subtasks)
+    // passes the same snapshot check as a write_file rewrite.
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    let own_flip = PLAN.replace("- [ ] a", "- [x] a");
+    assert_eq!(
+        llm_guard_plan_write_validate("./todo.md", &own_flip, &guard),
+        None
+    );
+    let with_sub = PLAN.replace("- [ ] a", "- [ ] a\n- [ ] own-sub");
+    assert_eq!(
+        llm_guard_plan_write_validate("todo.md", &with_sub, &guard),
+        None
+    );
+}
+
+#[test]
+fn test_plan_write_validate_str_replace_result_denied() {
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    // Flipping a task the executor was not assigned is rejected...
+    let other_flip = PLAN.replace("- [ ] c", "- [x] c");
+    let msg = llm_guard_plan_write_validate("./todo.md", &other_flip, &guard)
+        .expect("other-task flip via str_replace must be denied");
+    assert!(msg.contains("[TOOL_DENIED]"), "{}", msg);
+    assert!(msg.contains("checkbox changed"), "{}", msg);
+    // ...and so is any change outside the `## Tasks` section.
+    let section = PLAN.replace("Do the thing.", "Do the other thing.");
+    assert!(llm_guard_plan_write_validate("./todo.md", &section, &guard).is_some());
+}
+
+#[test]
+fn test_plan_write_validate_ignores_non_plan_files() {
+    // Only `./todo.md` is validated; other paths pass through untouched.
+    let guard = PlanWriteGuard::capture(PLAN, 0);
+    let violated = PLAN.replace("- [ ] c", "- [x] c");
+    for path in ["notes.md", "work/todo.md", "artifacts/todo.md"] {
+        assert_eq!(
+            llm_guard_plan_write_validate(path, &violated, &guard),
+            None,
+            "{} must not be plan-guarded",
+            path
+        );
+    }
 }

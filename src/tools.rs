@@ -384,7 +384,7 @@ pub async fn execute_tool(
     match name {
         "read_file" => execute_read_file(args),
         "write_file" => execute_write_file(args),
-        "str_replace_editor" => execute_str_replace(args),
+        "str_replace_editor" => execute_str_replace_guarded(args, plan_guard),
         "grep_search" => execute_grep_search(args).await,
         "list_directory" => execute_list_directory(args),
         "execute_bash" => execute_bash(args).await,
@@ -914,7 +914,33 @@ fn build_fuzzy_mismatch_report(provided: &str, actual: &str) -> serde_json::Valu
     })
 }
 
+/// Guard check for computed `./todo.md` content before it lands; no-op
+/// when no guard is active or the path is not the plan file.
+fn guard_plan_write(
+    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
+    path: &str,
+    content: &str,
+) -> Result<()> {
+    if let Some(guard) = plan_guard
+        && let Some(msg) = crate::todo_guard::llm_guard_plan_write_validate(path, content, guard)
+    {
+        return Err(anyhow!("{}", msg));
+    }
+    Ok(())
+}
+
+/// str_replace_editor without plan-write validation (test-only).
+#[cfg(test)]
 fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
+    execute_str_replace_guarded(args, None)
+}
+
+/// str_replace_editor execution; the computed result is validated against
+/// the plan snapshot before the write lands.
+fn execute_str_replace_guarded(
+    args: &serde_json::Value,
+    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
+) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -939,6 +965,7 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     // --- Step 1: Try exact match first (single occurrence) ---
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
+        guard_plan_write(plan_guard, path, &new_content)?;
         atomic_write_with_dir(path, &new_content)
             .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
         return Ok(json!({
@@ -951,9 +978,22 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     // --- Step 2: Space-fuzzy match (horizontal whitespace only, no tabs/newlines) ---
     let space_fuzzy_pattern = build_space_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&space_fuzzy_pattern) {
-        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "space_fuzzy_match") {
+        match try_fuzzy_replace(
+            &content,
+            &re,
+            old_str,
+            new_str,
+            path,
+            "space_fuzzy_match",
+            plan_guard,
+        ) {
             Ok(res) => return Ok(res),
-            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            Err(e)
+                if e.to_string().contains("AMBIGUOUS_MATCH")
+                    || e.to_string().contains("TOOL_DENIED") =>
+            {
+                return Err(e);
+            }
             _ => {} // Continue to next stage if NO_MATCH
         }
     }
@@ -961,9 +1001,22 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     // --- Step 3: Tab-fuzzy match (horizontal whitespace: spaces + tabs) ---
     let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&tab_fuzzy_pattern) {
-        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "tab_fuzzy_match") {
+        match try_fuzzy_replace(
+            &content,
+            &re,
+            old_str,
+            new_str,
+            path,
+            "tab_fuzzy_match",
+            plan_guard,
+        ) {
             Ok(res) => return Ok(res),
-            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            Err(e)
+                if e.to_string().contains("AMBIGUOUS_MATCH")
+                    || e.to_string().contains("TOOL_DENIED") =>
+            {
+                return Err(e);
+            }
             _ => {} // Continue to next stage if NO_MATCH
         }
     }
@@ -980,9 +1033,15 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
             new_str,
             path,
             "tab_skip_blank_match",
+            plan_guard,
         ) {
             Ok(res) => return Ok(res),
-            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            Err(e)
+                if e.to_string().contains("AMBIGUOUS_MATCH")
+                    || e.to_string().contains("TOOL_DENIED") =>
+            {
+                return Err(e);
+            }
             _ => {}
         }
     }
@@ -990,9 +1049,22 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     // --- Step 4: Full fuzzy match (all whitespace incl. line breaks + \r\n / \n differences) ---
     let full_pattern = build_full_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&full_pattern) {
-        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "full_fuzzy_match") {
+        match try_fuzzy_replace(
+            &content,
+            &re,
+            old_str,
+            new_str,
+            path,
+            "full_fuzzy_match",
+            plan_guard,
+        ) {
             Ok(res) => return Ok(res),
-            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            Err(e)
+                if e.to_string().contains("AMBIGUOUS_MATCH")
+                    || e.to_string().contains("TOOL_DENIED") =>
+            {
+                return Err(e);
+            }
             _ => {} // Final stage, let it fall through to the final NO_MATCH error
         }
     }
@@ -1009,9 +1081,15 @@ fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
             new_str,
             path,
             "full_skip_blank_match",
+            plan_guard,
         ) {
             Ok(res) => return Ok(res),
-            Err(e) if e.to_string().contains("AMBIGUOUS_MATCH") => return Err(e),
+            Err(e)
+                if e.to_string().contains("AMBIGUOUS_MATCH")
+                    || e.to_string().contains("TOOL_DENIED") =>
+            {
+                return Err(e);
+            }
             _ => {}
         }
     }
@@ -1031,6 +1109,7 @@ fn try_fuzzy_replace(
     new_str: &str,
     path: &str,
     match_type: &str,
+    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
 ) -> Result<serde_json::Value> {
     let matches: Vec<_> = re.find_iter(content).collect();
 
@@ -1047,6 +1126,7 @@ fn try_fuzzy_replace(
     let new_content = re
         .replace(content, |_caps: &regex::Captures| new_str.to_string())
         .to_string();
+    guard_plan_write(plan_guard, path, &new_content)?;
     atomic_write_with_dir(path, &new_content)
         .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 
