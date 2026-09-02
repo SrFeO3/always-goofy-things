@@ -1062,6 +1062,56 @@ async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
     }
 }
 
+#[tokio::test]
+async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
+    // `list_directory` accepts the idiomatic trailing-slash spelling
+    // (`artifacts/`); the shared subpath rule stays strict for other tools.
+    let decision = confirm_execute_tool(
+        "list_directory",
+        &json!({ "path": "artifacts/" }),
+        true, // unsafe_reflex
+        false,
+        true, // batch
+        |_| true,
+    )
+    .await;
+    assert!(
+        decision.proceed,
+        "list_directory 'artifacts/' must auto-confirm"
+    );
+    assert_eq!(decision.kind, ToolRunDecisionKind::AutoConfirm);
+
+    // Only a single trailing slash is tolerated - a doubled one is rejected
+    // (no over-allowing).
+    let decision = confirm_execute_tool(
+        "list_directory",
+        &json!({ "path": "artifacts//" }),
+        true,
+        false,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(
+        !decision.proceed,
+        "list_directory 'artifacts//' must stay denied (single slash only)"
+    );
+    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
+
+    // read_file with the same spelling must still be denied (list-only rule).
+    let decision = confirm_execute_tool(
+        "read_file",
+        &json!({ "path": "artifacts/" }),
+        true,
+        false,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(!decision.proceed, "read_file 'artifacts/' must stay denied");
+    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
+}
+
 #[test]
 fn test_full_skip_blank_replace() {
     // Scenario where blank line tolerance rescues a match that

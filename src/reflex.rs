@@ -104,7 +104,9 @@ pub fn auto_confirm(name: &str, args: &serde_json::Value) -> (bool, Option<Strin
                 None => return (false, None),
             };
 
-            if is_safe_subpath(&path) {
+            // list-only: strip a single trailing slash before the shared subpath check.
+            let dir = path.strip_suffix('/').unwrap_or(path.as_str());
+            if is_safe_subpath(dir) {
                 (true, Some(format!("A reasonably peaceful path: {}", path)))
             } else {
                 (false, None)
