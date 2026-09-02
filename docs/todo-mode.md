@@ -1,16 +1,15 @@
 # Todo Mode (Plan-Execute with Handover)
 
-When a job is too large for a single LLM context, split it into a plan of tasks in `./todo.md`: the application executes the tasks one-by-one, with a fresh LLM context per task, and carries state forward through the file. `-t` modes run in batch mode: they do not wait for a typed query - they read `./todo.md` and start executing immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the LLM rewrites the plan as it works.
+When a job is too large for a single LLM context, split it into a plan of tasks in `./todo.md`: the application executes the tasks one-by-one, with a fresh LLM context per task, and carries state forward through the file. `-t` modes run in batch mode: they do not wait for a typed query - they read `./todo.md` and start executing immediately. There are two modes: **Static Plan** (`-t 1`), where the plan is fixed, and **Dynamic Replan** (`-t 2`), where the LLM rewrites the plan before each task. Mode 2 uses two LLM roles, each in its own fresh context: the replan planner (reviews and rewrites the plan) and the task executor (carries out each task).
 
 ## The Two Modes at a Glance
 
 | | Mode 1: Static Plan | Mode 2: Dynamic Replan |
 |---|---|---|
 | Startup flag (`-t`) | `1` | `2` |
-| Use when | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
-| Plan author | You - the complete plan is written upfront | You, then the LLM - you write the Goal and initial task list; the LLM rewrites the plan as it works |
-| Who updates `todo.md` | The application - after each task, it marks the task `[x]` | The LLM - it marks `[x]` and adds / removes / reorders / splits tasks |
-| Auto-written files | The application appends each task's report to `artifacts/handover.md` | Same, plus the planner's notes; the planner also overwrites `./next-task.md` (the next task's brief) before each task |
+| When to use | Steps are fully known in advance | Steps are unknown or may change (exploration, research) |
+| The plan (`todo.md`) | Fixed - the tasks run in order as written; the application marks each task `[x]` when it finishes | Living - starts from your Goal and initial task list; the LLM rewrites it before each task (add / remove / reorder / split) and marks each task `[x]` when it finishes |
+| Handover files for the fresh LLM | The application appends each task's report to `artifacts/handover.md` | Same, plus the planner's notes; Mode 2 only: the planner also writes `./next-task.md` (the next task's brief, distilled from `artifacts/handover.md` for the executor) |
 
 ## Before You Run: Writing `./todo.md`
 
