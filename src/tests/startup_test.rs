@@ -200,7 +200,7 @@ fn system_message_mode1_todo_section_keeps_fixed_number() {
     let msg = system_message_mode1_task_loop(&config);
     assert!(
         msg.content
-            .contains("## 4. Todo Context (Plan-Exec Task Loop)"),
+            .contains("## 4. Todo Context (Static Plan: Task Loop)"),
         "Todo section must keep its fixed number 4: {}",
         msg.content
     );
@@ -213,12 +213,12 @@ fn system_message_mode2_sections_keep_fixed_numbers() {
     assert!(
         replan
             .content
-            .contains("## 4. Todo Context (Plan-Exec-Dynamic Replan)")
+            .contains("## 4. Todo Context (Dynamic Replan: Planner)")
     );
     let task = system_message_mode2_task_loop(&config);
     assert!(
         task.content
-            .contains("## 4. Todo Context (Plan-Exec-Dynamic Task Loop)")
+            .contains("## 4. Todo Context (Dynamic Replan: Task Loop)")
     );
 }
 

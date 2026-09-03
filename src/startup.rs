@@ -378,13 +378,13 @@ fn build_system_message(sections: Vec<String>) -> crate::model::Message {
     }
 }
 
-/// Build a system message for Mode 1 (Plan-Exec-Static) task sessions.
+/// Build a system message for Mode 1 (Static Plan) task sessions.
 /// The plan is read from ./todo.md with read_file; the task LLM executes the
 /// single task named in the user message.
 pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
     sections.push(format!(
-        "## 4. Todo Context (Plan-Exec Task Loop)\n\
+        "## 4. Todo Context (Static Plan: Task Loop)\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
@@ -400,13 +400,13 @@ pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message 
     build_system_message(sections)
 }
 
-/// Build a system message for Mode 2 (Plan-Exec-Dynamic) replan sessions.
+/// Build a system message for the Mode 2 (Dynamic Replan) replan session.
 /// The replan session (planner role) only updates the plan; it never executes
 /// the tasks.
 pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
     sections.push(format!(
-        "## 4. Todo Context (Plan-Exec-Dynamic Replan)\n\
+        "## 4. Todo Context (Dynamic Replan: Planner)\n\
          - You are the task planner. Do NOT execute the tasks in `## Tasks`; a separate task session executes them after your replan.\n\
          - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the task reports and planner notes from previous sessions (each task report is followed by an `outputs:` line listing the artifact paths that task declared).\n\
          - todo.md has a FIXED format:\n\
@@ -427,13 +427,13 @@ pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
     build_system_message(sections)
 }
 
-/// Build a system message for Mode 2 (Plan-Exec-Dynamic) task sessions.
+/// Build a system message for Mode 2 (Dynamic Replan) task sessions.
 /// The plan is read from ./todo.md with read_file; the task LLM executes the
 /// single task named in the user message and updates the plan on completion.
 pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message {
     let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
     sections.push(format!(
-        "## 4. Todo Context (Plan-Exec-Dynamic Task Loop)\n\
+        "## 4. Todo Context (Dynamic Replan: Task Loop)\n\
          - Read `./todo.md` and `./next-task.md` FIRST with read_file; todo.md is the plan, next-task.md is the brief for your task: your scope, the files to read (marked must-read or optional), the previous task's `outputs:`, and warnings. If next-task.md is missing or the brief is insufficient, explore `artifacts/` with list_directory and read only the files your task needs.\n\
          - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
          - Finish the task completely (create its outputs) before stopping.\n\
@@ -447,6 +447,16 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
         crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
     ));
     build_system_message(sections)
+}
+
+/// User-facing name of the `-t`/`--todo` mode (`0` = ReAct). Public names
+/// follow docs/todo-mode.md ("Static Plan" / "Dynamic Replan").
+pub(crate) fn todo_mode_name(todo_mode: u8) -> &'static str {
+    match todo_mode {
+        1 => "Static Plan",
+        2 => "Dynamic Replan",
+        _ => "ReAct",
+    }
 }
 
 /// Print the startup banner and configuration summary.
@@ -471,11 +481,12 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     );
     println!("CONFIGURATION:");
     println!(
-        "  mode               : {}",
-        match config.todo_mode {
-            1 => "Plan-Exec-Static",
-            2 => "Plan-Exec-Dynamic",
-            _ => "ReAct",
+        "  mode               : {}{}",
+        todo_mode_name(config.todo_mode),
+        if config.todo_mode > 0 {
+            format!(" (todo {})", config.todo_mode)
+        } else {
+            String::new()
         }
     );
     println!(

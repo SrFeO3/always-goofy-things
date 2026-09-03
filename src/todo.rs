@@ -1,11 +1,11 @@
 //! Plan-Execute task loop for multi-task execution with todo.md-based handover.
 //!
-//! Runs Mode 1 (Plan-Exec-Static) and Mode 2 (Plan-Exec-Dynamic)
+//! Runs Mode 1 (Static Plan) and Mode 2 (Dynamic Replan)
 //! for multi-task execution with LLM context reset between tasks.
 //!
 //! # Execution Flow
 //!
-//! ## Mode 1 (Plan-Exec-Static)
+//! ## Mode 1 (Static Plan)
 //!
 //! 1. [User Input]     : Read the task plan from todo.md.
 //! 2. [Todo Loop]      : Recursive cycle through unchecked tasks, one per fresh context.
@@ -14,7 +14,7 @@
 //!    - Store State    : The application updates todo.md (mark [x]) and artifacts/handover.md and resets the LLM context.
 //! 3. [Final Answer]   : Read the Goal artifact (an `artifacts/...` path named in the Goal) and present it; fall back to the last task's report, then a completion notice.
 //!
-//! ## Mode 2 (Plan-Exec-Dynamic)
+//! ## Mode 2 (Dynamic Replan)
 //!
 //! 1. [User Input]     : Read the task plan from todo.md.
 //! 2. [Todo Loop]      : Recursive cycle: replan, then execute one task per fresh context.
@@ -626,7 +626,7 @@ fn finalize_with_sweep(mut summary: String) -> String {
     summary
 }
 
-/// Run the Plan-Exec todo loop for Mode 1 and Mode 2.
+/// Run the todo loop for Mode 1 (Static Plan) and Mode 2 (Dynamic Replan).
 pub(crate) async fn run_todo_loop<'a>(
     ctx: &mut LoopCtx<'a>,
     gui_log: &mut Session,
@@ -655,11 +655,7 @@ pub(crate) async fn run_todo_loop<'a>(
             .trim()
             .to_string()
     };
-    let mode_name = if config.todo_mode == 2 {
-        "Plan-Exec-Dynamic"
-    } else {
-        "Plan-Exec-Static"
-    };
+    let mode_name = startup::todo_mode_name(config.todo_mode);
 
     // Resumed run: Mode 1 finishes with the completion report; Mode 2 falls
     // through so the loop's final-replan completion gate still runs.

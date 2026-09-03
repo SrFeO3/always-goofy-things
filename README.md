@@ -42,8 +42,8 @@ Options can be set via environment variables or command-line flags (flags take p
 | (none) | `SESSION_DATA_DIR` | Root directory where session, todo-archive and resource-statistics JSONL files are stored; overrides the platform app-data directory. | (platform default) |
 | `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. In todo mode (`-t`), the query is appended to every replan and task session's user message as additional instructions. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
-| `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static plan, `2`=AI-driven dynamic replanning. | `0` |
-| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. | false |
+| `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static Plan, `2`=Dynamic Replan (AI-driven). | `0` |
+| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for todo modes (`-t`): they run in batch, where non-auto-confirmed tool calls are denied. | false |
 | `license` | (none) | Subcommand: print the third-party license notices bundled into this binary and exit. | (none) |
 
 ### LLM Provider (`LLM_PROVIDER`)
@@ -94,8 +94,10 @@ Controls the visual styling and decorations applied to the terminal output.
 Plan-and-Execute execution for long jobs, split into tasks. Reads `./todo.md`, resets the LLM context between tasks, and carries state forward via the file.
 
 - `0` (default): Standard ReAct loop. Single-turn tasks.
-- `1`: Static sequential execution from a user-prepared plan. Known step-by-step workflows.
-- `2`: Dynamic AI-driven replanning. The AI rewrites `./todo.md` as it works. Exploratory / research jobs.
+- `1`: Static Plan - sequential execution from a user-prepared plan. Known step-by-step workflows.
+- `2`: Dynamic Replan (AI-driven) - the AI rewrites `./todo.md` before each task, adding / removing / reordering / splitting tasks as it learns. Exploratory / research jobs.
+
+Todo modes run in batch mode: tool calls are never interactively confirmed, so pass `--unsafe-reflex` (tool calls are auto-confirmed only on ASCII-only relative paths such as `./todo.md` and `artifacts/<name>`; other calls are denied).
 
 See [docs/todo-mode.md](docs/todo-mode.md) for sample `./todo.md` files and quick-start guides.
 
