@@ -46,13 +46,24 @@ pub(crate) struct LlmCallRecord {
 }
 
 /// Information about one LLM request (latency / TTFT / request & response
-/// bytes), captured in `reasoning::call_llm`.
-#[derive(Debug, Clone, Copy)]
+/// bytes plus stream-health diagnostics), captured in `reasoning::call_llm`.
+#[derive(Debug, Clone)]
 pub(crate) struct LlmRequestInfo {
     pub latency_ms: u128,
     pub ttft_ms: u128,
     pub request_bytes: usize,
     pub response_bytes: usize,
+    /// Whether the SSE stream ended with the `[DONE]` marker.
+    pub(crate) done_seen: bool,
+    /// Model-reported finish reason from the final chunk (`finish_reason`
+    /// OpenAI / `done_reason` Ollama native), when present.
+    pub(crate) finish_reason: Option<String>,
+    /// Backend error message from a 2xx/SSE payload, if any.
+    pub(crate) backend_error: Option<String>,
+    /// `data:` lines skipped because they were not valid JSON.
+    pub(crate) sse_parse_errors: u32,
+    /// Lines skipped because they were not valid UTF-8.
+    pub(crate) sse_utf8_errors: u32,
 }
 
 /// Per-model (or session-wide) aggregation of LLM resource usage.

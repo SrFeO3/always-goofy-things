@@ -42,6 +42,83 @@ fn record_and_save(
     }
 }
 
+/// Pull a human-readable backend error out of a 2xx/SSE payload that carries
+/// an `error` object.
+fn extract_backend_error(json: &serde_json::Value) -> Option<String> {
+    let err = json.get("error")?;
+    match err {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Object(_) => err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .or_else(|| Some(err.to_string())),
+        _ => None,
+    }
+}
+
+/// Record the first backend error and the model's finish reason (OpenAI
+/// `finish_reason` / Ollama native `done_reason`) from one parsed SSE chunk.
+/// Returns the newly captured backend error message, if any.
+fn capture_chunk_diagnostics(
+    json: &serde_json::Value,
+    finish_reason: &mut Option<String>,
+    backend_error: &mut Option<String>,
+) -> Option<String> {
+    if backend_error.is_none()
+        && let Some(msg) = extract_backend_error(json)
+    {
+        *backend_error = Some(msg.clone());
+        return Some(msg);
+    }
+    if finish_reason.is_none() {
+        if let Some(fr) = json
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            *finish_reason = Some(fr.to_string());
+        } else if let Some(dr) = json
+            .get("done_reason")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            *finish_reason = Some(format!("{} (ollama)", dr));
+        }
+    }
+    None
+}
+
+/// Compact diagnostics for an empty response: finish reason, missing [DONE]
+/// terminator, and skipped malformed lines. Empty when cleanly empty.
+fn empty_response_diag(ri: &LlmRequestInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(fr) = &ri.finish_reason {
+        parts.push(format!("finish_reason={}", fr));
+    }
+    if !ri.done_seen {
+        parts.push("stream ended without [DONE]".to_string());
+    }
+    if ri.sse_parse_errors > 0 {
+        parts.push(format!("{} unparseable line(s)", ri.sse_parse_errors));
+    }
+    if ri.sse_utf8_errors > 0 {
+        parts.push(format!("{} invalid-UTF-8 line(s)", ri.sse_utf8_errors));
+    }
+    if let Some(be) = &ri.backend_error {
+        parts.push(format!(
+            "backend error: {}",
+            be.chars().take(160).collect::<String>()
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
 /// Why `run_reasoning_loop` ended; its output is in `Session`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndReason {
@@ -243,16 +320,17 @@ pub(crate) async fn run_reasoning_loop<'a>(
         if empty {
             empty_response_count += 1;
             let limit = settings.max_reasoning_empty_responses;
+            let diag = empty_response_diag(&request_info);
             if limit > 0 && empty_response_count >= limit as usize {
                 if empty_response_count == 1 {
                     println!(
-                        "\x1b[91m⚠️ {} returned an empty response (limit: {}). Stopping.\x1b[0m",
-                        settings.llm_model, limit
+                        "\x1b[91m⚠️ {} returned an empty response (limit: {}). Stopping.{}\x1b[0m",
+                        settings.llm_model, limit, diag
                     );
                 } else {
                     println!(
-                        "\x1b[91m⚠️ {} returned {} consecutive empty responses (limit: {}). Stopping.\x1b[0m",
-                        settings.llm_model, empty_response_count, limit
+                        "\x1b[91m⚠️ {} returned {} consecutive empty responses (limit: {}). Stopping.{}\x1b[0m",
+                        settings.llm_model, empty_response_count, limit, diag
                     );
                 }
                 end_reason = EndReason::EmptyLimit;
@@ -260,13 +338,13 @@ pub(crate) async fn run_reasoning_loop<'a>(
             }
             if limit > 0 {
                 println!(
-                    "\x1b[93m(Empty response from {}, retrying {}/{}...)\x1b[0m",
-                    settings.llm_model, empty_response_count, limit
+                    "\x1b[93m(Empty response from {}, retrying {}/{}...{})\x1b[0m",
+                    settings.llm_model, empty_response_count, limit, diag
                 );
             } else {
                 println!(
-                    "\x1b[93m(Empty response from {}, retrying {}...)\x1b[0m",
-                    settings.llm_model, empty_response_count
+                    "\x1b[93m(Empty response from {}, retrying {}...{})\x1b[0m",
+                    settings.llm_model, empty_response_count, diag
                 );
             }
             continue 'reasoning_loop;
@@ -620,6 +698,12 @@ pub(crate) async fn call_llm(
     let mut response_bytes: usize = 0;
     let mut anth_tool_index = 0;
     let mut used_nonstandard_format = false;
+    // Per-call stream health, reported on empty responses (verbose >= 1).
+    let mut done_seen = false;
+    let mut finish_reason: Option<String> = None;
+    let mut backend_error: Option<String> = None;
+    let mut sse_parse_errors: u32 = 0;
+    let mut sse_utf8_errors: u32 = 0;
 
     // Buffer raw bytes because chunk boundaries may split multi-byte
     // UTF-8 characters. We only decode to str once a complete line
@@ -641,7 +725,8 @@ pub(crate) async fn call_llm(
             let line = match std::str::from_utf8(line_bytes) {
                 Ok(s) => s.trim().to_string(),
                 Err(e) => {
-                    if settings.verbose_level >= 2 {
+                    sse_utf8_errors += 1;
+                    if settings.verbose_level >= 1 {
                         println!("\x1b[93m[SSE UTF-8 Error] Skipping line: {}\x1b[0m", e);
                     }
                     line_buf.drain(..=nl);
@@ -668,6 +753,7 @@ pub(crate) async fn call_llm(
                 payload = rest.trim_start();
             }
             if payload == "[DONE]" {
+                done_seen = true;
                 break;
             }
 
@@ -689,6 +775,13 @@ pub(crate) async fn call_llm(
 
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
                 let msg_base = extract_msg_base(&json);
+
+                if settings.verbose_level >= 1
+                    && let Some(msg) =
+                        capture_chunk_diagnostics(&json, &mut finish_reason, &mut backend_error)
+                {
+                    println!("\x1b[91m[Backend Error] {}\x1b[0m", msg);
+                }
 
                 // 0.5 Verbose 3: Display raw SSE line for tool_call deltas
                 if settings.verbose_level == 3 {
@@ -749,14 +842,15 @@ pub(crate) async fn call_llm(
                     let tool_calls = full_message.tool_calls.get_or_insert_with(Vec::new);
                     merge_tool_call_delta(tool_calls, calls, 0, true);
                 }
-            } else if settings.verbose_level >= 2
-                && let Err(e) = serde_json::from_str::<serde_json::Value>(payload)
-            {
-                println!(
-                    "\x1b[93m[SSE Parse Warning] Skipping unparseable line: {} ({})\x1b[0m",
-                    payload.chars().take(120).collect::<String>(),
-                    e
-                );
+            } else if let Err(e) = serde_json::from_str::<serde_json::Value>(payload) {
+                sse_parse_errors += 1;
+                if settings.verbose_level >= 1 {
+                    println!(
+                        "\x1b[93m[SSE Parse Warning] Skipping unparseable line: {} ({})\x1b[0m",
+                        payload.chars().take(120).collect::<String>(),
+                        e
+                    );
+                }
             }
         }
     }
@@ -771,14 +865,21 @@ pub(crate) async fn call_llm(
             if let Some(rest) = payload.strip_prefix("data:") {
                 payload = rest.trim_start();
             }
-            if payload != "[DONE]"
-                && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload)
-            {
+            if payload == "[DONE]" {
+                done_seen = true;
+            } else if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload) {
                 if provider == LlmProvider::Anthropic {
                     json = convert_anth_to_openai_format(json, &mut anth_tool_index);
                 }
                 used_nonstandard_format |= compat_resilience::normalize_tool_call_format(&mut json);
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
+
+                if settings.verbose_level >= 1
+                    && let Some(msg) =
+                        capture_chunk_diagnostics(&json, &mut finish_reason, &mut backend_error)
+                {
+                    println!("\x1b[91m[Backend Error] {}\x1b[0m", msg);
+                }
 
                 let msg_base = extract_msg_base(&json);
 
@@ -817,6 +918,14 @@ pub(crate) async fn call_llm(
         if tool_calls.is_empty() {
             full_message.tool_calls = None;
         }
+    }
+
+    // A stream that stops without [DONE] was cut short or is non-conforming.
+    if !done_seen && settings.verbose_level >= 1 {
+        println!(
+            "\x1b[93m[SSE] stream ended without [DONE] ({} bytes received) - connection may have been cut\x1b[0m",
+            response_bytes
+        );
     }
 
     if is_thinking {
@@ -866,6 +975,11 @@ pub(crate) async fn call_llm(
             ttft_ms: ttft_ms.unwrap_or(0),
             request_bytes,
             response_bytes,
+            done_seen,
+            finish_reason,
+            backend_error,
+            sse_parse_errors,
+            sse_utf8_errors,
         },
     ))
 }
