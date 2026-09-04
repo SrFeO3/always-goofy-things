@@ -328,3 +328,153 @@ fn test_full_skip_blank_single_line() {
         "Stage 4.5: single line should not match different content"
     );
 }
+
+// -------------------------------------------------------------------------
+// escape_mismatch_feedback (str_replace_editor escape diagnosis)
+// -------------------------------------------------------------------------
+
+/// Simulate LLM over-escaping: `\` -> `\\`, `"` -> `\"`.
+fn overescaped(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[test]
+fn test_escape_hint_escaped_quote_detected() {
+    let file_line = "- [ ] Verify the \"Verify list\" in todo.md";
+    let content = format!("{}\n", file_line);
+    let old = overescaped(file_line);
+    let new = overescaped("- [x] Verify the \"Verify list\" in todo.md");
+    let hint = escape_mismatch_feedback(&old, &new, "todo.md", &content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("[ESCAPE_HINT]"), "{}", hint);
+    assert!(hint.contains("`\\\"` (backslash + quote) x 2"), "{}", hint);
+    assert!(
+        hint.contains("matches todo.md at 1 place (line 1)"),
+        "{}",
+        hint
+    );
+    assert!(
+        hint.contains("> - [ ] Verify the \"Verify list\""),
+        "{}",
+        hint
+    );
+    assert!(hint.contains("do NOT add backslashes"), "{}", hint);
+    // new_string has the same escapes -> note present
+    assert!(hint.contains("Note: your new_string"), "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_clean_new_string_no_note() {
+    let content = "my\\path\n"; // file contains a literal single backslash
+    let hint = escape_mismatch_feedback("my\\\\path", "other", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(
+        hint.contains("`\\\\` (backslash + backslash) x 1"),
+        "{}",
+        hint
+    );
+    assert!(
+        !hint.contains("Note: your new_string"),
+        "hint must not warn when new_string is clean"
+    );
+}
+
+#[test]
+fn test_escape_hint_literal_backslash_n_matches_real_newline() {
+    let content = "line1\nline2\n"; // real newlines
+    let old = "line1\\nline2"; // literal backslash + n
+    let hint = escape_mismatch_feedback(old, "replaced", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("`\\n` (backslash + n) x 1"), "{}", hint);
+    assert!(hint.contains("(line 1)"), "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_tab_and_cr_detected() {
+    let content = "a\tb\rb"; // real tab and CR
+    let old = "a\\tb\\rb"; // literal \t and \r sequences
+    let hint = escape_mismatch_feedback(old, "x", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("`\\t` (backslash + t) x 1"), "{}", hint);
+    assert!(hint.contains("`\\r` (backslash + r) x 1"), "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_no_escapes_no_hint() {
+    let content = "hello world\n";
+    assert!(escape_mismatch_feedback("hello world", "x", "f.txt", content).is_none());
+}
+
+#[test]
+fn test_escape_hint_resolved_not_in_file_no_hint() {
+    let content = "hello world\n";
+    // old has escapes, but the de-escaped text is not in the file
+    let old = overescaped("say \"hi\" now");
+    assert!(escape_mismatch_feedback(&old, "x", "f.txt", content).is_none());
+}
+
+#[test]
+fn test_escape_hint_trailing_backslash_no_hint() {
+    let content = "whatever\n";
+    // a lone trailing backslash is not a resolvable escape
+    assert!(escape_mismatch_feedback("ends\\", "x", "f.txt", content).is_none());
+}
+
+#[test]
+fn test_escape_hint_unknown_escape_no_hint() {
+    let content = "a\\az\n"; // file contains literal backslash + a
+    // `\a` is unknown -> kept literally -> resolved == old
+    assert!(escape_mismatch_feedback("a\\az", "x", "f.txt", content).is_none());
+}
+
+#[test]
+fn test_escape_hint_multiple_places() {
+    let content = "foo \"x\"\nfoo \"x\"\n";
+    let old = overescaped("foo \"x\"");
+    let hint = escape_mismatch_feedback(&old, "bar", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("at 2 places (line 1)"), "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_multibyte_line_number() {
+    let content = "日本語の行\n英語の行\n- [ ] 確認 \"済み\"\n";
+    let old = overescaped("- [ ] 確認 \"済み\"");
+    let hint = escape_mismatch_feedback(&old, "x", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("(line 3)"), "{}", hint);
+    assert!(hint.contains("> - [ ] 確認 \"済み\""), "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_mixed_kinds_listed() {
+    let content = "a \"x\" \\ b\n"; // file has a quote and a literal backslash
+    let old = overescaped("a \"x\" \\ b");
+    let hint = escape_mismatch_feedback(&old, "y", "f.txt", content);
+    let hint = hint.expect("hint should fire");
+    assert!(hint.contains("`\\\"` (backslash + quote) x 2"), "{}", hint);
+    assert!(
+        hint.contains("`\\\\` (backslash + backslash) x 1"),
+        "{}",
+        hint
+    );
+    // quote kind listed before backslash kind (first-seen order)
+    let quote_pos = hint.find("backslash + quote").unwrap();
+    let backslash_pos = hint.find("backslash + backslash").unwrap();
+    assert!(quote_pos < backslash_pos, "{}", hint);
+}
+
+#[test]
+fn test_escape_hint_snippet_truncated() {
+    let long = "z".repeat(150);
+    let file_line = format!("{} \"q\"", long);
+    let content = format!("{}\n", file_line);
+    let old = overescaped(&file_line);
+    let hint = escape_mismatch_feedback(&old, "y", "f.txt", &content);
+    let hint = hint.expect("hint should fire");
+    assert!(
+        hint.contains(&format!("> {}...", "z".repeat(120))),
+        "snippet should be truncated to ~120 chars: {}",
+        hint
+    );
+}

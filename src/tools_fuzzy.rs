@@ -114,6 +114,178 @@ pub fn build_full_skip_blank_pattern(s: &str) -> String {
     join_non_blank_lines(parts)
 }
 
+// ---------------------------------------------------------------------------
+// Escape-mismatch feedback (str_replace_editor)
+// ---------------------------------------------------------------------------
+
+/// Resolve JSON escapes (`\"`, `\\`, `\n`, `\t`, `\r`, `\/`, `\b`, `\f`, `\uXXXX`).
+/// Unknown escapes and a lone trailing `\` stay literal.
+/// Returns the resolved string and per-kind escape counts.
+fn resolve_json_escapes(s: &str) -> (String, Vec<(char, usize)>) {
+    let mut out = String::with_capacity(s.len());
+    let mut counts: Vec<(char, usize)> = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\\' || i + 1 >= chars.len() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let next = chars[i + 1];
+        let resolved: Option<char> = match next {
+            '"' => Some('"'),
+            '\\' => Some('\\'),
+            '/' => Some('/'),
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            'b' => Some('\u{0008}'),
+            'f' => Some('\u{000C}'),
+            'u' => {
+                // \uXXXX (4 hex digits); otherwise unresolved.
+                let hex_end = (i + 6).min(chars.len());
+                let hex = &chars[i + 2..hex_end];
+                if hex.len() == 4 && hex.iter().all(|h| h.is_ascii_hexdigit()) {
+                    let hex_str: String = hex.iter().collect();
+                    u32::from_str_radix(&hex_str, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        match resolved {
+            Some(ch) => {
+                out.push(ch);
+                if let Some((_, n)) = counts.iter_mut().find(|(k, _)| *k == next) {
+                    *n += 1;
+                } else {
+                    counts.push((next, 1));
+                }
+                i += if next == 'u' { 6 } else { 2 };
+            }
+            None => {
+                // Unknown/invalid escape: keep the backslash.
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    (out, counts)
+}
+
+/// Human-readable description of an escape kind for the feedback message.
+fn describe_escape_kind(kind: char) -> &'static str {
+    match kind {
+        '"' => "backslash + quote",
+        '\\' => "backslash + backslash",
+        'n' => "backslash + n",
+        't' => "backslash + t",
+        'r' => "backslash + r",
+        'b' => "backslash + b",
+        'f' => "backslash + f",
+        '/' => "backslash + slash",
+        'u' => "unicode escape",
+        _ => "unknown escape",
+    }
+}
+
+/// Whether `s` contains a backslash immediately followed by `kind`.
+fn contains_escape_kind(s: &str, kind: char) -> bool {
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.next() == Some(kind) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Truncate `s` to at most `max` characters, appending `...` when truncated.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{}...", head)
+    }
+}
+
+/// Feedback for an over-escaped `old_string` that failed all match stages:
+/// if the same text without JSON backslash escapes exists in `content`,
+/// return a hint telling the caller to fix its escapes. Feedback only --
+/// nothing is resolved or written; `None` when there is nothing to report.
+pub fn escape_mismatch_feedback(
+    old_string: &str,
+    new_string: &str,
+    path: &str,
+    content: &str,
+) -> Option<String> {
+    let (resolved, counts) = resolve_json_escapes(old_string);
+    if counts.is_empty() {
+        return None; // no resolvable escapes
+    }
+    let occurrences: Vec<usize> = content.match_indices(&resolved).map(|(i, _)| i).collect();
+    if occurrences.is_empty() {
+        return None; // resolved text not in the file
+    }
+
+    let first = occurrences[0];
+    let line = content[..first].matches('\n').count() + 1;
+    // Snippet: match-start line, first ~120 chars.
+    let line_start = content[..first].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = content[line_start..]
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(content.len());
+    let snippet = truncate_chars(&content[line_start..line_end], 120);
+
+    let mut msg = String::new();
+    msg.push_str(
+        "[ESCAPE_HINT] old_string contains backslash escapes that do not exist in the file:\n",
+    );
+    for (kind, n) in &counts {
+        let seq = if *kind == 'u' {
+            "\\uXXXX".to_string()
+        } else {
+            format!("\\{}", kind)
+        };
+        msg.push_str(&format!(
+            "  - `{}` ({}) x {}\n",
+            seq,
+            describe_escape_kind(*kind),
+            n
+        ));
+    }
+    msg.push_str(&format!(
+        "Removing those backslashes, the text matches {} at {} place{} (line {}):\n",
+        path,
+        occurrences.len(),
+        if occurrences.len() == 1 { "" } else { "s" },
+        line
+    ));
+    msg.push_str(&format!("  > {}\n", snippet));
+    msg.push_str(
+        "The tool argument is a JSON string: the JSON decoder resolves standard escapes before \
+the tool receives the text (`\\\"` -> `\"`, `\\n` -> newline). The file contains only the \
+resolved characters. Send the text exactly as it appears in the file: do NOT add backslashes.\n",
+    );
+    if counts
+        .iter()
+        .any(|(kind, _)| contains_escape_kind(new_string, *kind))
+    {
+        msg.push_str(
+            "Note: your new_string contains the same escapes; they will be written to the file \
+literally unless you fix them.",
+        );
+    }
+    Some(msg)
+}
+
 #[cfg(test)]
 #[path = "tests/tools_fuzzy_test.rs"]
 mod tests;

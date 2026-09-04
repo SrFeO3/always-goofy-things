@@ -448,6 +448,54 @@ fn  foo() {}
 }
 
 #[test]
+fn test_str_replace_escape_hint_in_no_match_error() {
+    // Spec example: file has plain quotes, LLM sends `\"` (backslash + quote) pairs.
+    let path = get_temp_path("escape_hint");
+    let path_str = path.to_str().unwrap();
+    let original = "- [ ] Verify the \"Verify list\" in todo.md\n";
+    fs::write(&path, original).unwrap();
+    // Over-escape every quote, as the LLM did in the spec example.
+    let old_s = original.replace('"', "\\\"").trim_end().to_string();
+    let new_s = old_s.replace("- [ ]", "- [x]");
+    let res = execute_str_replace(&json!({
+        "path": path_str,
+        "old_string": old_s,
+        "new_string": new_s
+    }));
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("NO_MATCH"), "{}", err);
+    assert!(err.contains("ESCAPE_HINT"), "{}", err);
+    assert!(err.contains("(backslash + quote) x 2"), "{}", err);
+    assert!(err.contains("Note: your new_string"), "{}", err);
+    // Feedback only: the file must stay unchanged.
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_str_replace_literal_backslash_n_still_matches_exactly() {
+    // Non-regression: literal `\n` in the file still matches exactly.
+    let path = get_temp_path("literal_backslash_n");
+    let path_str = path.to_str().unwrap();
+    let old_s = "let s = \"a\\nb\";"; // literal backslash + n inside the code
+    let new_s = "let s = \"c\\nd\";";
+    fs::write(&path, format!("{}\n", old_s)).unwrap();
+    let res = execute_str_replace(&json!({
+        "path": path_str,
+        "old_string": old_s,
+        "new_string": new_s
+    }));
+    assert!(
+        res.is_ok(),
+        "literal `\\n` must match exactly, got: {:?}",
+        res.err()
+    );
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains(new_s), "{}", content);
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn test_fuzzy_mismatch_report_all_patterns() {
     // 1. whitespace_only - leading indentation diff
     let report = build_fuzzy_mismatch_report("foo bar", "  foo bar");

@@ -1095,9 +1095,14 @@ fn execute_str_replace_guarded(
     }
 
     // All fallbacks were exhausted - old_string truly isn't in file.
+    let escape_hint =
+        crate::tools_fuzzy::escape_mismatch_feedback(old_str, new_str, path, &content);
     Err(anyhow!(
-        "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / tab-blank-skip / full-fuzzy / full-blank-skip stages",
+        "[NO_MATCH] old_string not found in '{}' after trying exact / space-fuzzy / tab-fuzzy / tab-blank-skip / full-fuzzy / full-blank-skip stages{}",
         path,
+        escape_hint
+            .map(|h| format!("\n\n{}", h))
+            .unwrap_or_default(),
     ))
 }
 

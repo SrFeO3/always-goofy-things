@@ -372,6 +372,10 @@ fn compute_str_replace_diff(args: &Value) -> Option<(String, usize, Vec<DiffLine
     println!("{}Could not match old_string in: {}{}", C_RED, path, RESET);
     println!("  old: {}{}{}", HDR_RED, old_s, RESET);
     println!("  new: {}{}{}", HDR_GREEN, new_s, RESET);
+    if let Some(hint) = crate::tools_fuzzy::escape_mismatch_feedback(old_s, new_s, &path, &content)
+    {
+        println!("{}{}{}", C_YELLOW, hint, RESET);
+    }
     None
 }
 

@@ -458,6 +458,13 @@ pub fn gui_pretty_command(ui: &mut egui::Ui, name: &str, args: &Value) {
                 let new_lines: Vec<&str> = new_s.lines().collect();
                 let diff = group_diff(&compute_diff(&old_lines, &new_lines));
                 show_diff_preview(ui, path, 1, &diff, None);
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Some(hint) =
+                        crate::tools_fuzzy::escape_mismatch_feedback(old_s, new_s, path, &content)
+                    {
+                        ui.colored_label(C_YELLOW, hint);
+                    }
+                }
             }
         }
         "execute_bash" => {
