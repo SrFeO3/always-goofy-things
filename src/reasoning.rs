@@ -191,13 +191,15 @@ pub(crate) async fn run_reasoning_loop<'a>(
         // append_message_to_session).
         persistence::rewrite_session(&session.label, &session.messages)?;
     } else {
-        session.messages.push(Message {
+        // Clone the label first: push_message borrows session mutably.
+        let label = session.label.clone();
+        let last = session.push_message(Message {
             role: "user".to_string(),
             content: user_query.clone(),
             attached_files: attached_files.clone(),
             ..Default::default()
         });
-        persistence::append_message_to_session(&session.label, session.messages.last().unwrap())?;
+        persistence::append_message_to_session(&label, last)?;
     }
     // Push user message to GUI live stream so turn numbers appear correctly.
     #[cfg(feature = "gui")]
@@ -351,9 +353,11 @@ pub(crate) async fn run_reasoning_loop<'a>(
         }
         empty_response_count = 0;
 
-        session.messages.push(assistant_msg.clone());
+        // Clone the label first: push_message borrows session mutably.
+        let label = session.label.clone();
+        let last = session.push_message(assistant_msg.clone());
         // Was `let _ =` (swallowed). Propagate persistence errors now.
-        persistence::append_message_to_session(&session.label, session.messages.last().unwrap())?;
+        persistence::append_message_to_session(&label, last)?;
         // Cache snapshot after assistant push but BEFORE tool pushes: drives
         // verbose-2 incremental display on the next `call_llm` (see Settings).
         settings.last_sent_count = session.messages.len();
@@ -533,7 +537,9 @@ pub(crate) async fn run_reasoning_loop<'a>(
                 } else {
                     println!("Tool Call Response: {}\n", tool_result_str);
                 }
-                session.messages.push(Message {
+                // Clone the label first: push_message borrows session mutably.
+                let label = session.label.clone();
+                let last = session.push_message(Message {
                     role: "tool".to_string(),
                     content: tool_result_str,
                     tool_call_id: Some(call.id.clone()),
@@ -541,10 +547,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     tool_call_decision: Some(tool_call_decision),
                     ..Default::default()
                 });
-                persistence::append_message_to_session(
-                    &session.label,
-                    session.messages.last().unwrap(),
-                )?;
+                persistence::append_message_to_session(&label, last)?;
             }
             // Re-query LLM with tool execution results
             continue 'reasoning_loop;
@@ -552,6 +555,32 @@ pub(crate) async fn run_reasoning_loop<'a>(
         break 'reasoning_loop;
     }
     Ok(end_reason)
+}
+
+/// Format a failed-call error: status, raw response body, and the request
+/// payload (truncated when long and verbose < 2).
+fn api_error_msg(
+    status: reqwest::StatusCode,
+    body: &str,
+    req_json: &str,
+    verbose_lt_2: bool,
+) -> anyhow::Error {
+    let payload_display = if req_json.len() > 62 && verbose_lt_2 {
+        format!(
+            "{}...({}bytes)...{}",
+            &req_json[..30],
+            req_json.len(),
+            &req_json[req_json.len().saturating_sub(30)..]
+        )
+    } else {
+        req_json.to_string()
+    };
+    anyhow!(
+        "API Error ({})\nResponse: {}\nRequest Payload: {}",
+        status,
+        body,
+        payload_display
+    )
 }
 
 pub(crate) async fn call_llm(
@@ -565,7 +594,7 @@ pub(crate) async fn call_llm(
         tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n));
     let messages_vec = messages.to_vec();
 
-    let req = ChatRequest {
+    let mut req = ChatRequest {
         provider,
         model: settings.llm_model.clone(),
         max_output_tokens: settings.max_output_tokens as usize,
@@ -573,10 +602,11 @@ pub(crate) async fn call_llm(
         stream: true,
         tools,
         tool_result_format: config.tool_result_format,
+        max_tokens_fallback: false,
     };
-    let req_value = req.to_provider_json()?;
-    let req_json = serde_json::to_string(&req_value)?;
-    let request_bytes = req_json.len();
+    let mut req_value = req.to_provider_json()?;
+    let mut req_json = serde_json::to_string(&req_value)?;
+    let mut request_bytes = req_json.len();
 
     // Debug output based on verbose_level
     match settings.verbose_level {
@@ -621,65 +651,101 @@ pub(crate) async fn call_llm(
         settings.llm_model
     );
 
-    let mut request_builder = client
-        .post(&config.llm_url)
-        .header("Content-Type", "application/json")
-        .header(
-            "User-Agent",
-            format!("{}/{}", startup::APP_BIN_NAME, env!("CARGO_PKG_VERSION")),
-        )
-        .json(&req_value);
+    // Request builder with headers + auth; re-used by the max_tokens fallback retry.
+    let apply_auth = |req_value: &serde_json::Value| {
+        let builder = client
+            .post(&config.llm_url)
+            .header("Content-Type", "application/json")
+            .header(
+                "User-Agent",
+                format!("{}/{}", startup::APP_BIN_NAME, env!("CARGO_PKG_VERSION")),
+            )
+            .json(req_value);
 
-    if let Some(api_key) = config.llm_api_key.as_deref() {
-        let masked_key = "****".to_string();
+        if let Some(api_key) = config.llm_api_key.as_deref() {
+            let masked_key = "****".to_string();
 
-        request_builder = if provider == LlmProvider::Anthropic {
-            if settings.verbose_level >= 1 {
-                println!(
-                    "{}[AUTH: x-api-key] masked: {}{}",
-                    C_DIM_GRAY, masked_key, RESET
-                );
+            if provider == LlmProvider::Anthropic {
+                if settings.verbose_level >= 1 {
+                    println!(
+                        "{}[AUTH: x-api-key] masked: {}{}",
+                        C_DIM_GRAY, masked_key, RESET
+                    );
+                }
+                builder
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-11-01")
+            } else {
+                if settings.verbose_level >= 1 {
+                    println!(
+                        "{}[AUTH: Authorization/Bearer] masked: Bearer {}{}",
+                        C_DIM_GRAY, masked_key, RESET
+                    );
+                }
+                builder.header("Authorization", format!("Bearer {}", api_key))
             }
-            request_builder
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-11-01")
         } else {
-            if settings.verbose_level >= 1 {
-                println!(
-                    "{}[AUTH: Authorization/Bearer] masked: Bearer {}{}",
-                    C_DIM_GRAY, masked_key, RESET
-                );
-            }
-            request_builder.header("Authorization", format!("Bearer {}", api_key))
-        };
-    }
+            builder
+        }
+    };
 
     // Measure request-send to stream-completion latency.
-    let send_start = std::time::Instant::now();
-    let res = request_builder.send().await?;
+    let mut send_start = std::time::Instant::now();
+    let mut res = apply_auth(&req_value).send().await?;
 
     if !res.status().is_success() {
-        let status = res.status();
-        let body = res
+        let mut status = res.status();
+        let mut body = res
             .text()
             .await
             .unwrap_or_else(|_| "Could not read body".to_string());
-        let payload_display = if req_json.len() > 62 && settings.verbose_level < 2 {
-            format!(
-                "{}...({}bytes)...{}",
-                &req_json[..30],
-                req_json.len(),
-                &req_json[req_json.len().saturating_sub(30)..]
-            )
+
+        // Legacy OpenAI models reject `max_completion_tokens` (400): retry once
+        // with `max_tokens` (failure paths return so `res` stays valid).
+        if provider == LlmProvider::OpenAi
+            && !req.max_tokens_fallback
+            && status == reqwest::StatusCode::BAD_REQUEST
+            && body.contains("max_completion_tokens")
+        {
+            req.max_tokens_fallback = true;
+            req_value = req.to_provider_json()?;
+            req_json = serde_json::to_string(&req_value)?;
+            request_bytes = req_json.len();
+            send_start = std::time::Instant::now();
+            if settings.verbose_level >= 1 {
+                println!(
+                    "\x1b[93m[Fallback] 'max_completion_tokens' rejected (400); retrying with 'max_tokens'.{}",
+                    RESET
+                );
+            }
+            if settings.verbose_level >= 2 {
+                println!(
+                    "\x1b[90m--- [API REQUEST: {} (Fallback: max_tokens)] ---\n{}\x1b[0m",
+                    config.llm_url, req_json
+                );
+            }
+            res = apply_auth(&req_value).send().await?;
+            if !res.status().is_success() {
+                status = res.status();
+                body = res
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Could not read body".to_string());
+                return Err(api_error_msg(
+                    status,
+                    &body,
+                    &req_json,
+                    settings.verbose_level < 2,
+                ));
+            }
         } else {
-            req_json.clone()
-        };
-        return Err(anyhow!(
-            "API Error ({})\nResponse: {}\nRequest Payload: {}",
-            status,
-            body,
-            payload_display
-        ));
+            return Err(api_error_msg(
+                status,
+                &body,
+                &req_json,
+                settings.verbose_level < 2,
+            ));
+        }
     }
     let mut full_message = Message {
         role: "assistant".to_string(),

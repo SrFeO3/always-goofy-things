@@ -105,14 +105,18 @@ pub fn init_session(label: &str) -> Result<()> {
 /// `append_message_to_session` (append one) and `rewrite_session` (overwrite all)
 /// write.
 ///
-/// `attached_files` is `#[serde(skip)]` on `Message`, so its metadata (path +
-/// attach_type; content is excluded to keep JSONL lean) is injected manually
-/// here.
+/// `attached_files` and `session_id` are `#[serde(skip)]` on `Message` (kept out
+/// of LLM payloads), so both are injected manually here.
 fn serialize_message(message: &Message) -> Result<String> {
     let mut json_val = serde_json::to_value(message)
         .with_context(|| format!("Failed to serialize message: role={}", message.role))?;
 
-    // Inject attached_files metadata (path + attach_type only; content is #[serde(skip)])
+    // Inject local-only (#[serde(skip)]) fields manually: attached_files metadata
+    // (path + attach_type; content stays out) and the session ID (empty = legacy
+    // line, omitted so it stays byte-identical).
+    if !message.session_id.is_empty() {
+        json_val["session_id"] = serde_json::Value::String(message.session_id.clone());
+    }
     if !message.attached_files.is_empty() {
         let files: Vec<serde_json::Value> = message
             .attached_files
@@ -283,6 +287,11 @@ fn read_messages_from(path: &std::path::Path) -> Result<Vec<Message>> {
                             msg.attached_files.push(attached);
                         }
                     }
+                }
+
+                // Restore the session ID (serde-skipped; legacy lines stay empty).
+                if let Some(sid) = val.get("session_id").and_then(|v| v.as_str()) {
+                    msg.session_id = sid.to_string();
                 }
 
                 messages.push(msg);

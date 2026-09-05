@@ -762,6 +762,7 @@ fn test_unverifiable_declared_counts_deliverables_and_task_outputs() {
 #[test]
 fn test_last_assistant_report_skips_tool_and_user_messages() {
     let session = Session {
+        id: "t".to_string(),
         label: "t".to_string(),
         turn: 1,
         messages: vec![
@@ -793,6 +794,7 @@ fn test_last_assistant_report_skips_tool_and_user_messages() {
 #[test]
 fn test_last_assistant_report_none_without_assistant() {
     let session = Session {
+        id: "t".to_string(),
         label: "t".to_string(),
         turn: 1,
         messages: vec![crate::model::Message {

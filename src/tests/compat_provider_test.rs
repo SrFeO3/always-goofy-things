@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::{FunctionCall, ToolCall};
 use serde_json::json;
 
 // ------------------------------------------------------------------
@@ -208,6 +209,7 @@ fn sample_request(provider: LlmProvider) -> ChatRequest {
         stream: true,
         messages,
         tool_result_format: ToolResultFormat::JsonString,
+        max_tokens_fallback: false,
     }
 }
 
@@ -255,6 +257,7 @@ fn test_request_payload_has_no_measurement_junk() {
             "retry_count",
             "llm_stats",
             "call_label",
+            "session_id",
         ] {
             assert!(
                 !text.contains(banned),
@@ -275,4 +278,228 @@ fn test_request_payload_has_no_measurement_junk() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------
+// Session ID: must never leak into any provider payload
+// ------------------------------------------------------------------
+
+/// Golden payloads must stay byte-identical even when every message carries a
+/// session ID (strongest pin: the stable-ID feature cannot change or leak into
+/// what is sent to the LLM).
+#[test]
+fn test_golden_payloads_unchanged_when_session_id_set() {
+    for provider in [
+        LlmProvider::OpenAi,
+        LlmProvider::Ollama,
+        LlmProvider::Anthropic,
+    ] {
+        let mut req = sample_request(provider);
+        for m in &mut req.messages {
+            m.session_id = "550e8400-e29b-41d4-a716-446655440000".to_string();
+        }
+        let text = serde_json::to_string(&req.to_provider_json().unwrap()).unwrap();
+        let expected = match provider {
+            LlmProvider::OpenAi => include_str!("fixtures/openai_request.json"),
+            LlmProvider::Ollama => include_str!("fixtures/ollama_request.json"),
+            LlmProvider::Anthropic => include_str!("fixtures/anthropic_request.json"),
+        };
+        assert_eq!(
+            text,
+            expected.trim(),
+            "golden mismatch for {:?} with session_id set",
+            provider
+        );
+    }
+}
+
+/// Explicit session ID values on messages must never appear in the provider
+/// payload, for any provider (key or value).
+#[test]
+fn test_session_id_never_reaches_provider_payload() {
+    let uuid = "550e8400-e29b-41d4-a716-446655440000";
+    for provider in [
+        LlmProvider::OpenAi,
+        LlmProvider::Ollama,
+        LlmProvider::Anthropic,
+    ] {
+        let mut req = sample_request(provider);
+        for m in &mut req.messages {
+            m.session_id = uuid.to_string();
+        }
+        let val = req.to_provider_json().unwrap();
+        let text = serde_json::to_string(&val).unwrap();
+        assert!(
+            !text.contains("session_id"),
+            "{:?} payload must not contain the 'session_id' key: {}",
+            provider,
+            text
+        );
+        assert!(
+            !text.contains(uuid),
+            "{:?} payload must not contain the session UUID value: {}",
+            provider,
+            text
+        );
+        if let Some(msgs) = val.get("messages").and_then(|v| v.as_array()) {
+            for m in msgs {
+                assert!(
+                    m.get("session_id").is_none(),
+                    "{:?} message must not carry session_id: {}",
+                    provider,
+                    m
+                );
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// OpenAI max_completion_tokens -> max_tokens fallback
+// ------------------------------------------------------------------
+
+#[test]
+fn test_openai_fallback_swaps_max_completion_tokens_for_max_tokens() {
+    // Primary payload: max_completion_tokens only (golden format).
+    let mut req = sample_request(LlmProvider::OpenAi);
+    assert!(!req.max_tokens_fallback);
+    let primary = req.to_provider_json().unwrap();
+    assert_eq!(primary["max_completion_tokens"], 100);
+    assert!(primary.get("max_tokens").is_none());
+
+    // Fallback payload: max_tokens only, everything else unchanged.
+    req.max_tokens_fallback = true;
+    let fallback = req.to_provider_json().unwrap();
+    assert!(fallback.get("max_completion_tokens").is_none());
+    assert_eq!(fallback["max_tokens"], 100);
+    assert_eq!(fallback["model"], primary["model"]);
+    assert_eq!(fallback["messages"], primary["messages"]);
+    assert_eq!(fallback["tools"], primary["tools"]);
+    assert_eq!(fallback["stream"], primary["stream"]);
+}
+
+// ------------------------------------------------------------------
+// Anthropic: parallel tool results must merge into one user message
+// ------------------------------------------------------------------
+
+/// Request shape: system, user, assistant (2 tool_use), tool, tool - the
+/// exact sequence `run_reasoning_loop` produces for parallel tool calls.
+fn parallel_tool_request() -> ChatRequest {
+    let messages = vec![
+        Message {
+            role: "system".to_string(),
+            content: "sys".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "list both dirs".to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_calls: Some(vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "list_directory".to_string(),
+                        arguments: json!({ "path": "a" }),
+                    },
+                    thought_signature: None,
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "list_directory".to_string(),
+                        arguments: json!({ "path": "b" }),
+                    },
+                    thought_signature: None,
+                },
+            ]),
+            ..Default::default()
+        },
+        Message {
+            role: "tool".to_string(),
+            content: json!({ "entries": [] }).to_string(),
+            tool_call_id: Some("call_1".to_string()),
+            ..Default::default()
+        },
+        Message {
+            role: "tool".to_string(),
+            content: json!({ "entries": [] }).to_string(),
+            tool_call_id: Some("call_2".to_string()),
+            ..Default::default()
+        },
+    ];
+    ChatRequest {
+        provider: LlmProvider::Anthropic,
+        model: "claude-sonnet-4-5".to_string(),
+        max_output_tokens: 100,
+        tools: vec![json!({
+            "type": "function",
+            "function": {
+                "name": "list_directory",
+                "description": "List files",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                }
+            }
+        })],
+        stream: true,
+        messages,
+        tool_result_format: ToolResultFormat::JsonString,
+        max_tokens_fallback: false,
+    }
+}
+
+#[test]
+fn test_anthropic_merges_parallel_tool_results_into_one_user_message() {
+    let val = parallel_tool_request().to_provider_json().unwrap();
+    let msgs = val["messages"].as_array().expect("messages array");
+
+    // [user, assistant(tool_use x2), user(tool_result x2)] - exactly 3
+    // messages with alternating roles, no consecutive users.
+    assert_eq!(
+        msgs.len(),
+        3,
+        "got: {}",
+        serde_json::to_string_pretty(&val).unwrap()
+    );
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "assistant");
+    assert_eq!(msgs[2]["role"], "user");
+
+    // Assistant holds both tool_use blocks.
+    let asst_blocks = msgs[1]["content"].as_array().expect("assistant blocks");
+    assert_eq!(asst_blocks.len(), 2);
+    assert_eq!(asst_blocks[0]["type"], "tool_use");
+    assert_eq!(asst_blocks[0]["id"], "call_1");
+    assert_eq!(asst_blocks[1]["type"], "tool_use");
+    assert_eq!(asst_blocks[1]["id"], "call_2");
+
+    // Both tool results live in ONE user message, in call order.
+    let result_blocks = msgs[2]["content"].as_array().expect("tool_result blocks");
+    assert_eq!(result_blocks.len(), 2);
+    assert_eq!(result_blocks[0]["type"], "tool_result");
+    assert_eq!(result_blocks[0]["tool_use_id"], "call_1");
+    assert_eq!(result_blocks[1]["type"], "tool_result");
+    assert_eq!(result_blocks[1]["tool_use_id"], "call_2");
+    assert!(result_blocks[0]["content"].is_string());
+}
+
+#[test]
+fn test_anthropic_single_tool_result_stays_one_user_message() {
+    let mut req = parallel_tool_request();
+    req.messages.truncate(4); // drop the second tool result
+    let val = req.to_provider_json().unwrap();
+    let msgs = val["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3);
+    let blocks = msgs[2]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_result");
+    assert_eq!(blocks[0]["tool_use_id"], "call_1");
 }

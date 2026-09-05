@@ -37,7 +37,10 @@ impl fmt::Display for LlmProvider {
 #[derive(Serialize)]
 struct OpenAiRequestDto {
     model: String,
-    max_completion_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<usize>,
     messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
@@ -116,7 +119,9 @@ impl ChatRequest {
                 let messages = convert_messages_for_openai(messages);
                 let dto = OpenAiRequestDto {
                     model: self.model.clone(),
-                    max_completion_tokens: self.max_output_tokens,
+                    max_completion_tokens: (!self.max_tokens_fallback)
+                        .then_some(self.max_output_tokens),
+                    max_tokens: self.max_tokens_fallback.then_some(self.max_output_tokens),
                     messages,
                     tools: self.tools.clone(),
                     stream: self.stream,
@@ -158,6 +163,9 @@ impl ChatRequest {
                     .filter(|v| v["role"] != "system")
                     .map(|v| convert_message_for_anthropic(&v))
                     .collect();
+
+                // Anthropic: parallel tool results must be in ONE user message.
+                let filtered_messages = merge_anthropic_tool_results(filtered_messages);
 
                 let anthropic_tools = convert_tools_to_anthropic(&self.tools);
 
@@ -401,6 +409,43 @@ fn convert_messages_for_openai(
         msg["content"] = json!(converted);
     }
     messages_json
+}
+
+/// Merge consecutive tool-result-only user messages into one.
+///
+/// `run_reasoning_loop` pushes one `role:"tool"` message per tool call, and
+/// [`convert_message_for_anthropic`] turns each into its own user message;
+/// Anthropic requires all `tool_result` blocks (parallel calls) in a single
+/// user message and rejects consecutive same-role messages.
+fn merge_anthropic_tool_results(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let is_tool_result_user = |v: &serde_json::Value| -> bool {
+        v.get("role").and_then(|r| r.as_str()) == Some("user")
+            && v.get("content")
+                .and_then(|c| c.as_array())
+                .is_some_and(|blocks| {
+                    !blocks.is_empty()
+                        && blocks
+                            .iter()
+                            .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                })
+    };
+
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        if is_tool_result_user(&msg)
+            && let Some(prev) = out.last_mut()
+            && is_tool_result_user(prev)
+            && let (Some(cur), Some(prev_blocks)) = (
+                msg.get("content").and_then(|c| c.as_array()).cloned(),
+                prev.get_mut("content").and_then(|c| c.as_array_mut()),
+            )
+        {
+            prev_blocks.extend(cur);
+            continue;
+        }
+        out.push(msg);
+    }
+    out
 }
 
 /// Render a tool result as a concise text string.

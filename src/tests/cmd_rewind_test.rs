@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use super::*;
-use crate::model::Message;
+use crate::model::{Message, Session};
 use crate::persistence;
 
 /// Build a message with a role/content; the rest is defaulted.
@@ -243,6 +243,7 @@ fn helper_slash_dispatch_rewind_truncates_session() {
 
     let config = crate::startup::Config::try_parse_from(["agt"]).unwrap();
     let mut session = Session {
+        id: "dispatch-session".to_string(),
         label: "dispatch".to_string(),
         // 3 completed turns + a broken turn 4; /rewind 3 prompts (user_msg_count 4 > target 3).
         messages: {
@@ -528,9 +529,8 @@ fn helper_restore_interrupted_turn_counts_one_fewer() {
     // the restorable previous session.
     persistence::init_session(label).unwrap();
 
-    let mut messages: Vec<Message> = Vec::new();
-    let (turn, used_label) =
-        handle_restore(&mut messages, label, None).expect("restore must succeed");
+    let mut session = Session::new(label.to_string(), msg("system", "sys"));
+    let (turn, used_label) = handle_restore(&mut session, None).expect("restore must succeed");
     assert_eq!(used_label, label.to_string());
 
     // 2 user messages in the file, but the trailing one is an unfinished
@@ -540,11 +540,31 @@ fn helper_restore_interrupted_turn_counts_one_fewer() {
         "an interrupted trailing user turn must not count as a completed turn"
     );
     // The conversation itself is restored verbatim (all 4 messages).
-    assert_eq!(user_count(&messages), 2);
-    assert_eq!(messages.len(), 4);
+    assert_eq!(user_count(&session.messages), 2);
+    assert_eq!(session.messages.len(), 4);
 
     unsafe { std::env::remove_var("SESSION_DATA_DIR") };
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Restore must keep the original ID (first non-empty wins); legacy files get a fresh unique UUID.
+#[test]
+fn adopt_restored_id_prefers_existing_and_generates_fresh_for_legacy() {
+    let mut sys = msg("system", "sys");
+    sys.session_id = "SID-1".to_string();
+    let mut user = msg("user", "q1");
+    user.session_id = "SID-2".to_string();
+
+    // The first non-empty ID in document order wins (all messages of one
+    // conversation share a single ID in practice; ties cannot occur).
+    assert_eq!(adopt_restored_id(&[user.clone(), sys.clone()]), "SID-2");
+    assert_eq!(adopt_restored_id(&[sys, user]), "SID-1");
+
+    let legacy = vec![msg("system", "sys"), msg("user", "q1")];
+    let a = adopt_restored_id(&legacy);
+    let b = adopt_restored_id(&legacy);
+    assert!(!a.is_empty() && !b.is_empty());
+    assert_ne!(a, b, "legacy fallback IDs must be unique");
 }
 
 #[test]

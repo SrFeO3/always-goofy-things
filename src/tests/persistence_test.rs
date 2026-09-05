@@ -400,3 +400,108 @@ fn test_todo_archive_uses_data_dir_override() {
         "last_session should be renamed to the archive"
     );
 }
+
+// ------------------------------------------------------------------
+// Stable session ID: wire format round-trips (append + rewrite + restore)
+// ------------------------------------------------------------------
+
+#[test]
+fn test_session_id_round_trips_through_append_and_rewrite() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "sid_roundtrip";
+    let sid = "6f0a8f3e-1f2b-4c3d-9e8a-0123456789ab";
+
+    let msgs = vec![
+        Message {
+            role: "system".to_string(),
+            content: "sys".to_string(),
+            session_id: sid.to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "q1".to_string(),
+            ..Default::default()
+        },
+    ];
+    for m in &msgs {
+        append_message_to_session(label, m).unwrap();
+    }
+
+    // The raw JSONL line must carry the ID (local wire format only).
+    let path = last_session_path(label).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains("session_id"),
+        "wire format must carry session_id"
+    );
+    assert!(raw.contains(sid), "wire format must carry the ID value");
+
+    // Append path round-trips the ID.
+    let loaded = load_current_session(label).unwrap();
+    assert_eq!(loaded[0].session_id, sid);
+
+    // rewrite_session (used by /rewind) must preserve it too.
+    let mut all = msgs.clone();
+    all[1].session_id = sid.to_string();
+    rewrite_session(label, &all).unwrap();
+    let loaded = load_current_session(label).unwrap();
+    assert_eq!(loaded[0].session_id, sid);
+    assert_eq!(loaded[1].session_id, sid);
+}
+
+#[test]
+fn test_restore_previous_session_preserves_session_id() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "sid_restore";
+    let sid = "restored-session-uuid-0001";
+
+    let msgs = vec![
+        Message {
+            role: "system".to_string(),
+            content: "sys".to_string(),
+            session_id: sid.to_string(),
+            ..Default::default()
+        },
+        Message {
+            role: "user".to_string(),
+            content: "q1".to_string(),
+            session_id: sid.to_string(),
+            ..Default::default()
+        },
+    ];
+    for m in &msgs {
+        append_message_to_session(label, m).unwrap();
+    }
+    // Rotate last -> previous (the restorable state) via the startup routine.
+    init_session(label).unwrap();
+
+    let restored = restore_previous_session(label).unwrap();
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].session_id, sid, "restore must keep the ID");
+    assert_eq!(restored[1].session_id, sid);
+}
+
+#[test]
+fn test_legacy_lines_without_session_id_still_load() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "sid_legacy";
+
+    // Hand-written pre-session-ID wire format: no session_id key anywhere.
+    let legacy =
+        "{\"role\":\"system\",\"content\":\"sys\"}\n{\"role\":\"user\",\"content\":\"q1\"}\n";
+    let path = last_session_path(label).unwrap();
+    std::fs::write(&path, legacy).unwrap();
+
+    let loaded = load_current_session(label).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].role, "system");
+    assert_eq!(
+        loaded[0].session_id, "",
+        "legacy lines must load with empty ID"
+    );
+    assert_eq!(loaded[1].content, "q1");
+}

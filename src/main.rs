@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
     persistence::init_session(&session.label)?;
     // Append the system message as the first line of the new session
     persistence::append_message_to_session(&session.label, &session.messages[0])?;
+    println!("\x1b[90mSession ID: {}\x1b[0m", session.id);
 
     // Main conversation loop
     let mut batch_input: Option<String> = if config.todo_mode > 0 {

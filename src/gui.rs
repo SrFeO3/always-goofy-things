@@ -866,7 +866,7 @@ impl GuiApp {
                     attached_files: attached_files.clone(),
                     ..Default::default()
                 };
-                s.messages.push(user_msg.clone());
+                s.push_message(user_msg.clone());
                 // In todo mode the reasoning loop pushes the real user message
                 // (task description) via LLM_STREAM_BUF.3, so skip the empty one.
                 if self.config.todo_mode == 0 {
@@ -894,7 +894,7 @@ impl GuiApp {
                     .await
                 {
                     Ok(summary) => {
-                        session.messages.push(Message {
+                        session.push_message(Message {
                             role: "assistant".to_string(),
                             content: summary,
                             ..Default::default()

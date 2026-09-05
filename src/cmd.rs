@@ -94,7 +94,7 @@ pub fn try_handle_slash_command(
                 Some(SlashCmdResult::NoAdvance)
             }
         },
-        "/restore" => match handle_restore(&mut session.messages, &session.label, arg) {
+        "/restore" => match handle_restore(&mut *session, arg) {
             Ok((new_turn, used_label)) => Some(SlashCmdResult::RestoredTo {
                 turn: new_turn,
                 label: used_label,
@@ -465,6 +465,9 @@ fn handle_history(arg: Option<&str>, messages: &Vec<Message>) {
         "\x1b[1mConversation History ({} message(s))\x1b[0m",
         messages.len()
     );
+    if let Some(first) = messages.first().filter(|m| !m.session_id.is_empty()) {
+        println!("\x1b[90mSession ID: {}\x1b[0m", first.session_id);
+    }
     println!("\x1b[90m{}\x1b[0m", "-".repeat(40));
 
     let mut turn = 0;
@@ -581,18 +584,26 @@ fn truncate_and_flatten(s: &str, max: usize) -> String {
 // /restore
 // ---------------------------------------------------------------------------
 
+/// Keep the restored session's ID (first non-empty wins); legacy files get a fresh UUID.
+pub(crate) fn adopt_restored_id(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .find(|m| !m.session_id.is_empty())
+        .map(|m| m.session_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 /// Handle `/restore [label]`.
 ///
 /// Restores the previous session from `previous_session_{label}.jsonl`, replacing
 /// the current conversation. Returns the new turn count and the label used for restoration.
 pub(crate) fn handle_restore(
-    messages: &mut Vec<Message>,
-    current_label: &str,
+    session: &mut Session,
     arg_label: Option<&str>,
 ) -> Result<(i32, String)> {
     use crate::persistence;
 
-    let label = arg_label.unwrap_or(current_label).trim().to_string();
+    let label = arg_label.unwrap_or(&session.label).trim().to_string();
     let restored = persistence::restore_previous_session(&label)?;
     if restored.is_empty() {
         println!(
@@ -624,8 +635,10 @@ pub(crate) fn handle_restore(
     }
 
     // Replace messages with restored ones
-    messages.clear();
-    messages.extend(restored);
+    session.messages.clear();
+    session.messages.extend(restored);
+
+    session.id = adopt_restored_id(&session.messages);
 
     // --- Re-read attached file contents from disk (paths-only were persisted) ---
     {
@@ -635,7 +648,7 @@ pub(crate) fn handle_restore(
         let mut restored_paths: Vec<String> = Vec::new();
         let mut missing_paths: Vec<String> = Vec::new();
 
-        for msg in messages.iter_mut() {
+        for msg in session.messages.iter_mut() {
             if msg.role != "user" || msg.attached_files.is_empty() {
                 continue;
             }
@@ -711,11 +724,11 @@ pub(crate) fn handle_restore(
     // Calculate restored turns (each turn = user + assistant/tool)
     let mut restored_turns = 0i32;
     let mut i = 0;
-    if !messages.is_empty() && messages[0].role == "system" {
+    if !session.messages.is_empty() && session.messages[0].role == "system" {
         i = 1;
     }
-    while i < messages.len() {
-        if messages[i].role == "user" {
+    while i < session.messages.len() {
+        if session.messages[i].role == "user" {
             restored_turns += 1;
         }
         i += 1;
@@ -725,13 +738,13 @@ pub(crate) fn handle_restore(
     // unfinished turn (a query with no assistant reply). Don't count it as a
     // completed turn, so the caller sets turn = N and the next input reuses
     // that user message instead of pushing a duplicate.
-    if messages.last().is_some_and(|m| m.role == "user") {
+    if session.messages.last().is_some_and(|m| m.role == "user") {
         restored_turns -= 1;
     }
 
     println!(
         "\x1b[32m✓ Restored {} messages ({} turn(s)) from label '{}'.\x1b[0m",
-        messages.len(),
+        session.messages.len(),
         restored_turns,
         label
     );

@@ -51,7 +51,7 @@ fn push_system_msg(gui_log: &mut Session, text: &str) {
 /// Same as `push_system_msg` but with control over the leading blank line.
 #[cfg(feature = "gui")]
 fn push_system_msg_blank(gui_log: &mut Session, text: &str, leading_blank: bool) {
-    gui_log.messages.push(Message {
+    gui_log.push_message(Message {
         role: "system".to_string(),
         content: text.to_string(),
         ..Default::default()

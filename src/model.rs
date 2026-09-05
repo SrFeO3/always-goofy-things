@@ -7,6 +7,7 @@
 use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::attach::AttachedFile;
 use crate::compat_provider::LlmProvider;
@@ -37,6 +38,10 @@ pub(crate) struct Message {
     pub tool_args: Option<serde_json::Value>,
     #[serde(skip)]
     pub attached_files: Vec<AttachedFile>,
+    /// Session ID, never sent to the LLM (`#[serde(skip)]`). Fixed for one
+    /// `Session` (kept across `/rewind`/`/restore`); todo sub-sessions get their own.
+    #[serde(skip)]
+    pub(crate) session_id: String,
 }
 
 impl Default for Message {
@@ -53,6 +58,7 @@ impl Default for Message {
             tool_call_decision: None,
             tool_args: None,
             attached_files: Vec::new(),
+            session_id: String::new(),
         }
     }
 }
@@ -60,6 +66,8 @@ impl Default for Message {
 /// Append-only conversation state. Single mutable owner, never concurrent.
 #[derive(Clone)]
 pub(crate) struct Session {
+    /// Session ID (UUID v4); persisted per-message via `Message.session_id`.
+    pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) turn: i32,
@@ -68,11 +76,23 @@ pub(crate) struct Session {
 impl Session {
     /// New session starting at turn 1 with the system message as `messages[0]`.
     pub(crate) fn new(label: String, system_message: Message) -> Self {
+        let id = Uuid::new_v4().to_string();
+        let mut messages = vec![system_message];
+        // Stamp messages[0] so the ID persists to JSONL (survives restore/rewind/archive).
+        messages[0].session_id = id.clone();
         Self {
+            id,
             label,
-            messages: vec![system_message],
+            messages,
             turn: 1,
         }
+    }
+
+    /// Push a message stamped with this session's ID; returns it for persistence.
+    pub(crate) fn push_message(&mut self, mut msg: Message) -> &mut Message {
+        msg.session_id = self.id.clone();
+        self.messages.push(msg);
+        self.messages.last_mut().unwrap()
     }
 }
 
@@ -144,6 +164,10 @@ pub struct ChatRequest {
     pub(crate) stream: bool,
     pub(crate) messages: Vec<Message>,
     pub(crate) tool_result_format: ToolResultFormat,
+    /// OpenAI fallback: use `max_tokens` instead of `max_completion_tokens`
+    /// (legacy models 400 on it); set by the `call_llm` retry.
+    #[serde(default)]
+    pub(crate) max_tokens_fallback: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -177,3 +201,7 @@ pub(crate) struct CompletionTokensDetails {
     #[serde(default)]
     pub(crate) reasoning_tokens: u32,
 }
+
+#[cfg(test)]
+#[path = "tests/model_test.rs"]
+mod tests;
