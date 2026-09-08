@@ -503,3 +503,110 @@ fn test_anthropic_single_tool_result_stays_one_user_message() {
     assert_eq!(blocks[0]["type"], "tool_result");
     assert_eq!(blocks[0]["tool_use_id"], "call_1");
 }
+
+// ------------------------------------------------------------------
+// Ollama native request shaping: options, tool_name, thinking.
+// ------------------------------------------------------------------
+
+#[test]
+fn test_ollama_options_contain_num_predict_only() {
+    let req = sample_request(LlmProvider::Ollama);
+    let val = req.to_provider_json().unwrap();
+    assert_eq!(val["options"]["num_predict"], 100);
+    // num_ctx is intentionally unset; the model's own default applies.
+    assert!(val["options"].get("num_ctx").is_none());
+}
+
+fn tool_round_trip_request(provider: LlmProvider) -> ChatRequest {
+    ChatRequest {
+        provider,
+        model: "gpt-4o".to_string(),
+        max_output_tokens: 100,
+        tools: vec![],
+        stream: true,
+        messages: vec![
+            Message {
+                role: "user".to_string(),
+                content: "read it".to_string(),
+                ..Default::default()
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "a.txt" }),
+                    },
+                    thought_signature: None,
+                }]),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".to_string(),
+                content: r#"{"status":"ok"}"#.to_string(),
+                tool_call_id: Some("call_1".to_string()),
+                tool_name: Some("read_file".to_string()),
+                ..Default::default()
+            },
+        ],
+        tool_result_format: ToolResultFormat::JsonString,
+        max_tokens_fallback: false,
+    }
+}
+
+#[test]
+fn test_ollama_tool_result_message_includes_tool_name() {
+    let val = tool_round_trip_request(LlmProvider::Ollama)
+        .to_provider_json()
+        .unwrap();
+    let msgs = val["messages"].as_array().unwrap();
+    let tool_msg = msgs
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .expect("tool message");
+    assert_eq!(tool_msg["tool_name"], "read_file");
+    assert!(tool_msg["content"].is_string());
+}
+
+#[test]
+fn test_tool_name_not_leaked_to_openai_payload() {
+    let val = tool_round_trip_request(LlmProvider::OpenAi)
+        .to_provider_json()
+        .unwrap();
+    let msgs = val["messages"].as_array().unwrap();
+    let tool_msg = msgs
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .expect("tool message");
+    assert!(tool_msg.get("tool_name").is_none());
+    assert_eq!(tool_msg["tool_call_id"], "call_1");
+}
+
+#[test]
+fn test_ollama_assistant_reasoning_content_renamed_to_thinking() {
+    let msgs = vec![json!({
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "thinking text"
+    })];
+    let result = convert_messages_for_ollama(msgs);
+    let msg = &result[0];
+    assert_eq!(msg["thinking"], "thinking text");
+    assert!(msg.get("reasoning_content").is_none());
+}
+
+#[test]
+fn test_ollama_assistant_without_reasoning_untouched() {
+    let msgs = vec![json!({
+        "role": "assistant",
+        "content": "Sure!",
+        "tool_calls": [{ "id": "call_1", "function": { "name": "read_file" } }]
+    })];
+    let result = convert_messages_for_ollama(msgs);
+    assert_eq!(result[0]["content"], "Sure!");
+    assert!(result[0].get("thinking").is_none());
+    assert!(result[0].get("reasoning_content").is_none());
+}

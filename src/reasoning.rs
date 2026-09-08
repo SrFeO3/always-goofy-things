@@ -90,6 +90,32 @@ fn capture_chunk_diagnostics(
     None
 }
 
+/// OpenAI-style chunks may carry the text in `refusal` while `content` stays
+/// empty; fall back to it so refusals are shown instead of an empty reply.
+fn openai_content_or_refusal(provider: LlmProvider, msg_base: &serde_json::Value) -> Option<&str> {
+    if let Some(content) = msg_base
+        .get("content")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(content);
+    }
+    // `refusal` exists only in the OpenAI dialect.
+    if provider == LlmProvider::OpenAi {
+        return msg_base
+            .get("refusal")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+    }
+    None
+}
+
+/// Ollama native streams end with a `done: true` object (OpenAI uses `[DONE]`).
+fn is_ollama_stream_end(provider: LlmProvider, json: &serde_json::Value) -> bool {
+    provider == LlmProvider::Ollama && json.get("done") == Some(&serde_json::Value::Bool(true))
+}
+
 /// Compact diagnostics for an empty response: finish reason, missing [DONE]
 /// terminator, and skipped malformed lines. Empty when cleanly empty.
 fn empty_response_diag(ri: &LlmRequestInfo) -> String {
@@ -858,6 +884,9 @@ pub(crate) async fn call_llm(
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
 
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
+                if is_ollama_stream_end(provider, &json) {
+                    done_seen = true;
+                }
                 let msg_base = extract_msg_base(&json);
 
                 if settings.verbose_level >= 1
@@ -898,12 +927,8 @@ pub(crate) async fn call_llm(
                         .push_str(reasoning);
                 }
 
-                // 2. Process Content
-                if let Some(content) = msg_base
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
+                // 2. Process Content (OpenAI: fall back to `refusal`).
+                if let Some(content) = openai_content_or_refusal(provider, msg_base) {
                     if is_thinking {
                         println!("\x1b[0m\n"); // End italics/gray and add space
                         is_thinking = false;
@@ -965,6 +990,10 @@ pub(crate) async fn call_llm(
                     println!("\x1b[91m[Backend Error] {}\x1b[0m", msg);
                 }
 
+                if is_ollama_stream_end(provider, &json) {
+                    done_seen = true;
+                }
+
                 let msg_base = extract_msg_base(&json);
 
                 if let Some(reasoning) = msg_base
@@ -977,7 +1006,7 @@ pub(crate) async fn call_llm(
                         .get_or_insert_with(String::new)
                         .push_str(reasoning);
                 }
-                if let Some(content) = msg_base.get("content").and_then(|v| v.as_str()) {
+                if let Some(content) = openai_content_or_refusal(provider, msg_base) {
                     full_message.content.push_str(content);
                 }
                 if let Some(calls) = msg_base.get("tool_calls").and_then(|v| v.as_array()) {

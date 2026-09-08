@@ -74,8 +74,9 @@ struct OllamaRequestDto {
 
 #[derive(Serialize)]
 struct OllamaOptions {
+    /// Generated-token cap. `num_ctx` is intentionally not sent so the
+    /// model's own context-window default applies.
     num_predict: usize,
-    num_ctx: usize,
 }
 
 #[derive(Serialize)]
@@ -145,6 +146,7 @@ impl ChatRequest {
             }
 
             LlmProvider::Ollama => {
+                let messages = attach_ollama_tool_names(messages, &self.messages);
                 let messages = convert_messages_for_ollama(messages);
                 let dto = OllamaRequestDto {
                     model: self.model.clone(),
@@ -152,7 +154,6 @@ impl ChatRequest {
                     tools: self.tools.clone(),
                     options: OllamaOptions {
                         num_predict: self.max_output_tokens,
-                        num_ctx: self.max_output_tokens,
                     },
                     stream: self.stream,
                 };
@@ -320,6 +321,23 @@ fn attach_file_contents(
     messages_json
 }
 
+/// Inject `Message.tool_name` into tool-result messages; it is not part of
+/// the serialized `Message`, so it is added here for the Ollama dialect only.
+fn attach_ollama_tool_names(
+    mut messages_json: Vec<serde_json::Value>,
+    originals: &[Message],
+) -> Vec<serde_json::Value> {
+    for (msg, orig) in messages_json.iter_mut().zip(originals) {
+        if orig.role == "tool"
+            && let Some(name) = orig.tool_name.as_deref()
+            && !name.is_empty()
+        {
+            msg["tool_name"] = json!(name);
+        }
+    }
+    messages_json
+}
+
 /// Convert content blocks for Ollama's native `/api/chat` format.
 ///
 /// Extracts Base64 data from `image_url` blocks into a top-level `images`
@@ -370,6 +388,25 @@ fn convert_messages_for_ollama(
         }
         // Collapse text blocks to a plain string for Ollama's native API.
         msg["content"] = json!(text_parts.join("\n"));
+    }
+
+    // Echo assistant reasoning back to Ollama as its native `thinking` field.
+    for msg in &mut messages_json {
+        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(obj) = msg.as_object_mut() else {
+            continue;
+        };
+        let reasoning = obj
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        if let Some(reasoning) = reasoning {
+            obj.remove("reasoning_content");
+            obj.insert("thinking".to_string(), serde_json::Value::String(reasoning));
+        }
     }
     messages_json
 }

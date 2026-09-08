@@ -188,3 +188,63 @@ fn test_empty_response_diag_compact() {
     assert!(d.contains("1 invalid-UTF-8 line(s)"));
     assert!(d.contains("backend error: model not loaded"));
 }
+
+// --------------------------------------------------------------------------
+// OpenAI `refusal` fallback (text in `refusal` while `content` is empty).
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_openai_refusal_used_when_content_empty() {
+    let msg_base = serde_json::json!({
+        "content": null,
+        "refusal": "I can't help with that."
+    });
+    assert_eq!(
+        crate::reasoning::openai_content_or_refusal(
+            crate::compat_provider::LlmProvider::OpenAi,
+            &msg_base
+        ),
+        Some("I can't help with that.")
+    );
+}
+
+#[test]
+fn test_openai_content_preferred_over_refusal() {
+    let msg_base = serde_json::json!({
+        "content": "Partial answer",
+        "refusal": "I can't help with that."
+    });
+    assert_eq!(
+        crate::reasoning::openai_content_or_refusal(
+            crate::compat_provider::LlmProvider::OpenAi,
+            &msg_base
+        ),
+        Some("Partial answer")
+    );
+}
+
+#[test]
+fn test_refusal_ignored_outside_openai_provider() {
+    let msg_base = serde_json::json!({ "content": null, "refusal": "I can't help with that." });
+    for provider in [
+        crate::compat_provider::LlmProvider::Ollama,
+        crate::compat_provider::LlmProvider::Anthropic,
+    ] {
+        assert_eq!(
+            crate::reasoning::openai_content_or_refusal(provider, &msg_base),
+            None
+        );
+    }
+}
+
+#[test]
+fn test_empty_refusal_ignored() {
+    let msg_base = serde_json::json!({ "content": null, "refusal": "   " });
+    assert_eq!(
+        crate::reasoning::openai_content_or_refusal(
+            crate::compat_provider::LlmProvider::OpenAi,
+            &msg_base
+        ),
+        None
+    );
+}
