@@ -13,14 +13,14 @@ Reference for extending existing OpenAI/Ollama implementations with Anthropic su
 | Base URL (Official Example) | https://api.openai.com/v1 | http://localhost:11434 | https://api.anthropic.com/v1 |
 | Root Request Fields | messages, model, stream, etc. | messages, model, stream, etc. | messages, model, max_tokens, etc. |
 | Token Limit Parameter | `max_completion_tokens` (legacy: `max_tokens`) | Not required | max_tokens is required |
-| System Prompt | Set as role: "system" inside messages array | Set as role: "system" inside messages array | Set as root-level system: "..." string |
-| Streaming Response Format | SSE with data: {...} events | Line-delimited JSON (NDJSON) | Event-based SSE with events such as message_start and content_block_delta |
+| System Prompt | Set as role: "system" inside messages array (newer o1+/GPT-5 models: role: "developer" preferred) | Set as role: "system" inside messages array | Set as root-level `system` (string, or array of text blocks with cache_control) |
+| Streaming Response Format | SSE with data: {...} events, terminated by data: [DONE] | Line-delimited JSON (NDJSON) | Event-based SSE with events such as message_start and content_block_delta |
 | Tool Call Request Format | `assistant` message with `tool_calls`; `function.arguments` is a JSON string | `assistant` message with `tool_calls`; `function.arguments` is a JSON object | `assistant` message `content` array with a `type: "tool_use"` block; `input` is a JSON object |
 | Tool Call Arguments Type | **JSON String** (escaped string) | **JSON Object** (raw JSON) | **JSON Object** (raw JSON) |
 | Tool Result Format | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Return as a `role: "tool"` message with string `content` | Return as a `role: "user"` message with a `type: "tool_result"` block containing `tool_use_id` and string `content` |
 | Tool Result Content Type | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) |
-| Structured Output Format | `response_format: { type: "json_schema", json_schema: {...} }`<br>Output `content` contains JSON text | `format: "json"` (or JSON Schema)<br>Output `content` contains JSON text | `output_config: { format: { type: "json_schema", json_schema: ... } }`<br>Output `content[].text` contains JSON text |
-| HTTP Headers | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json | Content-Type: application/json, x-api-key, anthropic-version |
+| Structured Output Format | `response_format: { type: "json_schema", json_schema: {...} }`<br>Output `content` contains JSON text | `format: "json"` (or JSON Schema)<br>Output `content` contains JSON text | `output_config: { format: { type: "json_schema", schema: ... } }`<br>Output `content[].text` contains JSON text |
+| HTTP Headers | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json | Content-Type: application/json, x-api-key, anthropic-version: 2023-06-01 |
 
 ### Key Notes
 
@@ -31,7 +31,7 @@ The following implementation details differ significantly across providers and d
 ## Common Behaviors
 
 - Streaming is controlled by the root-level `"stream": true/false` flag.
-- HTTP requests and responses use `Content-Type: application/json`.
+- HTTP request bodies use `Content-Type: application/json`. Streaming *responses* are `text/event-stream` (OpenAI/Anthropic SSE) or plain newline-delimited JSON (Ollama), so the response Content-Type differs from the request.
 
 ## 4 Key Implementation Considerations for Anthropic API (Messages API)
 
@@ -67,7 +67,7 @@ The headers are basically identical, such as Content-Type: application/json. Onl
 {
   "model": "gpt-4o",
   "max_completion_tokens": 1024,
-  "stream": true
+  "stream": true,
   "messages": [
     { "role": "system", "content": "You are a professional programmer." },
     { "role": "user", "content": "Hello!" }
@@ -75,7 +75,7 @@ The headers are basically identical, such as Content-Type: application/json. Onl
 }
 ```
 
-Note: > Use max_completion_tokens to specify the maximum token count. Although max_tokens was used traditionally, only the newer field is implemented here.
+Note: > Use max_completion_tokens to specify the maximum token count. Although max_tokens was used traditionally, only the newer field is implemented here. (Newer reasoning models additionally accept `reasoning_effort`.)
 
 ## Ollama
 
@@ -97,9 +97,9 @@ Note: > Use max_completion_tokens to specify the maximum token count. Although m
 
 ```request body
 {
-  "model": "claude-3-5-sonnet-20241022",
+  "model": "claude-sonnet-5",
   "max_tokens": 1024,
-  "stream": true
+  "stream": true,
   "system": "You are a professional programmer.",
   "messages": [
     { "role": "user", "content": "Hello!" }
@@ -110,8 +110,10 @@ Note: > Use max_completion_tokens to specify the maximum token count. Although m
 Custom HTTP Headers:
 ```
 x-api-key: YOUR_API_KEY
-anthropic-version: 2023-11-01
+anthropic-version: 2023-06-01
 ```
+
+Note: `temperature` / `top_p` / `top_k` are deprecated for models released after Claude Opus 4.6; values other than the defaults are rejected with HTTP 400 on those models.
 
 ## Implementation
 
@@ -126,13 +128,14 @@ Recommended for Code Generation: 2048 to 4096 tokens. (Code consumes a high numb
 # LLM Response (Stream)
 
 - Ollama: Pure newline-delimited JSON (NDJSON format) without any prefixes like data: or event:.
-- OpenAI: Server-Sent Events (SSE) format where each line starts with data: {...} only.
+- OpenAI: Server-Sent Events (SSE) format where each content line starts with `data: {...}`, terminated by a final `data: [DONE]` line.
 - Anthropic: Server-Sent Events (SSE) format where event: lines and data: lines alternate.
 
 ## OpenAI
 
 ```
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}
+data: [DONE]
 ```
 
 ## Ollama
@@ -151,8 +154,9 @@ data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta"
 ## Implementation
 
 Only Anthropic requires event-based parsing:
-1. Read the `event:` line to identify the event type.
-2. Parse the following `data:` line as JSON.
+1. Read the `event:` line to identify the event type (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, `ping`).
+2. Parse the following `data:` line as JSON. Ignore `event: ping` heartbeat events.
+3. Stop reading after `event: message_stop`.
 
 ### Text output
 - When `delta.type == "text_delta"`: Extract generated text from `delta.text`.
@@ -170,7 +174,14 @@ Only Anthropic requires event-based parsing:
 ### Required metadata events
 - `message_start`:　Store `data.usage.input_tokens` for token statistics.
 - `content_block_start`:　Use the `type` field to identify the output mode (`text`, `tool_use`, or `thinking`).
-- `message_delta`:　Store `data.usage.output_tokens` for token statistics.
+- `message_delta`:　Store `data.usage.output_tokens` (cumulative) for token statistics.
+
+### Thinking (extended thinking) stream
+- `content_block_start` with `type: "thinking"` begins a thinking block.
+- `content_block_delta` with `delta.type == "thinking_delta"`: append `delta.thinking` fragments to the block buffer (this is NOT a `text_delta`).
+- A `content_block_delta` with `delta.type == "signature_delta"` delivers `delta.signature` right before `content_block_stop`. Thinking blocks must be sent back unmodified with this signature (a modified block results in HTTP 400).
+- When `thinking.display == "omitted"` (or thinking is safety-redacted), an opaque `type: "redacted_thinking"` block (`data` only) is returned instead; pass it back unchanged.
+- Enable via `thinking: { "type": "enabled", "budget_tokens": N }` (N >= 1024, counts toward `max_tokens`) or `thinking: { "type": "adaptive" }`. Thinking token usage is also reported in `usage.output_tokens_details.thinking_tokens`.
 
 # Tool Calling (Request)
 
@@ -181,7 +192,7 @@ Convert tool definitions to the Anthropic format during initialization.
 
 ```json
 {
-   "model": "claude-sonnet-4-20250514",
+   "model": "claude-sonnet-5",
    "max_tokens": 4096,
    "system": "You are a professional programmer.",
    "messages": [...],
@@ -208,9 +219,11 @@ Convert tool definitions to the Anthropic format during initialization.
 ## OpenAI / Ollama
 
 Tool results are returned as a message with `role: "tool"`.
-```
-{ "role": "tool", "tool_call_id": "call_abc", "content": "..." }
-```
+- OpenAI: the message requires `tool_call_id` to reference the call:
+  ```
+  { "role": "tool", "tool_call_id": "call_abc", "content": "..." }
+  ```
+- Ollama native `/api/chat`: tool calls carry no `id`, so there is no `tool_call_id`; submit `{ "role": "tool", "content": "..." }` and, per the official API, optionally add `tool_name` (the name of the executed tool).
 
 ```Rust
 choices[0].delta.tool_calls: [
@@ -294,26 +307,38 @@ fn detect_provider(url: &str) -> LlmProvider {
 
 # Reasoning & Thinking: Handling & Retention
 
-## OpenAI (o1, o3-mini, ...)
-- receive: `choices[].message.reasoning_content` on OpenAI-compatible reasoning models
-- send back: `reasoning_content` in `role: "assistant"`
+## OpenAI (Official: o-series / GPT-5 family, via Chat Completions)
+- receive: raw reasoning text is **not** exposed by the official API (reasoning tokens are opaque). Only token counts are reported (e.g., `usage.completion_tokens_details.reasoning_tokens`), and there is no reasoning text field to retain or send back.
+- send back: nothing - echo `content` / `tool_calls` as usual (no `reasoning_content` in official responses).
+- on stream: same as non-stream; request per-chunk token usage with `stream_options: { "include_usage": true }` if needed.
+- control: `reasoning_effort` (Chat Completions) / `reasoning: { effort, summary }` (Responses API). Reasoning **summaries** are only available in the Responses API (`reasoning.summary` output items), not in Chat Completions.
+- Caution: OpenAI steers new development to the Responses API; some recent models (e.g., GPT-6 Astra) do not support function calling on Chat Completions.
+
+## OpenAI-compatible third-party reasoning models (DeepSeek-R1 era, Qwen3, Kimi, ...)
+- receive: `choices[].message.reasoning_content`
+- send back: provider-dependent - DeepSeek official guidance: do not send back, except in tool responses (see reference below)
 - on stream: `delta.reasoning_content`
 
-## Ollama (DeepSeek-R1, Qwen3.5 Reasoning, ...)
-- receive: `message.thinking` (`thinking` field completely separated with `content`)
-- send back: `thinking` in `role: "assistant"`
+## Ollama (thinking models: DeepSeek-R1, Qwen3, ...)
+- receive: `message.thinking` on `/api/chat` (`thinking` field, separated from `content`)
+- send back: `thinking` inside the `role: "assistant"` message
+- control: request-level `think` parameter (`true` / `false`, or a level: `"low"`, `"medium"`, `"high"`, `"max"`)
+- note: Ollama's OpenAI-compatible `/v1/chat/completions` endpoint also accepts `reasoning_effort` / `reasoning.effort` for thinking models
 
-## Anthropic(Claude 3.7 Sonnet, ...)
-- receive: `type: "thinking"` and `type: "text"` blocks in `content[]` array
-- send back: the entire `content[]` array (including both thinking and text objects) in `role: "assistant"`
+## Anthropic (Claude 4.5+ / Claude Sonnet 5, ...)
+- receive: `type: "thinking"` and `type: "text"` blocks in the `content[]` array (`type: "redacted_thinking"` when thinking is redacted/omitted)
+- send back: the entire `content[]` array (thinking and text objects, with `signature` intact) in `role: "assistant"` - required when tools are used with extended thinking
+- enable: `thinking: { "type": "enabled", "budget_tokens": N }` (N >= 1024, counted toward `max_tokens`) or `thinking: { "type": "adaptive" }`; in streams, thinking arrives via `thinking_delta` / `signature_delta` events (see the streaming section above)
 
 ## reference
 
-### DeepSeek Official API (DeepSeek-R1, ...)
-- receive: `choices[].message.reasoning_content`
-- send back: do not send back, except in tool responses
+### DeepSeek Official API (current models: deepseek-v4-flash / deepseek-v4-pro)
+- OpenAI-compatible base URL: `https://api.deepseek.com` (OpenAI Chat format)
+- Anthropic-compatible base URL: `https://api.deepseek.com/anthropic` (Messages API format)
+- Reasoning control (OpenAI format example): request params `thinking: { "type": "enabled" }` and `reasoning_effort`
+- Note: legacy DeepSeek-R1-era docs exposed `reasoning_content` (see the OpenAI-compatible section above); the current quickstart centers on the deepseek-v4-* models with the new parameters, so verify against the model/endpoint actually used.
 
-### DeepSeek via Third-party / Ollama Stream (DeepSeek-R1, ...)
+### DeepSeek-R1 via Third-party / Ollama Stream (legacy)
 - receive: inside `<think>...</think>` tags in a single `content` string
 - send back: do not send back (strip `<think>` tags and the inner text from content), except in tool responses
 
