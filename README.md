@@ -25,6 +25,7 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-w, --working-dir <DIR>` | `WORKING_DIR` | Directory where AI tools operate. | `.` |
 | `-u, --llm-url <URL>` | `LLM_URL` | LLM Chat API endpoint. | `http://localhost:11434/api/chat` |
 | `-P, --llm-provider <PROVIDER>` | `LLM_PROVIDER` | LLM API provider (auto-detected from URL if not specified). | (auto) |
+| `--provider-extras <EXTRAS>` | `PROVIDER_EXTRAS` | Extra provider behaviors ("dialects") for gateways (comma-separated or repeated). `opencode` = OpenCode Go session header. | (none) |
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
@@ -52,6 +53,11 @@ Controls which provider-specific API format is used. If not set, the provider is
 - `openai` - OpenAI-compatible API format. Endpoint: `/v1/chat/completions`
 - `ollama` - Ollama API format. Endpoint: `/api/chat`
 - `anthropic` - Anthropic-compatible API format. Endpoint: `/v1/messages` (gratuitously dissimilar).
+
+### Provider Extras (`PROVIDER_EXTRAS`)
+
+Extra provider behaviors ("dialects") for gateways and other non-major LLM providers, applied on top of the base provider format. Comma-separated or repeated.
+- `opencode` - OpenCode Go: sends the `x-opencode-session` header with the stable per-conversation session UUID on every request.
 
 ### Tool Result Format (`TOOL_RESULT_FORMAT`)
 

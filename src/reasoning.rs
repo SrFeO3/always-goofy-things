@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 
 use crate::attach::AttachedFile;
-use crate::compat_provider::{self, LlmProvider, convert_anth_to_openai_format};
+use crate::compat_provider::{self, LlmProvider, ProviderExtra, convert_anth_to_openai_format};
 use crate::compat_resilience;
 use crate::compat_resilience::{extract_msg_base, merge_tool_call_delta, post_process_tool_calls};
 use crate::llm_stats::{CallStatus, LlmCallRecord, LlmRequestInfo, Metrics, format_token_line};
@@ -662,7 +662,7 @@ pub(crate) async fn call_llm(
             )
             .json(req_value);
 
-        if let Some(api_key) = config.llm_api_key.as_deref() {
+        let builder = if let Some(api_key) = config.llm_api_key.as_deref() {
             let masked_key = "****".to_string();
 
             if provider == LlmProvider::Anthropic {
@@ -684,6 +684,24 @@ pub(crate) async fn call_llm(
                 }
                 builder.header("Authorization", format!("Bearer {}", api_key))
             }
+        } else {
+            builder
+        };
+
+        // Extra provider behaviors ("dialects") - see `ProviderExtra`.
+        if config.provider_extra_enabled(ProviderExtra::Opencode)
+            && let Some(sid) = messages
+                .first()
+                .map(|m| m.session_id.as_str())
+                .filter(|s| !s.is_empty())
+        {
+            if settings.verbose_level >= 1 {
+                println!(
+                    "{}[SESSION: x-opencode-session] {}{}",
+                    C_DIM_GRAY, sid, RESET
+                );
+            }
+            builder.header("x-opencode-session", sid)
         } else {
             builder
         }

@@ -17,6 +17,7 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         max_reasoning_empty_responses: 2,
         session_label: "default".to_string(),
         provider: None,
+        provider_extras: Vec::new(),
         tool_result_format: ToolResultFormat::JsonString,
         query: None,
         output_file: None,
@@ -91,6 +92,24 @@ fn only_tools_flag_parses_comma_list_and_repeats() {
 fn only_tools_rejects_unknown_name() {
     let result = Config::try_parse_from(["agt", "--only-tools", "rm_rf"]);
     assert!(result.is_err(), "unknown tool name must fail at parse time");
+}
+
+#[test]
+fn provider_extras_parses_and_enabled_check() {
+    let config = Config::try_parse_from(["agt", "--provider-extras", "opencode"]).unwrap();
+    assert!(config.provider_extra_enabled(ProviderExtra::Opencode));
+
+    let config = Config::try_parse_from(["agt"]).unwrap();
+    assert!(!config.provider_extra_enabled(ProviderExtra::Opencode));
+}
+
+#[test]
+fn provider_extras_rejects_unknown_name() {
+    let result = Config::try_parse_from(["agt", "--provider-extras", "magic"]);
+    assert!(
+        result.is_err(),
+        "unknown provider extra must fail at parse time"
+    );
 }
 
 #[test]

@@ -34,6 +34,14 @@ impl fmt::Display for LlmProvider {
     }
 }
 
+/// Extra provider behaviors ("dialects") for gateways / non-major providers.
+#[derive(Debug, Copy, Clone, PartialEq, clap::ValueEnum)]
+pub enum ProviderExtra {
+    /// OpenCode Go: send `x-opencode-session` with the stable per-conversation
+    /// session UUID (`Session.id`, UUIDv4; empty id => header skipped).
+    Opencode,
+}
+
 #[derive(Serialize)]
 struct OpenAiRequestDto {
     model: String,

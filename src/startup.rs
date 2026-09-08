@@ -8,7 +8,7 @@ use std::env;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
-use crate::compat_provider::LlmProvider;
+use crate::compat_provider::{LlmProvider, ProviderExtra};
 use crate::compat_resilience::ToolResultFormat;
 use crate::tools::ToolName;
 
@@ -147,6 +147,15 @@ pub struct Config {
     #[arg(short = 'P', long, env = "LLM_PROVIDER", value_enum)]
     pub provider: Option<LlmProvider>,
 
+    /// Extra provider behaviors ("dialects") for gateways / non-major
+    /// providers (comma-separated or repeated).
+    #[arg(
+        long = "provider-extras",
+        env = "PROVIDER_EXTRAS",
+        value_delimiter = ','
+    )]
+    pub provider_extras: Vec<ProviderExtra>,
+
     /// How tool results are formatted when sent to the LLM
     #[arg(short = 'R', long, env = "TOOL_RESULT_FORMAT", value_enum, default_value_t = ToolResultFormat::JsonString)]
     pub tool_result_format: ToolResultFormat,
@@ -232,6 +241,11 @@ impl Config {
     /// `--only-tools` unset means all tools are enabled (previous behavior).
     pub fn is_tool_enabled(&self, name: &str) -> bool {
         self.only_tools.is_empty() || self.only_tools.iter().any(|t| t.as_str() == name)
+    }
+
+    /// Whether an extra provider behavior ("dialect") is enabled.
+    pub fn provider_extra_enabled(&self, extra: ProviderExtra) -> bool {
+        self.provider_extras.contains(&extra)
     }
 }
 
