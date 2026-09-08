@@ -111,9 +111,14 @@ fn openai_content_or_refusal(provider: LlmProvider, msg_base: &serde_json::Value
     None
 }
 
-/// Ollama native streams end with a `done: true` object (OpenAI uses `[DONE]`).
-fn is_ollama_stream_end(provider: LlmProvider, json: &serde_json::Value) -> bool {
-    provider == LlmProvider::Ollama && json.get("done") == Some(&serde_json::Value::Bool(true))
+/// Terminal event per provider: Ollama native sends `done: true`, Anthropic
+/// sends `message_stop`; OpenAI's `data: [DONE]` is handled inline.
+fn is_provider_stream_end(provider: LlmProvider, json: &serde_json::Value) -> bool {
+    match provider {
+        LlmProvider::Ollama => json.get("done") == Some(&serde_json::Value::Bool(true)),
+        LlmProvider::Anthropic => json.get("type").and_then(|v| v.as_str()) == Some("message_stop"),
+        LlmProvider::OpenAi => false,
+    }
 }
 
 /// Compact diagnostics for an empty response: finish reason, missing [DONE]
@@ -700,7 +705,7 @@ pub(crate) async fn call_llm(
                 }
                 builder
                     .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-11-01")
+                    .header("anthropic-version", "2023-06-01")
             } else {
                 if settings.verbose_level >= 1 {
                     println!(
@@ -884,7 +889,7 @@ pub(crate) async fn call_llm(
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
 
                 // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
-                if is_ollama_stream_end(provider, &json) {
+                if is_provider_stream_end(provider, &json) {
                     done_seen = true;
                 }
                 let msg_base = extract_msg_base(&json);
@@ -990,7 +995,7 @@ pub(crate) async fn call_llm(
                     println!("\x1b[91m[Backend Error] {}\x1b[0m", msg);
                 }
 
-                if is_ollama_stream_end(provider, &json) {
+                if is_provider_stream_end(provider, &json) {
                     done_seen = true;
                 }
 

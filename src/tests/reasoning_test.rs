@@ -248,3 +248,35 @@ fn test_empty_refusal_ignored() {
         None
     );
 }
+
+#[test]
+fn test_provider_stream_end_detection() {
+    let done_true = serde_json::json!({ "done": true, "done_reason": "stop" });
+    let done_false = serde_json::json!({ "done": false });
+    assert!(crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::Ollama,
+        &done_true
+    ));
+    assert!(!crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::Ollama,
+        &done_false
+    ));
+
+    let stop = serde_json::json!({ "type": "message_stop" });
+    let delta =
+        serde_json::json!({ "type": "content_block_delta", "delta": { "type": "text_delta" } });
+    assert!(crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::Anthropic,
+        &stop
+    ));
+    assert!(!crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::Anthropic,
+        &delta
+    ));
+
+    // OpenAI ends via the inline `data: [DONE]` handling.
+    assert!(!crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::OpenAi,
+        &done_true
+    ));
+}

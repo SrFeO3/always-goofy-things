@@ -610,3 +610,58 @@ fn test_ollama_assistant_without_reasoning_untouched() {
     assert!(result[0].get("thinking").is_none());
     assert!(result[0].get("reasoning_content").is_none());
 }
+
+// ------------------------------------------------------------------
+// Anthropic: tool defs, tool results, provider detection.
+// ------------------------------------------------------------------
+
+#[test]
+fn test_anthropic_tool_definition_description_optional() {
+    let tools = vec![
+        json!({ "type": "function", "function": { "name": "no_desc", "parameters": { "type": "object" } } }),
+        json!({ "type": "function", "function": { "name": "with_desc", "description": "d", "parameters": { "type": "object" } } }),
+        json!({ "type": "function", "function": { "name": "no_params" } }), // dropped
+    ];
+    let result = convert_tools_to_anthropic(&tools);
+    assert_eq!(result.len(), 2);
+    assert!(result[0].get("description").is_none());
+    assert_eq!(result[0]["name"], "no_desc");
+    assert_eq!(result[1]["description"], "d");
+}
+
+#[test]
+fn test_anthropic_tool_result_object_stringified() {
+    let msg = json!({
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": { "stdout": "ok", "exit_code": 0 }
+    });
+    let result = convert_message_for_anthropic(&msg);
+    let block = &result["content"][0];
+    assert_eq!(block["type"], "tool_result");
+    assert_eq!(block["content"], r#"{"exit_code":0,"stdout":"ok"}"#);
+}
+
+#[test]
+fn test_detect_provider_routes_deepseek_anthropic_endpoint() {
+    assert_eq!(
+        detect_provider("https://api.deepseek.com/anthropic"),
+        LlmProvider::Anthropic
+    );
+    assert_eq!(
+        detect_provider("https://api.anthropic.com/v1/messages"),
+        LlmProvider::Anthropic
+    );
+    assert_eq!(
+        detect_provider("http://localhost:11434/api/chat"),
+        LlmProvider::Ollama
+    );
+    assert_eq!(
+        detect_provider("https://api.openai.com/v1/chat/completions"),
+        LlmProvider::OpenAi
+    );
+    assert_eq!(
+        detect_provider("https://api.deepseek.com"),
+        LlmProvider::OpenAi
+    );
+}

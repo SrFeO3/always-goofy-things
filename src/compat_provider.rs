@@ -95,7 +95,10 @@ struct AnthropicRequestDto {
 pub fn detect_provider(url: &str) -> LlmProvider {
     let url_lower = url.to_lowercase();
 
-    if url_lower.contains("api.anthropic.com") || url_lower.contains("/v1/messages") {
+    if url_lower.contains("api.anthropic.com")
+        || url_lower.contains("/anthropic") // e.g. DeepSeek's Anthropic-compatible base
+        || url_lower.contains("/v1/messages")
+    {
         return LlmProvider::Anthropic;
     }
 
@@ -609,13 +612,18 @@ fn convert_tools_to_anthropic(tools: &[serde_json::Value]) -> Vec<serde_json::Va
         .filter_map(|t| {
             let func = t.get("function")?;
             let name = func.get("name")?.as_str()?.to_string();
-            let description = func.get("description")?.as_str()?.to_string();
             let parameters = func.get("parameters")?.clone();
-            Some(json!({
-                "name": name,
-                "description": description,
-                "input_schema": parameters
-            }))
+            let mut tool = serde_json::Map::new();
+            if let Some(description) = func
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                tool.insert("description".to_string(), json!(description));
+            }
+            tool.insert("name".to_string(), json!(name));
+            tool.insert("input_schema".to_string(), parameters);
+            Some(serde_json::Value::Object(tool))
         })
         .collect()
 }
@@ -650,7 +658,15 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
             .get("tool_call_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let content = msg.get("content").cloned().unwrap_or_else(|| json!(""));
+        // `tool_result.content` accepts a string (or block array); a structured
+        // result object is sent back as JSON text.
+        let content = match msg.get("content") {
+            Some(serde_json::Value::String(s)) => json!(s),
+            Some(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+                json!(v.to_string())
+            }
+            _ => json!(""),
+        };
         json!({
             "role": "user",
             "content": [
