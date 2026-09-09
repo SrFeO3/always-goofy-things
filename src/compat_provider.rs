@@ -508,7 +508,7 @@ fn convert_messages_for_openai(
 /// |-------------------------------------|--------------------------------------------------------|
 /// | `role: "system"`                   | root-level `instructions` (handled by the caller)      |
 /// | `role: "user"` (string or blocks)  | `{ role: "user", content: [input_text/input_image/...] }` |
-/// | `role: "assistant"` (text)         | `{ role: "assistant", content: [input_text] }`        |
+/// | `role: "assistant"` (text)         | `{ role: "assistant", content: [output_text] }`       |
 /// | `role: "assistant"` + `tool_calls` | `{ type: "function_call", call_id, name, arguments }` |
 /// | `role: "tool"`                     | `{ type: "function_call_output", call_id, output }`   |
 fn convert_messages_for_openai_responses(
@@ -546,7 +546,7 @@ fn convert_messages_for_openai_responses(
                 {
                     items.push(json!({
                         "role": "assistant",
-                        "content": [openai_responses_text_block(&json!(text))]
+                        "content": [openai_responses_output_text_block(&json!(text))]
                     }));
                 }
                 // assistant.tool_calls -> function_call input items
@@ -617,6 +617,12 @@ fn convert_messages_for_openai_responses(
 /// Wrap an arbitrary JSON value as an OpenAI Responses API `input_text` content block.
 fn openai_responses_text_block(v: &serde_json::Value) -> serde_json::Value {
     json!({ "type": "input_text", "text": v.as_str().unwrap_or("") })
+}
+
+/// Wrap an arbitrary JSON value as an OpenAI Responses API `output_text` content block.
+/// Used for assistant messages in conversation history.
+fn openai_responses_output_text_block(v: &serde_json::Value) -> serde_json::Value {
+    json!({ "type": "output_text", "text": v.as_str().unwrap_or("") })
 }
 
 /// Convert one Chat Completions content block to its OpenAI Responses API

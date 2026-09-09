@@ -663,6 +663,7 @@ fn test_openai_responses_round_trips_tool_conversation_into_input_items() {
     assert_eq!(items[4]["call_id"], "call_2");
 
     assert_eq!(items[5]["role"], "assistant");
+    assert_eq!(items[5]["content"][0]["type"], "output_text");
     assert_eq!(items[5]["content"][0]["text"], "done");
 }
 
