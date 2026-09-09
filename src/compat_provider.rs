@@ -2,8 +2,9 @@
 //!
 //! Handles provider-specific request payload formatting and protocol translation.
 //! This module manages URL-based provider detection, request DTO definitions, wire-format conversions
-//! (including Anthropic's streaming SSE), and tool-definition translation. It also formats message contents,
-//! such as tool result rendering, to match each provider's expected protocol format.
+//! (including Anthropic's and the OpenAI Responses API's event-based SSE), and tool-definition
+//! translation. It also formats message contents, such as tool result rendering, to match each
+//! provider's expected protocol format.
 
 use std::fmt;
 
@@ -19,6 +20,7 @@ use crate::model::{ChatRequest, Message, Usage};
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, clap::ValueEnum)]
 pub enum LlmProvider {
     OpenAi,
+    OpenAiResponses,
     Ollama,
     Anthropic,
 }
@@ -27,6 +29,7 @@ impl fmt::Display for LlmProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             LlmProvider::OpenAi => "openai",
+            LlmProvider::OpenAiResponses => "openai-responses",
             LlmProvider::Ollama => "ollama",
             LlmProvider::Anthropic => "anthropic",
         };
@@ -55,6 +58,18 @@ struct OpenAiRequestDto {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct OpenAiResponsesRequestDto {
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    input: Vec<serde_json::Value>,
+    max_output_tokens: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<serde_json::Value>,
+    stream: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -106,6 +121,10 @@ pub fn detect_provider(url: &str) -> LlmProvider {
         return LlmProvider::Ollama;
     }
 
+    if url_lower.contains("/v1/responses") {
+        return LlmProvider::OpenAiResponses;
+    }
+
     if url_lower.contains("api.openai.com") {
         return LlmProvider::OpenAi;
     }
@@ -144,6 +163,27 @@ impl ChatRequest {
                     } else {
                         None
                     },
+                };
+                serde_json::to_value(dto)
+            }
+
+            LlmProvider::OpenAiResponses => {
+                let system_content = self
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "system")
+                    .map(|m| m.content.clone());
+
+                let input = convert_messages_for_openai_responses(messages);
+                let openai_responses_tools = convert_tools_to_openai_responses(&self.tools);
+
+                let dto = OpenAiResponsesRequestDto {
+                    model: self.model.clone(),
+                    instructions: system_content,
+                    input,
+                    max_output_tokens: self.max_output_tokens,
+                    tools: openai_responses_tools,
+                    stream: self.stream,
                 };
                 serde_json::to_value(dto)
             }
@@ -459,6 +499,167 @@ fn convert_messages_for_openai(
     messages_json
 }
 
+/// Convert Chat Completions-style messages into OpenAI Responses API `input` items.
+///
+/// The OpenAI Responses API has no `messages` array; a conversation is rebuilt
+/// as typed `input` items:
+///
+/// | Chat Completions                    | Responses API `input` items                            |
+/// |-------------------------------------|--------------------------------------------------------|
+/// | `role: "system"`                   | root-level `instructions` (handled by the caller)      |
+/// | `role: "user"` (string or blocks)  | `{ role: "user", content: [input_text/input_image/...] }` |
+/// | `role: "assistant"` (text)         | `{ role: "assistant", content: [input_text] }`        |
+/// | `role: "assistant"` + `tool_calls` | `{ type: "function_call", call_id, name, arguments }` |
+/// | `role: "tool"`                     | `{ type: "function_call_output", call_id, output }`   |
+fn convert_messages_for_openai_responses(
+    messages: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    // call_ids of function_call items that still await their function_call_output.
+    let mut pending_calls: Vec<String> = Vec::new();
+    let mut synth_id = 0usize;
+
+    for msg in messages {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        match role {
+            // role: "system" -> root-level `instructions` (see to_provider_json)
+            "system" => {}
+            "user" => {
+                let mut blocks: Vec<serde_json::Value> = match msg.get("content") {
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .map(openai_responses_input_content_block)
+                        .collect(),
+                    Some(v) => vec![openai_responses_text_block(v)],
+                    None => Vec::new(),
+                };
+                if blocks.is_empty() {
+                    blocks.push(openai_responses_text_block(&serde_json::Value::Null));
+                }
+                items.push(json!({ "role": "user", "content": blocks }));
+            }
+            "assistant" => {
+                if let Some(text) = msg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    items.push(json!({
+                        "role": "assistant",
+                        "content": [openai_responses_text_block(&json!(text))]
+                    }));
+                }
+                // assistant.tool_calls -> function_call input items
+                if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                    for tc in tool_calls {
+                        let id = tc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                synth_id += 1;
+                                format!("call_openai_responses_{}", synth_id)
+                            });
+                        if let Some(func) = tc.get("function") {
+                            let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let arguments = match func.get("arguments") {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(v) => v.to_string(),
+                                None => String::new(),
+                            };
+                            items.push(json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": arguments
+                            }));
+                            pending_calls.push(id);
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                // Prefer the recorded tool_call_id; fall back to the next
+                // unmatched function_call item in conversation order.
+                let call_id = msg
+                    .get("tool_call_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| pending_calls.first().cloned())
+                    .unwrap_or_else(|| {
+                        synth_id += 1;
+                        format!("call_openai_responses_{}", synth_id)
+                    });
+                if let Some(pos) = pending_calls.iter().position(|c| *c == call_id) {
+                    pending_calls.remove(pos);
+                }
+                // `function_call_output.output` must be a string (JSON text ok).
+                let output = match msg.get("content") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                };
+                items.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output
+                }));
+            }
+            // Unknown roles are dropped (Responses has no such roles).
+            _ => {}
+        }
+    }
+    items
+}
+
+/// Wrap an arbitrary JSON value as an OpenAI Responses API `input_text` content block.
+fn openai_responses_text_block(v: &serde_json::Value) -> serde_json::Value {
+    json!({ "type": "input_text", "text": v.as_str().unwrap_or("") })
+}
+
+/// Convert one Chat Completions content block to its OpenAI Responses API
+/// equivalent (`input_text` / `input_image` / `input_file` / `input_audio`).
+fn openai_responses_input_content_block(block: &serde_json::Value) -> serde_json::Value {
+    match block.get("type").and_then(|v| v.as_str()) {
+        Some("text") => json!({
+            "type": "input_text",
+            "text": block.get("text").and_then(|v| v.as_str()).unwrap_or("")
+        }),
+        Some("image_url") => json!({
+            "type": "input_image",
+            "image_url": block
+                .get("image_url")
+                .and_then(|v| v.get("url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        }),
+        Some("document") => json!({
+            "type": "input_file",
+            "file_data": block
+                .get("source")
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        }),
+        // Chat Completions file block: file.file_data is a data: URL.
+        Some("file") => {
+            let file_data = block
+                .get("file")
+                .and_then(|v| v.get("file_data"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let base64 = crate::file::parse_data_url(file_data)
+                .map(|(_, data)| data.to_string())
+                .unwrap_or_else(|| file_data.to_string());
+            json!({ "type": "input_file", "file_data": base64 })
+        }
+        // input_audio has the same shape on both APIs.
+        _ => block.clone(),
+    }
+}
+
 /// Merge consecutive tool-result-only user messages into one.
 ///
 /// `run_reasoning_loop` pushes one `role:"tool"` message per tool call, and
@@ -601,6 +802,34 @@ fn render_tool_text(result: &Value, tool_name: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Convert OpenAI Chat-style tool definitions to the OpenAI Responses API shape.
+/// OpenAI Chat: { type: "function", function: { name, description, parameters } }
+/// Responses:   { type: "function", name, description, parameters }
+fn convert_tools_to_openai_responses(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            let func = t.get("function")?;
+            let name = func.get("name")?.as_str()?.to_string();
+            let parameters = func.get("parameters").cloned();
+            let mut tool = serde_json::Map::new();
+            tool.insert("type".to_string(), json!("function"));
+            if let Some(description) = func
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                tool.insert("description".to_string(), json!(description));
+            }
+            tool.insert("name".to_string(), json!(name));
+            if let Some(parameters) = parameters {
+                tool.insert("parameters".to_string(), parameters);
+            }
+            Some(serde_json::Value::Object(tool))
+        })
+        .collect()
 }
 
 /// Convert OpenAI-style tool definitions to Anthropic-style.
@@ -949,6 +1178,143 @@ pub fn convert_anth_to_openai_format(
         return json!({
             "usage": { "prompt_tokens": 0, "completion_tokens": output_tokens }
         });
+    }
+
+    json!({})
+}
+
+/// Converts one OpenAI Responses API stream event into the internal OpenAI
+/// Chat Completions delta format (`choices[0].delta.{content,reasoning_content,tool_calls}`)
+/// used by the rest of the pipeline (mirrors [`convert_anth_to_openai_format`]).
+///
+/// OpenAI Responses streams are event-based: each `data:` payload carries a
+/// `type` discriminator. Tool-call `arguments` are delivered as one complete
+/// JSON string on `response.output_item.done` (whose `output_index` matches the
+/// earlier `response.output_item.added`), so no cross-event state is required.
+pub fn convert_openai_responses_event_to_openai_format(
+    event: serde_json::Value,
+) -> serde_json::Value {
+    let event_type = event.get("type").and_then(|v| v.as_str());
+    match event_type {
+        // 1. text chunks (output_text, or refusal surfaced as text)
+        Some("response.output_text.delta" | "response.refusal.delta") => {
+            if let Some(text) = event.get("delta").and_then(|v| v.as_str()) {
+                return json!({ "choices": [{ "delta": { "content": text } }] });
+            }
+        }
+        // 2. reasoning chunks (readable summary or raw reasoning text)
+        Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
+            if let Some(text) = event.get("delta").and_then(|v| v.as_str()) {
+                return json!({ "choices": [{ "delta": { "reasoning_content": text } }] });
+            }
+        }
+        // 3. tool call start: id + name (arguments stream separately)
+        Some("response.output_item.added") => {
+            let item = event.get("item");
+            if item.and_then(|v| v.get("type")).and_then(|v| v.as_str()) == Some("function_call") {
+                let index = event
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let id = item
+                    .and_then(|v| v.get("call_id"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.and_then(|v| v.get("id")).and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let name = item
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                return json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": index,
+                                "id": id,
+                                "function": { "name": name, "arguments": "" }
+                            }]
+                        }
+                    }]
+                });
+            }
+        }
+        // 4. tool call completion: complete `arguments` JSON string
+        Some("response.output_item.done") => {
+            let item = event.get("item");
+            if item.and_then(|v| v.get("type")).and_then(|v| v.as_str()) == Some("function_call") {
+                let index = event
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let arguments = item
+                    .and_then(|v| v.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                return json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": index,
+                                "function": { "arguments": arguments }
+                            }]
+                        }
+                    }]
+                });
+            }
+        }
+        // 5. final events: map `response.status` to the internal finish_reason
+        //    and (for `response.completed`) `response.usage` to the internal
+        //    usage shape. `response.incomplete` is the abnormal terminal
+        //    event: no usage, but `incomplete_details.reason` says why.
+        Some("response.completed" | "response.incomplete") => {
+            let status = event
+                .get("response")
+                .and_then(|r| r.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed");
+            let reason = event
+                .get("response")
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let finish_reason = if reason.is_empty() {
+                format!("{} (responses)", status)
+            } else {
+                format!("{} (responses: {})", status, reason)
+            };
+            let mut converted = json!({
+                "choices": [{ "finish_reason": finish_reason }]
+            });
+            if let Some(usage) = event.get("response").and_then(|r| r.get("usage")) {
+                let input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cached_tokens = usage
+                    .get("input_tokens_details")
+                    .and_then(|v| v.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let reasoning_tokens = usage
+                    .get("output_tokens_details")
+                    .and_then(|v| v.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                converted["usage"] = json!({
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "prompt_tokens_details": { "cached_tokens": cached_tokens },
+                    "completion_tokens_details": { "reasoning_tokens": reasoning_tokens }
+                });
+            }
+            return converted;
+        }
+        _ => {}
     }
 
     json!({})

@@ -226,6 +226,11 @@ fn test_golden_provider_payloads() {
         "golden mismatch for OpenAi"
     );
     assert_eq!(
+        request_json(LlmProvider::OpenAiResponses),
+        include_str!("fixtures/openai_responses_request.json").trim(),
+        "golden mismatch for OpenAiResponses"
+    );
+    assert_eq!(
         request_json(LlmProvider::Ollama),
         include_str!("fixtures/ollama_request.json").trim(),
         "golden mismatch for Ollama"
@@ -243,6 +248,7 @@ fn test_golden_provider_payloads() {
 fn test_request_payload_has_no_measurement_junk() {
     for provider in [
         LlmProvider::OpenAi,
+        LlmProvider::OpenAiResponses,
         LlmProvider::Ollama,
         LlmProvider::Anthropic,
     ] {
@@ -291,6 +297,7 @@ fn test_request_payload_has_no_measurement_junk() {
 fn test_golden_payloads_unchanged_when_session_id_set() {
     for provider in [
         LlmProvider::OpenAi,
+        LlmProvider::OpenAiResponses,
         LlmProvider::Ollama,
         LlmProvider::Anthropic,
     ] {
@@ -301,6 +308,7 @@ fn test_golden_payloads_unchanged_when_session_id_set() {
         let text = serde_json::to_string(&req.to_provider_json().unwrap()).unwrap();
         let expected = match provider {
             LlmProvider::OpenAi => include_str!("fixtures/openai_request.json"),
+            LlmProvider::OpenAiResponses => include_str!("fixtures/openai_responses_request.json"),
             LlmProvider::Ollama => include_str!("fixtures/ollama_request.json"),
             LlmProvider::Anthropic => include_str!("fixtures/anthropic_request.json"),
         };
@@ -320,6 +328,7 @@ fn test_session_id_never_reaches_provider_payload() {
     let uuid = "550e8400-e29b-41d4-a716-446655440000";
     for provider in [
         LlmProvider::OpenAi,
+        LlmProvider::OpenAiResponses,
         LlmProvider::Ollama,
         LlmProvider::Anthropic,
     ] {
@@ -612,6 +621,281 @@ fn test_ollama_assistant_without_reasoning_untouched() {
 }
 
 // ------------------------------------------------------------------
+// OpenAI Responses API: conversation -> input items, tools, stream events
+// ------------------------------------------------------------------
+
+#[test]
+fn test_openai_responses_round_trips_tool_conversation_into_input_items() {
+    let msgs = vec![
+        json!({ "role": "system", "content": "sys" }),
+        json!({ "role": "user", "content": "list both dirs" }),
+        json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                { "id": "call_1", "type": "function", "function": { "name": "list_directory", "arguments": { "path": "a" } } },
+                { "id": "call_2", "type": "function", "function": { "name": "list_directory", "arguments": { "path": "b" } } }
+            ]
+        }),
+        json!({ "role": "tool", "tool_call_id": "call_1", "content": "{\"entries\":[]}" }),
+        json!({ "role": "tool", "tool_call_id": "call_2", "content": "{\"entries\":[]}" }),
+        json!({ "role": "assistant", "content": "done" }),
+    ];
+    let items = convert_messages_for_openai_responses(msgs);
+
+    // system dropped, everything else becomes an input item in order:
+    // user, function_call x2, function_call_output x2, assistant text
+    assert_eq!(items.len(), 6);
+    assert_eq!(items[0]["role"], "user");
+    assert_eq!(items[0]["content"][0]["type"], "input_text");
+
+    assert_eq!(items[1]["type"], "function_call");
+    assert_eq!(items[1]["call_id"], "call_1");
+    assert_eq!(items[1]["name"], "list_directory");
+    assert_eq!(items[1]["arguments"], "{\"path\":\"a\"}");
+    assert_eq!(items[2]["type"], "function_call");
+    assert_eq!(items[2]["call_id"], "call_2");
+
+    assert_eq!(items[3]["type"], "function_call_output");
+    assert_eq!(items[3]["call_id"], "call_1");
+    assert_eq!(items[3]["output"], "{\"entries\":[]}");
+    assert_eq!(items[4]["type"], "function_call_output");
+    assert_eq!(items[4]["call_id"], "call_2");
+
+    assert_eq!(items[5]["role"], "assistant");
+    assert_eq!(items[5]["content"][0]["text"], "done");
+}
+
+#[test]
+fn test_openai_responses_synthesizes_call_ids_when_missing() {
+    let msgs = vec![
+        json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{ "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"a.txt\"}" } }]
+        }),
+        json!({ "role": "tool", "content": "\"ok\"" }),
+    ];
+    let items = convert_messages_for_openai_responses(msgs);
+    assert_eq!(items[0]["type"], "function_call");
+    assert_eq!(items[0]["call_id"], "call_openai_responses_1");
+    // Empty tool_call_id falls back to the pending call's synthesized id.
+    assert_eq!(items[1]["type"], "function_call_output");
+    assert_eq!(items[1]["call_id"], "call_openai_responses_1");
+    assert_eq!(items[1]["output"], "\"ok\"");
+}
+
+#[test]
+fn test_openai_responses_user_content_blocks_converted() {
+    let msgs = vec![json!({
+        "role": "user",
+        "content": [
+            { "type": "text", "text": "Describe" },
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,ABC123" } },
+            { "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": "PDF123" } },
+            { "type": "file", "file": { "file_data": "data:application/pdf;base64,FILE456" } }
+        ]
+    })];
+    let items = convert_messages_for_openai_responses(msgs);
+    let blocks = items[0]["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "input_text");
+    assert_eq!(blocks[0]["text"], "Describe");
+    assert_eq!(blocks[1]["type"], "input_image");
+    assert_eq!(blocks[1]["image_url"], "data:image/png;base64,ABC123");
+    assert_eq!(blocks[2]["type"], "input_file");
+    assert_eq!(blocks[2]["file_data"], "PDF123");
+    // data: URL prefix is stripped for Responses `file_data`.
+    assert_eq!(blocks[3]["type"], "input_file");
+    assert_eq!(blocks[3]["file_data"], "FILE456");
+}
+
+#[test]
+fn test_openai_responses_tool_definition_flattened() {
+    let tools = vec![
+        json!({ "type": "function", "function": { "name": "read_file", "description": "Read a file", "parameters": { "type": "object", "properties": { "path": { "type": "string" } } } } }),
+        json!({ "type": "function", "function": { "name": "no_desc", "parameters": { "type": "object" } } }),
+    ];
+    let result = convert_tools_to_openai_responses(&tools);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["type"], "function");
+    assert_eq!(result[0]["name"], "read_file");
+    assert_eq!(result[0]["description"], "Read a file");
+    assert_eq!(result[0]["parameters"]["type"], "object");
+    assert!(result[0].get("function").is_none());
+    assert!(result[1].get("description").is_none());
+}
+
+#[test]
+fn test_openai_responses_stream_text_and_reasoning_events() {
+    let text = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.output_text.delta",
+        "delta": "Hello"
+    }));
+    assert_eq!(text["choices"][0]["delta"]["content"], "Hello");
+
+    // Refusals are surfaced as text, mirroring the Chat Completions fallback.
+    let refusal = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.refusal.delta",
+        "delta": "I cannot help with that."
+    }));
+    assert_eq!(
+        refusal["choices"][0]["delta"]["content"],
+        "I cannot help with that."
+    );
+
+    let reasoning = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.reasoning_summary_text.delta",
+        "delta": "thinking..."
+    }));
+    assert_eq!(
+        reasoning["choices"][0]["delta"]["reasoning_content"],
+        "thinking..."
+    );
+
+    let raw = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.reasoning_text.delta",
+        "delta": "raw..."
+    }));
+    assert_eq!(raw["choices"][0]["delta"]["reasoning_content"], "raw...");
+
+    // Irrelevant events are ignored (empty object, like other providers).
+    let ignored =
+        convert_openai_responses_event_to_openai_format(json!({ "type": "response.created" }));
+    assert!(ignored.as_object().unwrap().is_empty());
+}
+
+#[test]
+fn test_openai_responses_stream_function_call_items() {
+    let added = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": { "type": "function_call", "call_id": "call_abc", "name": "read_file", "arguments": "" }
+    }));
+    assert_eq!(added["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+    assert_eq!(
+        added["choices"][0]["delta"]["tool_calls"][0]["id"],
+        "call_abc"
+    );
+    assert_eq!(
+        added["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+        "read_file"
+    );
+
+    let done = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "function_call",
+            "call_id": "call_abc",
+            "name": "read_file",
+            "arguments": "{\"path\":\"src/main.rs\"}"
+        }
+    }));
+    assert_eq!(
+        done["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+        "{\"path\":\"src/main.rs\"}"
+    );
+
+    // Message items (already streamed as deltas) are not re-emitted.
+    let msg_done = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.output_item.done",
+        "output_index": 1,
+        "item": { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "full" }] }
+    }));
+    assert!(msg_done.as_object().unwrap().is_empty());
+}
+
+#[test]
+fn test_openai_responses_stream_completed_maps_usage() {
+    let completed = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_123",
+            "status": "completed",
+            "usage": {
+                "input_tokens": 100,
+                "input_tokens_details": { "cached_tokens": 40, "cache_write_tokens": 0 },
+                "output_tokens": 30,
+                "output_tokens_details": { "reasoning_tokens": 12 },
+                "total_tokens": 130
+            }
+        }
+    }));
+    assert_eq!(completed["usage"]["prompt_tokens"], 100);
+    assert_eq!(completed["usage"]["completion_tokens"], 30);
+    assert_eq!(
+        completed["usage"]["prompt_tokens_details"]["cached_tokens"],
+        40
+    );
+    assert_eq!(
+        completed["usage"]["completion_tokens_details"]["reasoning_tokens"],
+        12
+    );
+    // The terminal event also maps `response.status` to the internal
+    // finish_reason (for the empty-response diagnostics).
+    assert_eq!(
+        completed["choices"][0]["finish_reason"],
+        "completed (responses)"
+    );
+
+    // No usage payload: still emit the finish_reason, no usage object.
+    let no_usage = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.completed",
+        "response": { "id": "resp_123", "status": "completed" }
+    }));
+    assert_eq!(
+        no_usage["choices"][0]["finish_reason"],
+        "completed (responses)"
+    );
+    assert!(no_usage.get("usage").is_none());
+}
+
+#[test]
+fn test_openai_responses_stream_incomplete_maps_finish_reason() {
+    // `response.incomplete` is the abnormal terminal event: no usage, but the
+    // incomplete_details.reason explains why generation stopped.
+    let incomplete = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.incomplete",
+        "response": {
+            "id": "resp_123",
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" }
+        }
+    }));
+    assert_eq!(
+        incomplete["choices"][0]["finish_reason"],
+        "incomplete (responses: max_output_tokens)"
+    );
+    assert!(incomplete.get("usage").is_none());
+}
+
+#[test]
+fn test_openai_responses_accumulates_usage_through_pipeline() {
+    // The converter output feeds straight into accumulate_usage.
+    let completed = convert_openai_responses_event_to_openai_format(json!({
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 7,
+                "output_tokens_details": { "reasoning_tokens": 2 }
+            }
+        }
+    }));
+    let mut usage: Option<crate::model::Usage> = None;
+    accumulate_usage(&completed, &mut usage);
+    let u = usage.expect("usage captured");
+    assert_eq!(u.prompt_tokens, 5);
+    assert_eq!(u.completion_tokens, 7);
+    assert_eq!(
+        u.completion_tokens_details
+            .expect("reasoning details")
+            .reasoning_tokens,
+        2
+    );
+}
+
+// ------------------------------------------------------------------
 // Anthropic: tool defs, tool results, provider detection.
 // ------------------------------------------------------------------
 
@@ -659,6 +943,10 @@ fn test_detect_provider_routes_deepseek_anthropic_endpoint() {
     assert_eq!(
         detect_provider("https://api.openai.com/v1/chat/completions"),
         LlmProvider::OpenAi
+    );
+    assert_eq!(
+        detect_provider("https://api.openai.com/v1/responses"),
+        LlmProvider::OpenAiResponses
     );
     assert_eq!(
         detect_provider("https://api.deepseek.com"),

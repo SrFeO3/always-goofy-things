@@ -1,0 +1,1 @@
+{"input":[{"content":[{"text":"Hello","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant.","max_output_tokens":100,"model":"gpt-4o","stream":true,"tools":[{"description":"Read a file","name":"read_file","parameters":{"properties":{"path":{"type":"string"}},"type":"object"},"type":"function"}]}

@@ -112,24 +112,44 @@ fn openai_content_or_refusal(provider: LlmProvider, msg_base: &serde_json::Value
 }
 
 /// Terminal event per provider: Ollama native sends `done: true`, Anthropic
-/// sends `message_stop`; OpenAI's `data: [DONE]` is handled inline.
+/// sends `message_stop`, OpenAI Responses sends `response.completed` (or
+/// `response.incomplete` when generation ended abnormally); OpenAI Chat's
+/// `data: [DONE]` is handled inline.
 fn is_provider_stream_end(provider: LlmProvider, json: &serde_json::Value) -> bool {
     match provider {
+        LlmProvider::OpenAiResponses => matches!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("response.completed" | "response.incomplete")
+        ),
         LlmProvider::Ollama => json.get("done") == Some(&serde_json::Value::Bool(true)),
         LlmProvider::Anthropic => json.get("type").and_then(|v| v.as_str()) == Some("message_stop"),
         LlmProvider::OpenAi => false,
     }
 }
 
-/// Compact diagnostics for an empty response: finish reason, missing [DONE]
-/// terminator, and skipped malformed lines. Empty when cleanly empty.
-fn empty_response_diag(ri: &LlmRequestInfo) -> String {
+/// Human-readable name of each provider's normal stream-terminating event,
+/// used in diagnostics when a stream ends without it.
+fn provider_stream_end_name(provider: LlmProvider) -> &'static str {
+    match provider {
+        LlmProvider::OpenAi => "[DONE]",
+        LlmProvider::OpenAiResponses => "response.completed",
+        LlmProvider::Ollama => "done: true",
+        LlmProvider::Anthropic => "message_stop",
+    }
+}
+
+/// Compact diagnostics for an empty response: finish reason, missing
+/// provider terminal event, and skipped malformed lines. Empty when cleanly empty.
+fn empty_response_diag(ri: &LlmRequestInfo, provider: LlmProvider) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(fr) = &ri.finish_reason {
         parts.push(format!("finish_reason={}", fr));
     }
     if !ri.done_seen {
-        parts.push("stream ended without [DONE]".to_string());
+        parts.push(format!(
+            "stream ended without {}",
+            provider_stream_end_name(provider)
+        ));
     }
     if ri.sse_parse_errors > 0 {
         parts.push(format!("{} unparseable line(s)", ri.sse_parse_errors));
@@ -353,7 +373,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
         if empty {
             empty_response_count += 1;
             let limit = settings.max_reasoning_empty_responses;
-            let diag = empty_response_diag(&request_info);
+            let diag = empty_response_diag(&request_info, provider);
             if limit > 0 && empty_response_count >= limit as usize {
                 if empty_response_count == 1 {
                     println!(
@@ -873,9 +893,21 @@ pub(crate) async fn call_llm(
             }
 
             if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload) {
-                // Convert Anthropic payload to OpenAI-compatible format
-                if provider == LlmProvider::Anthropic {
-                    json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                // Terminal-event detection must run on the RAW event: the
+                // provider conversions below strip the event `type` field.
+                if is_provider_stream_end(provider, &json) {
+                    done_seen = true;
+                }
+                // Convert provider events to the internal OpenAI delta format
+                match provider {
+                    LlmProvider::Anthropic => {
+                        json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                    }
+                    LlmProvider::OpenAiResponses => {
+                        json =
+                            compat_provider::convert_openai_responses_event_to_openai_format(json);
+                    }
+                    LlmProvider::OpenAi | LlmProvider::Ollama => {}
                 }
                 // Normalize non-OpenAI tool call format (name/arguments at top level -> function wrapper)
                 used_nonstandard_format |= compat_resilience::normalize_tool_call_format(&mut json);
@@ -888,10 +920,6 @@ pub(crate) async fn call_llm(
                 // 0. Process Usage (Handle OpenAI format or Ollama native)
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
 
-                // Handle both Ollama native (/api/chat) and OpenAI-compatible (/v1/chat/completions)
-                if is_provider_stream_end(provider, &json) {
-                    done_seen = true;
-                }
                 let msg_base = extract_msg_base(&json);
 
                 if settings.verbose_level >= 1
@@ -982,8 +1010,19 @@ pub(crate) async fn call_llm(
             if payload == "[DONE]" {
                 done_seen = true;
             } else if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(payload) {
-                if provider == LlmProvider::Anthropic {
-                    json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                // See the main loop: terminal detection runs on the raw event.
+                if is_provider_stream_end(provider, &json) {
+                    done_seen = true;
+                }
+                match provider {
+                    LlmProvider::Anthropic => {
+                        json = convert_anth_to_openai_format(json, &mut anth_tool_index);
+                    }
+                    LlmProvider::OpenAiResponses => {
+                        json =
+                            compat_provider::convert_openai_responses_event_to_openai_format(json);
+                    }
+                    LlmProvider::OpenAi | LlmProvider::Ollama => {}
                 }
                 used_nonstandard_format |= compat_resilience::normalize_tool_call_format(&mut json);
                 compat_provider::accumulate_usage(&json, &mut usage_captured);
@@ -993,10 +1032,6 @@ pub(crate) async fn call_llm(
                         capture_chunk_diagnostics(&json, &mut finish_reason, &mut backend_error)
                 {
                     println!("\x1b[91m[Backend Error] {}\x1b[0m", msg);
-                }
-
-                if is_provider_stream_end(provider, &json) {
-                    done_seen = true;
                 }
 
                 let msg_base = extract_msg_base(&json);
@@ -1038,10 +1073,12 @@ pub(crate) async fn call_llm(
         }
     }
 
-    // A stream that stops without [DONE] was cut short or is non-conforming.
+    // A stream that stops without its provider's normal terminal event was
+    // cut short or is non-conforming (e.g. the connection was dropped).
     if !done_seen && settings.verbose_level >= 1 {
         println!(
-            "\x1b[93m[SSE] stream ended without [DONE] ({} bytes received) - connection may have been cut\x1b[0m",
+            "\x1b[93m[SSE] stream ended without {} ({} bytes received) - connection may have been cut\x1b[0m",
+            provider_stream_end_name(provider),
             response_bytes
         );
     }

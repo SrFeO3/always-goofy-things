@@ -10,11 +10,11 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 ## Features
 - **Tool-Augmented Iteration**: Automatically calls tools for file I/O, search, bash execution, and web fetching.
 - **Safety Guards & Unsafe Reflex**: Balances explicit user approval (y/N) and experimental deterministic "unsafe reflex" mode that dangerously auto-resolves safety checkpoints.
-- **Open Standards**: Supports Ollama, OpenAI-compatible, and Anthropic-compatible APIs with streaming reasoning.
+- **Open Standards**: Supports Ollama, OpenAI (Chat Completions / Responses), and Anthropic-compatible APIs with streaming reasoning.
 
 ## Requirements
 - **Rust**: Latest stable version (Cargo).
-- **Backend**: Ollama, OpenAI-compatible, or Anthropic-compatible API.
+- **Backend**: Ollama, OpenAI (Chat Completions / Responses), or Anthropic-compatible API.
 - **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
 
 ## Options and Settings
@@ -50,7 +50,8 @@ Options can be set via environment variables or command-line flags (flags take p
 ### LLM Provider (`LLM_PROVIDER`)
 
 Controls which provider-specific API format is used. If not set, the provider is auto-detected from LLM_URL.
-- `openai` - OpenAI-compatible API format. Endpoint: `/v1/chat/completions`
+- `openai` - OpenAI API format (Chat Completions). Endpoint: `/v1/chat/completions`
+- `openai-responses` - OpenAI API format (Responses). Endpoint: `/v1/responses`
 - `ollama` - Ollama API format. Endpoint: `/api/chat`
 - `anthropic` - Anthropic-compatible API format. Endpoint: `/v1/messages` (gratuitously dissimilar).
 

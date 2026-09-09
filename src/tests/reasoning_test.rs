@@ -171,22 +171,50 @@ fn test_empty_response_diag_compact() {
     };
     // A cleanly empty response carries no diagnostics.
     assert_eq!(
-        crate::reasoning::empty_response_diag(&ri(true, None, None, 0, 0)),
+        crate::reasoning::empty_response_diag(
+            &ri(true, None, None, 0, 0),
+            crate::compat_provider::LlmProvider::OpenAi
+        ),
         ""
     );
     // Truncated stream + finish reason + backend error are all reported.
-    let d = crate::reasoning::empty_response_diag(&ri(
-        false,
-        Some("stop".to_string()),
-        Some("model not loaded".to_string()),
-        2,
-        1,
-    ));
+    let d = crate::reasoning::empty_response_diag(
+        &ri(
+            false,
+            Some("stop".to_string()),
+            Some("model not loaded".to_string()),
+            2,
+            1,
+        ),
+        crate::compat_provider::LlmProvider::OpenAi,
+    );
     assert!(d.contains("finish_reason=stop"));
     assert!(d.contains("stream ended without [DONE]"));
     assert!(d.contains("2 unparseable line(s)"));
     assert!(d.contains("1 invalid-UTF-8 line(s)"));
     assert!(d.contains("backend error: model not loaded"));
+    // Each provider reports its own terminal event name.
+    assert_eq!(
+        crate::reasoning::empty_response_diag(
+            &ri(false, None, None, 0, 0),
+            crate::compat_provider::LlmProvider::OpenAiResponses
+        ),
+        " (stream ended without response.completed)"
+    );
+    assert_eq!(
+        crate::reasoning::empty_response_diag(
+            &ri(false, None, None, 0, 0),
+            crate::compat_provider::LlmProvider::Anthropic
+        ),
+        " (stream ended without message_stop)"
+    );
+    assert_eq!(
+        crate::reasoning::empty_response_diag(
+            &ri(false, None, None, 0, 0),
+            crate::compat_provider::LlmProvider::Ollama
+        ),
+        " (stream ended without done: true)"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -278,5 +306,27 @@ fn test_provider_stream_end_detection() {
     assert!(!crate::reasoning::is_provider_stream_end(
         crate::compat_provider::LlmProvider::OpenAi,
         &done_true
+    ));
+
+    // OpenAI Responses ends via the `response.completed` event (raw payload),
+    // or via `response.incomplete` when generation ended abnormally.
+    let completed =
+        serde_json::json!({ "type": "response.completed", "response": { "status": "completed" } });
+    let incomplete = serde_json::json!({
+        "type": "response.incomplete",
+        "response": { "status": "incomplete", "incomplete_details": { "reason": "max_output_tokens" } }
+    });
+    let text_delta = serde_json::json!({ "type": "response.output_text.delta", "delta": "hi" });
+    assert!(crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::OpenAiResponses,
+        &completed
+    ));
+    assert!(crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::OpenAiResponses,
+        &incomplete
+    ));
+    assert!(!crate::reasoning::is_provider_stream_end(
+        crate::compat_provider::LlmProvider::OpenAiResponses,
+        &text_delta
     ));
 }
