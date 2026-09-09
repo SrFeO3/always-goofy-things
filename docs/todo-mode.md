@@ -11,6 +11,28 @@ When a job is too large for a single LLM context, split it into a plan of tasks 
 | The plan (`todo.md`) | Fixed - the tasks run in order as written; the application marks each task `[x]` when it finishes | Living - starts from your Goal and initial task list; the LLM rewrites it before each task (add / remove / reorder / split) and marks each task `[x]` when it finishes |
 | Handover files for the fresh LLM | The application appends each task's report to `artifacts/handover.md` | Same, plus the planner's notes; Mode 2 only: the planner also writes `./next-task.md` (the next task's brief, distilled from `artifacts/handover.md` for the executor) |
 
+### Mode 1: Static Plan
+
+```mermaid
+flowchart LR
+    START([Start]) --> APP("APP<br>(read todo.md)")
+    APP --> TASK["LLM Task Loop<br>(update todo.md)"]
+    TASK -->　|outer loop| APP
+    TASK --> |exit| DONE([Done])
+```
+<p align="right"><sub>Each rectangular box represents a fresh LLM instance with no prior context, handed over via handover.md.</sub></p>
+
+### Mode 2: Dynamic Replan
+
+```mermaid
+flowchart LR
+    START([Start]) --> REPLAN["LLM Replan Loop<br>(update todo.md)"]
+    REPLAN --> TASK["LLM Task Loop<br>(update todo.md)"]
+    TASK --> |outer loop| REPLAN
+    TASK --> |exit| DONE([Done])
+```
+<p align="right"><sub>Each rectangular box represents a fresh LLM instance with no prior context, handed over via handover.md.</sub></p>
+
 ## Before You Run: Writing `./todo.md`
 
 Create `./todo.md` before starting - it is the job's plan, and the application reads it mechanically, so stick to these formats:
