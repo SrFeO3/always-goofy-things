@@ -127,8 +127,8 @@ cargo run -- -m gemini-2.5-pro
 Then type a query like "Who are you and what tools can you use?".
 
 #### Basic Queries
-- "Who are you and what tools can you use?"
 - "Translate this Rust project into Shakespearean English without breaking code syntax."
+- "Fetch RFC 9110 from the IETF website, extract the core changes regarding HTTP semantics compared to RFC 7230, and summarize them in 3 bullet points."
 - "Fetch the latest versions of the rand and fastrand crates, create a simple CLI guessing game using each of them, and generate a comparison report on their APIs and performance."
 
 #### Queries with Context Modifiers (Attaching Files)
@@ -147,7 +147,7 @@ cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
 > [!WARNING]
 > In batch mode, large files are attached without confirmation and tools that usually prompt `y/N` are automatically denied.
 
-### Todo Mode (`-q`)
+### Todo Mode  (`-q N`)
 
 Use todo mode for tasks too large for a single LLM context.
 
