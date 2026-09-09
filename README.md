@@ -1,6 +1,6 @@
 # Always-Goofy-Things
 
-To demonstrate the core mechanics of iterative LLM function-calling, this lightweight, experimental CLI application showcases the workflow in the context of AI-assisted software development. It interacts with LLMs to reason about tasks, executes system tools via user confirmation paired with an unsafe reflex mode, and streams the "thinking" process.
+To demonstrate the core mechanics of iterative LLM function-calling, this lightweight, experimental CLI application showcases the workflow in the context of AI-assisted software development. It interacts with LLMs to reason about tasks, executes system tools with user confirmation when needed, and processes long todo lists sequentially in an outer loop, spawning a fresh LLM instance for each task.
 
 > [!CAUTION]
 > **Experimental Implementation**: AI unpredictability and bugs may cause unexpected behavior.
@@ -8,14 +8,14 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 > **Billing Alert**: AI reasoning loops or oversized contexts can rapidly spike API costs. Monitor closely.
 
 ## Features
-- **Tool-Augmented Iteration**: Automatically calls tools for file I/O, search, bash execution, and web fetching.
-- **Safety Guards & Unsafe Reflex**: Balances explicit user approval (y/N) and experimental deterministic "unsafe reflex" mode that dangerously auto-resolves safety checkpoints.
-- **Open Standards**: Supports Ollama, OpenAI (Chat Completions / Responses), and Anthropic-compatible APIs with streaming reasoning.
+- **Tool-Augmented Iteration**: Automatically calls tools such as file I/O, search, bash execution, and web fetching.
+- **Todo Outer Loop**: Sequentially processes long todo lists, spawning a fresh LLM session per task (static plan or AI-driven replan).
+- **Open Standards & Safety**: Supports Ollama, OpenAI (Chat Completions / Responses), and Anthropic-compatible APIs with streaming reasoning; tool execution can choose between user confirmation and unsafe auto-approval.
 
 ## Requirements
 - **Rust**: Latest stable version (Cargo).
 - **Backend**: Ollama, OpenAI (Chat Completions / Responses), or Anthropic-compatible API.
-- **Tools**: `bash`, `grep`, and internet connectivity (for web fetching).
+- **Execution Environment**: System tools and network capabilities required for tool execution, such as bash, grep, and web fetching.
 
 ## Options and Settings
 
