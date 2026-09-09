@@ -126,6 +126,16 @@ cargo run -- -m gemini-2.5-pro
 
 Then type a query like "Who are you and what tools can you use?".
 
+#### Basic Queries
+- "Who are you and what tools can you use?"
+- "Translate this Rust project into Shakespearean English without breaking code syntax."
+- "Fetch the latest versions of the rand and fastrand crates, create a simple CLI guessing game using each of them, and generate a comparison report on their APIs and performance."
+
+#### Queries with Context Modifiers (Attaching Files)
+- "@src/main.rs, @Cargo.toml Explain the structure of these files."
+- "@diagram.png Explain the architecture shown in this image."
+- "@@spec.pdf:12-15 Extract all error codes and recovery procedures defined in this section."
+
 ### Batch Mode (`-q`)
 
 Run a single query non-interactively and exit. The final answer is written to stdout (or `-o <file>`). Progress and errors go to stderr.
@@ -137,7 +147,15 @@ cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
 > [!WARNING]
 > In batch mode, large files are attached without confirmation and tools that usually prompt `y/N` are automatically denied.
 
-### Attaching Files (`@`) and Text Extraction (`@@`)
+### Todo Mode (`-q`)
+
+Use todo mode for tasks too large for a single LLM context.
+
+See [docs/todo-mode.md](docs/todo-mode.md) for detailed usage instructions.
+
+# Special Syntax in CLI Queries
+
+### Context Modifiers: Attaching Files (`@`) and Text Extraction (`@@`)
 
 Prepend `@file` paths to attach files, or `@@file` to force text extraction (useful for PDFs on providers without native document support). Paths are relative to the working directory. Multiple files: `@a.txt, @b.txt`.
 
@@ -149,27 +167,17 @@ Prepend `@file` paths to attach files, or `@@file` to force text extraction (use
 
 Ollama requires `@@` for PDF (no native document support).
 
-### Examples
+### Slash Commands (/)
 
-**Basic queries:**
-- "Who are you and what tools can you use?"
-- "Create a Python script named `test.py` that prints 'Hello, World!'."
-- "@src/main.rs, @Cargo.toml Explain the structure of these files."
-- "@diagram.png Describe this image."
+Type `/` followed by a command name to execute built-in actions locally. Commands are processed by the CLI and are never sent to the LLM as queries.*
 
-**Complex tasks:**
-- "Find the Python script in the workspace and translate its output messages into Shakespearean English."
-- "Summarize the 'Anyhow' crate documentation from this URL: https://docs.rs/anyhow/latest/anyhow/."
-- "@@spec.pdf Fix this broken http server based on the specification."
-- "@@spec.pdf:3-7 Review the page numbers and headers on these pages."
-
-**Long complex jobs - too large for a single LLM context. Use todo mode:**
-
-Split into tasks in a `./todo.md` plan instead of a typed query; runs immediately.
-
-Example jobs:
-- "Refactor this entire legacy codebase, writing unit tests for every module."
-- "Crawl the docs of a web framework and generate a migration guide for v2 to v3."
-- "Design a DB schema, write backend APIs, build frontend, and verify end-to-end."
-
-See [docs/todo-mode.md](docs/todo-mode.md) for how to use.
+| Command | Description |
+| :--- | :--- |
+| `/help`, `/h` | Display help text. |
+| `/rewind <turn>` | Roll back conversation history to a specific turn. |
+| `/history [-a]` | Show a summary of the conversation history. |
+| `/model [name]` | Switch the active LLM on the fly. |
+| `/config [k] [v]` | Show or change app configuration (no arg: list all, `-s`/`--short` for aliases). |
+| `/restore [label]` | Restore the previous session, optionally for a specific label. |
+| `/stats` | Show LLM resource usage (per-model and session totals). |
+| `/exit`, `/quit`, `exit`, `quit` | Exit the application. |
