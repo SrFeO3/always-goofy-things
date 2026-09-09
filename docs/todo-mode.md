@@ -137,6 +137,48 @@ What happens:
 
 Safety: replanning must make progress. If the unchecked-task count does not shrink for `--max-replan-attempts` consecutive rounds (default 3, `0` = unlimited), the application stops. A replan LLM error is retried once; if the retry also fails, the task is skipped that round and the failure counts as a stall.
 
+### Example: RFC-Compliant Mini Mail Server (complex, multi-file project)
+
+A realistic Mode 2 case: a multi-module Rust project with hard technical constraints, where the exact implementation details (protocol parsing edge cases, storage layout, test scaffolding) are best discovered by the LLM as it works, rather than fully specified up front.
+
+#### 1. Create `./todo.md`
+
+```markdown
+# Mini Mail Server Implementation (RFC 5321 & RFC 3501)
+
+## Goal
+Build a concurrent local mail server in Rust that handles SMTP reception and IMAP retrieval based on official RFC specifications, designed with a fully isolated architecture to run end-to-end integration tests without any external network access.
+
+**Hard constraint**: all tests must run against local loopback (`127.0.0.1`) only — never connect to real internet mail servers or external SMTP/IMAP endpoints.
+
+## Tasks
+- [ ] Implement the SMTP protocol parser and transaction state machine based on RFC 5321 using local in-memory streams.
+- [ ] Implement the IMAP4rev1 protocol command handlers and session states based on RFC 3501 using loopback buffers.
+- [ ] Implement a concurrent Maildir-based storage engine in src/storage.rs using a localized temporary directory fixture, ensuring zero network calls or external socket dependencies.
+- [ ] Write end-to-end local integration tests using loopback TCP listeners (`127.0.0.1:0`) and mock client drivers to simulate a full offline cycle of sending and reading mail.
+
+## Deliverables
+- Cargo.toml
+- src/smtp.rs
+- src/imap.rs
+- src/storage.rs
+- tests/integration_test.rs
+```
+
+#### 2. Run
+
+```bash
+cargo run -- -t 2
+```
+
+What happens:
+
+1. **Replan before each task.** The planner reads the Goal, reviews the current plan, and may rework it as technical constraints surface. For example, after the SMTP task reveals that `Cargo.toml` must declare `tokio` and `maildir` dependencies, the planner may split the storage task into "define the `Mailbox` trait" and "implement Maildir backend", or reorder tasks if a dependency is discovered (e.g. integration tests require all three modules to compile first).
+2. **Execute each task.** Each executor session reads `./next-task.md`, explores `artifacts/handover.md` for context from prior tasks, then produces one or more of the target files. After the SMTP task completes, its handover report documents the public API of `smtp.rs` so the IMAP executor knows which `Storage` trait to call into.
+3. **Deliverables gating.** After all tasks are `[x]`, the application verifies that every file listed under `## Deliverables` exists on disk. If `tests/integration_test.rs` is missing (e.g. the last task ran out of output tokens), the job is reported as failed and the user can rerun `-t 2` to resume from the unchecked task.
+
+Why Mode 2 fits here: the exact protocol handling, error recovery strategy, and test harness design emerge as the LLM encounters implementation details. A static plan would risk locking in a wrong decomposition before any code is written.
+
 ## Internals
 
 How state flows under the hood: which files carry it, who may write them, and the remaining machine-format rules. Hand-editing these files breaks the run.
