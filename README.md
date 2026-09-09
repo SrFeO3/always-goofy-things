@@ -147,7 +147,7 @@ cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
 > [!WARNING]
 > In batch mode, large files are attached without confirmation and tools that usually prompt `y/N` are automatically denied.
 
-### Todo Mode  (`-q N`)
+### Todo Mode  (`-t N`)
 
 Use todo mode for tasks too large for a single LLM context.
 
