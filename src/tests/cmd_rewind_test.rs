@@ -260,6 +260,7 @@ fn helper_slash_dispatch_rewind_truncates_session() {
         &mut session,
         &mut settings,
         &Metrics::default(),
+        None,
     )
     .expect("valid rewind must dispatch");
 

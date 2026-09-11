@@ -16,6 +16,8 @@ use crate::cmd::{self, SlashCmdResult};
 use crate::compat_provider::LlmProvider;
 use crate::gui_pretty;
 use crate::gui_pretty::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED};
+#[cfg(feature = "kb")]
+use crate::kb;
 use crate::llm_stats::{Metrics, fmt_tokens};
 use crate::model::{LLM_STREAM_BUF, Message, Session, Settings};
 use crate::persistence;
@@ -32,6 +34,10 @@ struct GuiApp {
     session: Option<Session>,
     settings: Option<Settings>,
     metrics: Option<Metrics>,
+    /// Knowledge Base context (single library.sqlite connection + run id);
+    /// always `Some` in kb builds (init failure aborts startup).
+    #[cfg(feature = "kb")]
+    kb: Option<Arc<kb::KbContext>>,
 
     current_model: String,
     input_text: String,
@@ -60,13 +66,17 @@ struct PendingConfirm {
 }
 
 impl GuiApp {
-    fn new(config: Config, provider: LlmProvider) -> Self {
+    fn new(config: Config, provider: LlmProvider) -> anyhow::Result<Self> {
         let system_msg = startup::system_message(&config);
         let label = config.session_label.clone();
         let session = Session::new(label, system_msg);
         let settings = Settings::from_config(&config);
         let current_model = settings.llm_model.clone();
         let metrics = Metrics::default();
+
+        // KB init: --kb-dir / KB_DIR or the app-data default; failure aborts.
+        #[cfg(feature = "kb")]
+        let kb = kb::kb_context_from_config(&config)?.map(Arc::new);
 
         if let Err(e) = persistence::init_session(&session.label) {
             eprintln!("[GUI] persistence init: {}", e);
@@ -76,12 +86,14 @@ impl GuiApp {
             eprintln!("[GUI] persistence append: {}", e);
         }
 
-        GuiApp {
+        Ok(GuiApp {
             config: Arc::new(config),
             provider,
             session: Some(session),
             settings: Some(settings),
             metrics: Some(metrics),
+            #[cfg(feature = "kb")]
+            kb,
             current_model,
             input_text: String::new(),
             conversation: String::new(),
@@ -93,7 +105,7 @@ impl GuiApp {
             is_running: false,
             focus_input: true,
             todo_started: false,
-        }
+        })
     }
 
     fn sync_model(&mut self) {
@@ -233,17 +245,17 @@ fn load_cjk_font(fonts: &mut egui::FontDefinitions) {
 // eframe entry-point
 // ---------------------------------------------------------------------------
 
-pub fn run(config: Config, provider: LlmProvider) {
+pub fn run(config: Config, provider: LlmProvider) -> anyhow::Result<()> {
     let cwd = match std::fs::canonicalize(&config.working_dir) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("[GUI] bad working dir '{}': {}", config.working_dir, e);
-            return;
+            return Ok(());
         }
     };
     if let Err(e) = std::env::set_current_dir(&cwd) {
         eprintln!("[GUI] chdir failed: {}", e);
-        return;
+        return Ok(());
     }
 
     // Register the workspace root and tool execution limits for path
@@ -261,16 +273,32 @@ pub fn run(config: Config, provider: LlmProvider) {
         ..Default::default()
     };
 
+    // Resolve the KB directory once (--kb-dir / KB_DIR, or the app-data
+    // default after chdir) so the whole app sees one value - including tool
+    // registration and the system prompt.
+    #[cfg(feature = "kb")]
+    let config = {
+        let mut c = config;
+        if c.kb_dir.is_none() {
+            c.kb_dir = kb::default_kb_dir().map(|d| d.to_string_lossy().into_owned());
+        }
+        c
+    };
+
+    // Build the app before opening the window so KB misconfiguration
+    // (kb feature on, no --kb-dir / KB_DIR) fails the same way as the CLI.
+    let app = GuiApp::new(config, provider)?;
     let _ = eframe::run_native(
         "always-goofy-things",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
             load_cjk_font(&mut fonts);
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(GuiApp::new(config, provider)))
+            Ok(Box::new(app))
         }),
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -761,6 +789,7 @@ impl GuiApp {
                 session,
                 settings,
                 self.metrics.as_ref().unwrap_or(&Metrics::default()),
+                None, // GUI /kb command UI: not implemented in the initial version
             ) {
                 match result {
                     SlashCmdResult::NoAdvance => {}
@@ -842,6 +871,8 @@ impl GuiApp {
 
         let config = Arc::clone(&self.config);
         let provider = self.provider;
+        #[cfg(feature = "kb")]
+        let kb = self.kb.clone();
         let (done_tx, done_rx) = oneshot::channel();
 
         self.conversation.clear();
@@ -882,12 +913,17 @@ impl GuiApp {
         let handle = tokio::spawn(async move {
             // `ctx` is the egui context in the surrounding method; use a
             // distinct name for the run context shared by the loops.
+            #[cfg(feature = "kb")]
+            let kb_ctx = kb.as_deref();
+            #[cfg(not(feature = "kb"))]
+            let kb_ctx: crate::tools::KbCtxOpt<'_> = None;
             let mut loop_ctx = LoopCtx {
                 config: &config,
                 provider,
                 settings: &mut settings,
                 metrics: &mut metrics,
                 plan_guard: None,
+                kb_ctx,
             };
             let (done, err_msg) = if config.todo_mode > 0 {
                 match todo::run_todo_loop(&mut loop_ctx, &mut session, query_text, attached_files)

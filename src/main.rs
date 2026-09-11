@@ -37,11 +37,17 @@ mod file_pdf;
 mod gui;
 #[cfg(feature = "gui")]
 mod gui_pretty;
+#[cfg(feature = "kb")]
+mod kb;
+#[cfg(feature = "kb")]
+mod kb_schema;
 mod llm_stats;
 mod model;
 mod persistence;
 mod pretty;
 mod pretty_data;
+#[cfg(feature = "kb")]
+mod pretty_kb;
 mod reasoning;
 mod reflex;
 mod reflex_literal;
@@ -89,9 +95,7 @@ async fn main() -> Result<()> {
     {
         // eframe::run_native blocks the current thread.
         // block_in_place lets tokio move spawned tasks to other threads.
-        tokio::task::block_in_place(|| {
-            gui::run(config, provider);
-        });
+        tokio::task::block_in_place(|| gui::run(config, provider))?;
         return Ok(());
     }
 
@@ -100,6 +104,33 @@ async fn main() -> Result<()> {
 
     // Set working directory and print banner (all modes)
     let _current_dir = startup::print_startup_info(&config, &provider)?;
+
+    // KB feature: resolve the directory once (--kb-dir / KB_DIR, or the
+    // app-data default, after chdir) so the whole app sees one value -
+    // including tool registration and the system prompt.
+    #[cfg(feature = "kb")]
+    let config = {
+        let mut c = config;
+        if c.kb_dir.is_none() {
+            c.kb_dir = kb::default_kb_dir().map(|d| d.to_string_lossy().into_owned());
+        }
+        c
+    };
+
+    // KB feature: init once per process (run granularity = one process
+    // start). Dir = --kb-dir / KB_DIR or the app-data default.
+    #[cfg(feature = "kb")]
+    let kb_ctx = {
+        let store = kb::kb_context_from_config(&config)?;
+        // Merged into the CONFIGURATION block: feature state + per-run id.
+        // The dirs are already listed above (kb-dir / kb-db rows).
+        if let Some(kctx) = &store {
+            println!("  kb-feature         : enabled (run_id: {})", kctx.run_id);
+        }
+        store
+    };
+    #[cfg(not(feature = "kb"))]
+    let kb_ctx: Option<()> = None;
 
     let mut query_reader = DefaultEditor::new()?;
 
@@ -174,9 +205,13 @@ async fn main() -> Result<()> {
             continue;
         }
         // Slash commands. cmd.rs mutates `session` / `settings` in place.
-        if let Some(result) =
-            cmd::try_handle_slash_command(&input, &mut session, &mut settings, &metrics)
-        {
+        if let Some(result) = cmd::try_handle_slash_command(
+            &input,
+            &mut session,
+            &mut settings,
+            &metrics,
+            kb_ctx.as_ref(),
+        ) {
             match result {
                 cmd::SlashCmdResult::NoAdvance => continue,
                 cmd::SlashCmdResult::RewoundTo(target) => {
@@ -305,6 +340,7 @@ async fn main() -> Result<()> {
                     settings: &mut settings,
                     metrics: &mut metrics,
                     plan_guard: None,
+                    kb_ctx: kb_ctx.as_ref(),
                 };
                 let end_reason =
                     run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
@@ -324,6 +360,7 @@ async fn main() -> Result<()> {
                     settings: &mut settings,
                     metrics: &mut metrics,
                     plan_guard: None,
+                    kb_ctx: kb_ctx.as_ref(),
                 };
                 match todo::run_todo_loop(&mut ctx, &mut session, query_text, attached_files).await
                 {
@@ -364,10 +401,19 @@ async fn main() -> Result<()> {
                 &metrics,
             )?;
             if is_batch {
+                #[cfg(feature = "kb")]
+                if let Some(kctx) = &kb_ctx {
+                    kb::kb_finish_run(kctx);
+                }
                 return Ok(());
             }
             session.turn += 1;
         }
+    }
+    // Best-effort: mark this process's KB analysis run as completed.
+    #[cfg(feature = "kb")]
+    if let Some(kctx) = &kb_ctx {
+        kb::kb_finish_run(kctx);
     }
     Ok(())
 }

@@ -41,6 +41,8 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::file::{self, FileType};
+#[cfg(feature = "kb")]
+use crate::kb;
 use crate::reflex::auto_confirm;
 #[cfg(not(feature = "gui"))]
 use crate::startup::{C_CYAN, RESET};
@@ -50,6 +52,18 @@ use crate::tools_fuzzy::{
     build_full_fuzzy_pattern, build_full_skip_blank_pattern, build_space_fuzzy_pattern,
     build_tab_fuzzy_pattern, build_tab_skip_blank_pattern,
 };
+
+/// KB context reference passed into the tool dispatcher and loops. When the
+/// `kb` feature is compiled out this is a `()` placeholder, so call
+/// signatures stay stable without pulling in rusqlite.
+#[cfg(feature = "kb")]
+pub(crate) type KbCtx<'a> = &'a crate::kb::KbContext;
+#[cfg(not(feature = "kb"))]
+pub(crate) type KbCtx<'a> = &'a ();
+#[cfg(feature = "kb")]
+pub(crate) type KbCtxOpt<'a> = Option<KbCtx<'a>>;
+#[cfg(not(feature = "kb"))]
+pub(crate) type KbCtxOpt<'a> = Option<KbCtx<'a>>;
 
 pub const ALLOW_COMMAND_LIST: &[&str] = &[
     "^ls",
@@ -125,6 +139,10 @@ pub enum ToolName {
     DataSearch,
     DataSchema,
     Calc,
+    DataKbSearch,
+    DataKbSchema,
+    DataKbInsert,
+    DataKbUpdate,
 }
 
 impl ToolName {
@@ -141,6 +159,10 @@ impl ToolName {
             ToolName::DataSearch => "data_search",
             ToolName::DataSchema => "data_schema",
             ToolName::Calc => "calc",
+            ToolName::DataKbSearch => "data_kb_search",
+            ToolName::DataKbSchema => "data_kb_schema",
+            ToolName::DataKbInsert => "data_kb_insert",
+            ToolName::DataKbUpdate => "data_kb_update",
         }
     }
 }
@@ -199,6 +221,7 @@ pub(crate) enum ToolInteractMsg {
 /// LLM never learns about (and normally never calls) disabled tools.
 pub fn get_tool_definitions(
     db_type: Option<&str>,
+    kb_dir: Option<&str>,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Vec<serde_json::Value> {
     let mut tools = vec![
@@ -337,6 +360,20 @@ pub fn get_tool_definitions(
         tools.push(tools_data::build_data_schema_def());
     }
 
+    // Conditionally append KB tools when a KB directory is resolved (the
+    // app defaults it to the app-data dir at startup). KB tools are
+    // KB-dedicated: they only ever touch the single <kb>/db/library.sqlite
+    // file (never a generic SQL target). Compiled only with the `kb` feature.
+    #[cfg(feature = "kb")]
+    if kb_dir.is_some() {
+        tools.push(kb::build_kb_search_def());
+        tools.push(kb::build_kb_schema_def());
+        tools.push(kb::build_kb_insert_def());
+        tools.push(kb::build_kb_update_def());
+    }
+    #[cfg(not(feature = "kb"))]
+    let _ = kb_dir;
+
     // Hide disabled tools from the LLM.
     tools.retain(|def| {
         def.get("function")
@@ -351,11 +388,14 @@ pub async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     db_ctx: Option<&tools_data::DbContext>,
+    kb_ctx: KbCtxOpt<'_>,
     calc_ledger: Option<&tools_calc::CalcLedger>,
     plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
     todo_mode: u8,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Result<serde_json::Value> {
+    #[cfg(not(feature = "kb"))]
+    let _ = kb_ctx;
     // Refuse disabled tools even if the LLM calls them anyway (defense in depth).
     if !is_enabled(name) {
         return Err(anyhow!(
@@ -409,6 +449,53 @@ pub async fn execute_tool(
             })?;
             let table = args.get("table").and_then(|v| v.as_str());
             tools_data::execute_data_schema(ctx, table).await
+        }
+        #[cfg(feature = "kb")]
+        "data_kb_search" => {
+            let ctx = kb_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
+                )
+            })?;
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("[KB_INTERNAL_ERROR] Missing 'query' parameter."))?;
+            kb::execute_kb_search(ctx, query)
+        }
+        #[cfg(feature = "kb")]
+        "data_kb_schema" => {
+            let ctx = kb_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
+                )
+            })?;
+            let table = args.get("table").and_then(|v| v.as_str());
+            kb::execute_kb_schema(ctx, table)
+        }
+        #[cfg(feature = "kb")]
+        "data_kb_insert" => {
+            let ctx = kb_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
+                )
+            })?;
+            kb::execute_kb_insert(ctx, args)
+        }
+        #[cfg(feature = "kb")]
+        "data_kb_update" => {
+            let ctx = kb_ctx.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
+                )
+            })?;
+            kb::execute_kb_update(ctx, args)
+        }
+        #[cfg(not(feature = "kb"))]
+        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
+            Err(anyhow::anyhow!(
+                "[KB_CONFIG_ERROR] This binary was built without the 'kb' feature. Rebuild with --features kb to use data_kb_* tools."
+            ))
         }
         "calc" => Ok(tools_calc::execute_calc(args, calc_ledger)),
         _ => Err(anyhow::anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
@@ -475,6 +562,7 @@ pub async fn confirm_execute_tool(
     args: &serde_json::Value,
     unsafe_reflex: bool,
     db_unsafe_reflex: bool,
+    kb_auto_confirm: crate::startup::KbAutoConfirm,
     batch: bool,
     is_enabled: impl Fn(&str) -> bool,
 ) -> ToolRunDecision {
@@ -491,11 +579,44 @@ pub async fn confirm_execute_tool(
         };
     }
 
-    // Auto-confirm data tools when --db-unsafe-reflex is set.
-    // Data tools (data_search, data_schema) are read-only queries against
-    // external databases -- inherently safe to auto-execute.
+    // data_search / data_schema are read-only queries, auto-confirmed under
+    // --db-unsafe-reflex (or the global --unsafe-reflex) via auto_confirm.
     let is_data_tool = matches!(name, "data_search" | "data_schema");
+
+    // KB tools: approved only by --kb-auto-confirm (ro / rw); the global
+    // --unsafe-reflex does not apply and they never reach auto_confirm.
+    #[cfg(feature = "kb")]
+    let is_kb_tool = {
+        let is_kb_read = matches!(name, "data_kb_search" | "data_kb_schema");
+        let is_kb_tool = is_kb_read || matches!(name, "data_kb_insert" | "data_kb_update");
+        let confirmed = is_kb_tool
+            && match kb_auto_confirm {
+                crate::startup::KbAutoConfirm::Rw => true,
+                crate::startup::KbAutoConfirm::Ro => is_kb_read,
+                crate::startup::KbAutoConfirm::Ask => false,
+            };
+        if confirmed {
+            let reason = Some("KB-dedicated (single library.sqlite): approved by --kb-auto-confirm".to_string());
+            #[cfg(feature = "gui")]
+            let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
+                name: name.to_string(),
+                args: args.clone(),
+                reason: reason.clone(),
+            }));
+            return ToolRunDecision {
+                proceed: true,
+                kind: ToolRunDecisionKind::AutoConfirm,
+                reason,
+            };
+        }
+        is_kb_tool
+    };
+    #[cfg(feature = "kb")]
+    let effective_unsafe = (unsafe_reflex || (is_data_tool && db_unsafe_reflex)) && !is_kb_tool;
+    #[cfg(not(feature = "kb"))]
     let effective_unsafe = unsafe_reflex || (is_data_tool && db_unsafe_reflex);
+    #[cfg(not(feature = "kb"))]
+    let _ = kb_auto_confirm;
 
     if effective_unsafe
         && let (proceed, reason) = auto_confirm(name, args)

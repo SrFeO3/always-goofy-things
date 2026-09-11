@@ -36,6 +36,8 @@ use serde_json::{Value, json};
 
 use crate::model::ToolCall;
 use crate::pretty_data;
+#[cfg(feature = "kb")]
+use crate::pretty_kb;
 use crate::startup::{
     BG_GREEN, BG_RED, C_GRAY, C_GREEN, C_RED, C_YELLOW, EMPTY, ERASE_LINE, HDR_GREEN, HDR_RED,
     RESET,
@@ -606,6 +608,10 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
             println!("[{} bytes ({})] {} ... {}", bytes, url, first, last);
         }
         "data_search" | "data_schema" => pretty_data::pretty_print_data_result(result),
+        #[cfg(feature = "kb")]
+        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
+            pretty_kb::pretty_print_kb_result(result)
+        }
         _ => {
             println!("\x1b[90mResult:\x1b[0m {}", result);
         }
@@ -787,6 +793,10 @@ pub fn pretty_print_command(name: &str, args: &Value) {
             println!("-- Fetch: {}{}{}", C_YELLOW, url, RESET);
         }
         "data_search" | "data_schema" => pretty_data::pretty_print_data_command(name, args),
+        #[cfg(feature = "kb")]
+        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
+            pretty_kb::pretty_print_kb_command(name, args)
+        }
         "calc" => {
             let exprs = match args.get("expressions").and_then(|v| v.as_array()) {
                 Some(a) => a,

@@ -206,6 +206,9 @@ pub(crate) struct LoopCtx<'a> {
     /// runs; `None` otherwise (set by `run_todo_loop_mode2`, cleared by
     /// `run_replan_loop`).
     pub plan_guard: Option<crate::todo_guard::PlanWriteGuard>,
+    /// Knowledge Base context (single library.sqlite connection + run id);
+    /// `None` when the `kb` feature is compiled out.
+    pub kb_ctx: crate::tools::KbCtxOpt<'a>,
 }
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
@@ -226,6 +229,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let settings = &mut *ctx.settings;
     let metrics = &mut *ctx.metrics;
     let plan_guard = ctx.plan_guard.as_ref();
+    let kb_ctx = ctx.kb_ctx;
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
     // signature smaller and avoids the caller having to pass it through.
     let is_batch = config.query.is_some();
@@ -485,6 +489,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     &args,
                     config.unsafe_reflex,
                     config.db_unsafe_reflex,
+                    config.kb_auto_confirm,
                     is_batch,
                     |name| config.is_tool_enabled(name),
                 )
@@ -553,6 +558,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                         &call.function.name,
                         &args,
                         db_ctx.as_ref(),
+                        kb_ctx,
                         Some(&calc_ledger),
                         plan_guard,
                         config.todo_mode,
@@ -642,7 +648,9 @@ pub(crate) async fn call_llm(
 ) -> Result<(Message, Option<Usage>, LlmRequestInfo)> {
     let client = reqwest::Client::new();
     let tools =
-        tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n));
+        tools::get_tool_definitions(config.db_type.as_deref(), config.kb_dir.as_deref(), |n| {
+            config.is_tool_enabled(n)
+        });
     let messages_vec = messages.to_vec();
 
     let mut req = ChatRequest {
@@ -1064,7 +1072,11 @@ pub(crate) async fn call_llm(
     if let Some(tool_calls) = &mut full_message.tool_calls {
         post_process_tool_calls(
             tool_calls,
-            &tools::get_tool_definitions(config.db_type.as_deref(), |n| config.is_tool_enabled(n)),
+            &tools::get_tool_definitions(
+                config.db_type.as_deref(),
+                config.kb_dir.as_deref(),
+                |n| config.is_tool_enabled(n),
+            ),
         );
         // If all tool calls were filtered out, set back to None
         // to avoid serializing an empty array which APIs reject.

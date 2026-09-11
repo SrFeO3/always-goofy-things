@@ -11,6 +11,7 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Tool-Augmented Iteration**: Automatically calls tools such as file I/O, search, bash execution, and web fetching.
 - **Todo Outer Loop**: Sequentially processes long todo lists, spawning a fresh LLM session per task (static plan or AI-driven replan).
 - **Open Standards & Safety**: Supports Ollama, OpenAI (Chat Completions / Responses), and Anthropic-compatible APIs with streaming reasoning; tool execution can choose between user confirmation and unsafe auto-approval.
+- **Local KB (`--features kb`)**: an optional local document library you can search and analyze with the AI. See [docs/kb.md](docs/kb.md).
 
 ## Requirements
 - **Rust**: Latest stable version (Cargo).

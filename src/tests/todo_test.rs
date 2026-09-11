@@ -384,6 +384,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
         }),
         None,
         None,
+        None,
         Some(&guard),
         2,
         |_| true,
@@ -408,6 +409,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
         }),
         None,
         None,
+        None,
         Some(&guard),
         2,
         |_| true,
@@ -430,6 +432,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ]  b",
             "new_string": "- [ ] b\n- [ ] fuzzy-sub"
         }),
+        None,
         None,
         None,
         Some(&guard),
@@ -457,6 +460,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ]  b",
             "new_string": "- [x] b"
         }),
+        None,
         None,
         None,
         Some(&guard),

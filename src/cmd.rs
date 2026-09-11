@@ -12,11 +12,12 @@
 //! - `/config [k] [v]`: Show or change app configuration (no arg: list all, -s/--short for aliases)
 //! - `/restore [label]`: Restore the previous session, optionally for a specific label.
 //! - `/stats`: Show LLM resource usage (per-model and session totals).
+//! - `/kb add|list|delete|sync|backup`: Knowledge Base commands (kb feature).
 //! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
 use std::io::{self, Write};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::llm_stats::{Metrics, ModelTotals, fmt_ms};
 use crate::model::{Message, Session, Settings};
@@ -50,6 +51,7 @@ pub fn try_handle_slash_command(
     session: &mut Session,
     settings: &mut Settings,
     metrics: &Metrics,
+    kb_ctx: crate::tools::KbCtxOpt<'_>,
 ) -> Option<SlashCmdResult> {
     let trimmed = input.trim();
     // Termination aliases (bare or `/`-prefixed). Centralised here so the
@@ -108,6 +110,13 @@ pub fn try_handle_slash_command(
             handle_stats(metrics, &session.label);
             Some(SlashCmdResult::NoAdvance)
         }
+        "/kb" => match handle_kb(arg, kb_ctx) {
+            Ok(()) => Some(SlashCmdResult::NoAdvance),
+            Err(e) => {
+                eprintln!("\x1b[91mSlash command error: {}\x1b[0m", e);
+                Some(SlashCmdResult::NoAdvance)
+            }
+        },
         _ => {
             eprintln!(
                 "\x1b[93mUnknown command: {}\x1b[0m Type /help for available commands.",
@@ -115,6 +124,78 @@ pub fn try_handle_slash_command(
             );
             Some(SlashCmdResult::NoAdvance)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /kb
+// ---------------------------------------------------------------------------
+
+/// Handle `/kb <subcommand>`: add / list / delete / sync / backup.
+/// With the `kb` feature on, a KB directory is always resolved (explicit
+/// `--kb-dir` / `KB_DIR`, or the app-data default), so the guidance branches
+/// below are defensive only. All DB/file work is delegated to `kb.rs`.
+fn handle_kb(arg: Option<&str>, kb_ctx: crate::tools::KbCtxOpt<'_>) -> Result<()> {
+    #[cfg(not(feature = "kb"))]
+    {
+        let _ = (arg, kb_ctx);
+        bail!(
+            "This binary was built without the 'kb' feature. Rebuild with --features kb to use /kb."
+        );
+    }
+    #[cfg(feature = "kb")]
+    {
+        let Some(ctx) = kb_ctx else {
+            println!(
+                "\x1b[93mThe knowledge base is not initialized.\x1b[0m"
+            );
+            return Ok(());
+        };
+        let arg = arg.unwrap_or("");
+        let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+        let sub = parts[0];
+        let rest = parts.get(1).map(|s| s.trim()).unwrap_or("");
+        match sub {
+            "add" => {
+                if rest.is_empty() {
+                    bail!("Usage: /kb add <path>");
+                }
+                println!("{}", crate::kb::kb_add(ctx, rest)?);
+            }
+            "list" => {
+                println!("{}", crate::kb::kb_list(ctx)?);
+            }
+            "delete" => {
+                let (path, all_versions) = if let Some(p) = rest.strip_suffix("--all-versions") {
+                    (p.trim(), true)
+                } else {
+                    (rest, false)
+                };
+                if path.is_empty() {
+                    bail!("Usage: /kb delete <path> [--all-versions]");
+                }
+                println!("{}", crate::kb::kb_delete(ctx, path, all_versions)?);
+            }
+            "sync" => {
+                println!("{}", crate::kb::kb_sync(ctx)?);
+            }
+            "backup" => {
+                println!(
+                    "{}",
+                    crate::kb::kb_backup(ctx, if rest.is_empty() { None } else { Some(rest) })?
+                );
+            }
+            "" => {
+                println!(
+                    "Usage: /kb add <path> | list | delete <path> [--all-versions] | sync | backup [path]"
+                );
+            }
+            other => bail!(
+                "Unknown /kb subcommand '{}'. Use add / list / delete / sync / backup.",
+                other
+            ),
+        }
+        Ok(())
     }
 }
 
@@ -311,6 +392,7 @@ fn print_help() {
    /config [k] [v]  Show or change app configuration (no arg: list all, -s for aliases)
    /restore [label] Restore the previous session (optionally specifying a label to switch to)
    /stats           Show LLM resource usage (per-model and session totals)
+   /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] (requires --features kb)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
@@ -327,7 +409,9 @@ fn print_help() {
    \x1b[90m/history -a   - Print raw JSON payload of conversation history\x1b[0m
    \x1b[90m/restore      - Restore the latest session for current label\x1b[0m
    \x1b[90m/restore work - Restore the latest session for label 'work' and switch to it\x1b[0m
-   \x1b[90m/stats        - Show LLM resource usage (per-model and session totals)\x1b[0m"
+   \x1b[90m/stats        - Show LLM resource usage (per-model and session totals)\x1b[0m
+   \x1b[90m/kb list      - List registered documents in the Knowledge Base\x1b[0m
+   \x1b[90m/kb add doc.md - Register a document and run machine extraction\x1b[0m"
     );
 }
 

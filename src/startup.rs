@@ -12,6 +12,29 @@ use crate::compat_provider::{LlmProvider, ProviderExtra};
 use crate::compat_resilience::ToolResultFormat;
 use crate::tools::ToolName;
 
+/// Auto-approval level for the KB tools (global --unsafe-reflex does not
+/// apply to them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub(crate) enum KbAutoConfirm {
+    /// Always ask `y/N` (interactive); batch / todo modes deny instead.
+    #[default]
+    Ask,
+    /// Auto-approve only the read-only tools (data_kb_search / data_kb_schema).
+    Ro,
+    /// Auto-approve all four KB tools (reads and writes).
+    Rw,
+}
+
+impl std::fmt::Display for KbAutoConfirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            KbAutoConfirm::Ask => "ask",
+            KbAutoConfirm::Ro => "ro",
+            KbAutoConfirm::Rw => "rw",
+        })
+    }
+}
+
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
 pub const APP_BIN_NAME: &str = "always-goofy-things";
@@ -230,6 +253,22 @@ pub struct Config {
     #[arg(long, env = "DB_UNSAFE_REFLEX", default_value_t = false)]
     pub db_unsafe_reflex: bool,
 
+    /// KB root directory; optional (unset -> app-data default
+    /// `kb/kb-<workdir>-<hash>`). Holds the knowledge database at
+    /// `<dir>/db/library.sqlite`.
+    #[arg(long, env = "KB_DIR")]
+    pub kb_dir: Option<String>,
+
+    /// Auto-approve the KB tools without confirmation: `ro` = reads only,
+    /// `rw` = all four (writes too). Independent of --unsafe-reflex.
+    #[arg(long, env = "KB_AUTO_CONFIRM", value_enum, default_value_t = KbAutoConfirm::Ask)]
+    pub kb_auto_confirm: KbAutoConfirm,
+
+    /// Maximum response size in bytes of a data_kb_search result before
+    /// truncation (default: 65536 = 64KB).
+    #[arg(long, env = "KB_MAX_BYTES", default_value_t = 65536)]
+    pub kb_max_bytes: usize,
+
     /// Optional subcommand (e.g. `license`); runs and exits instead of
     /// starting the app.
     #[command(subcommand)]
@@ -339,6 +378,13 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         retrieval_names.push("data_search, data_schema");
         retrieval_lines.push(
             "- data_search / data_schema: Query the configured database (requires --db-type).",
+        );
+    }
+    #[cfg(feature = "kb")]
+    if is_enabled("data_kb_search") || is_enabled("data_kb_schema") {
+        retrieval_names.push("data_kb_search, data_kb_schema");
+        retrieval_lines.push(
+            "- data_kb_search / data_kb_schema: Read-only queries against the local Knowledge Base sqlite file. Write tools data_kb_insert / data_kb_update are also available.",
         );
     }
     if !retrieval_names.is_empty() {
@@ -558,6 +604,20 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
                 "{C_YELLOW}[Warning] data_search/data_schema require --db-type; they stay disabled without it.{RESET}"
             );
         }
+        #[cfg(not(feature = "kb"))]
+        if config.only_tools.iter().any(|t| {
+            matches!(
+                t,
+                ToolName::DataKbSearch
+                    | ToolName::DataKbSchema
+                    | ToolName::DataKbInsert
+                    | ToolName::DataKbUpdate
+            )
+        }) {
+            println!(
+                "{C_YELLOW}[Warning] data_kb_* tools require a binary built with --features kb.{RESET}"
+            );
+        }
     }
 
     // --- Database configuration ---
@@ -601,7 +661,37 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         println!("  db-unsafe-reflex   : {}", config.db_unsafe_reflex);
     }
 
+    // --- Knowledge Base configuration ---
+    // The directory shown is --kb-dir / KB_DIR, or (with the kb feature) the
+    // app-data default kb/kb-<workdir>-<hash>, one library per working dir.
+    if let Some(kb_dir) = kb_dir_for_display(config) {
+        let db_path = kb_dir.join("db").join("library.sqlite");
+        println!("  kb-dir             : {}", kb_dir.display());
+        println!("  kb-db              : {}", db_path.display());
+        println!("  kb-max-bytes       : {}", config.kb_max_bytes);
+        println!("  kb-auto-confirm    : {}", config.kb_auto_confirm);
+        #[cfg(not(feature = "kb"))]
+        println!(
+            "{C_YELLOW}[Warning] --kb-dir requires a binary built with --features kb; the KB feature stays disabled.{RESET}"
+        );
+    }
+
     Ok(current_dir)
+}
+
+/// KB root for the banner: `--kb-dir` / `KB_DIR`, or the app-data default
+/// (`kb/kb-<workdir>-<hash>`). Call after the cwd is canonicalized (chdir).
+#[cfg(feature = "kb")]
+fn kb_dir_for_display(config: &Config) -> Option<std::path::PathBuf> {
+    config
+        .kb_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(crate::kb::default_kb_dir)
+}
+#[cfg(not(feature = "kb"))]
+fn kb_dir_for_display(config: &Config) -> Option<std::path::PathBuf> {
+    config.kb_dir.as_deref().map(std::path::PathBuf::from)
 }
 
 #[cfg(test)]

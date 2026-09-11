@@ -1,6 +1,8 @@
 use super::*;
 use std::fs;
 
+use crate::startup::KbAutoConfirm;
+
 #[tokio::test]
 async fn test_execute_tool_mode2_denies_state_file_writes() {
     // Todo mode 2: LLM writes to guard-managed state files are rejected at
@@ -9,6 +11,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
     let denied = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": "artifacts/handover.md" }),
+        None,
         None,
         None,
         None,
@@ -30,6 +33,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         None,
         None,
         None,
+        None,
         2,
         |_| true,
     )
@@ -44,6 +48,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
     let ok = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": outside.to_str().unwrap() }),
+        None,
         None,
         None,
         None,
@@ -62,6 +67,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         let ok = execute_tool(
             "write_file",
             &json!({ "content": "x", "path": outside.to_str().unwrap() }),
+            None,
             None,
             None,
             None,
@@ -95,6 +101,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
         }),
         None,
         None,
+        None,
         Some(&guard),
         2,
         |_| true,
@@ -112,6 +119,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
     let ok = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": other.to_str().unwrap() }),
+        None,
         None,
         None,
         Some(&guard),
@@ -820,6 +828,7 @@ fn test_validate_path_symlink_escape() {
             None,
             None,
             None,
+            None,
             0,
             |_| true,
         ));
@@ -945,7 +954,7 @@ fn test_tab_skip_blank_with_mixed_whitespace_indent() {
 
 #[test]
 fn test_get_tool_definitions_filters_disabled() {
-    let defs = get_tool_definitions(None, |n| n != "execute_bash" && n != "fetch_web");
+    let defs = get_tool_definitions(None, None, |n| n != "execute_bash" && n != "fetch_web");
     let names: Vec<&str> = defs
         .iter()
         .map(|d| d["function"]["name"].as_str().unwrap())
@@ -958,7 +967,7 @@ fn test_get_tool_definitions_filters_disabled() {
 
 #[test]
 fn test_get_tool_definitions_only_data_tools_with_db_type() {
-    let defs = get_tool_definitions(Some("greptimedb"), |n| {
+    let defs = get_tool_definitions(Some("greptimedb"), None, |n| {
         n == "data_search" || n == "data_schema"
     });
     let names: Vec<&str> = defs
@@ -968,11 +977,41 @@ fn test_get_tool_definitions_only_data_tools_with_db_type() {
     assert_eq!(names, vec!["data_search", "data_schema"]);
 }
 
+/// KB tools are registered only when a KB directory is resolved (at startup
+/// the app defaults it to the app-data dir when --kb-dir / KB_DIR is unset).
+#[cfg(feature = "kb")]
+#[test]
+fn test_get_tool_definitions_kb_tools_with_kb_dir() {
+    let defs = get_tool_definitions(None, Some("my-doc-library"), |_| true);
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d["function"]["name"].as_str().unwrap())
+        .collect();
+    for n in [
+        "data_kb_search",
+        "data_kb_schema",
+        "data_kb_insert",
+        "data_kb_update",
+    ] {
+        assert!(names.contains(&n), "{} must be registered with a KB dir", n);
+    }
+    let defs = get_tool_definitions(None, None, |_| true);
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with("data_kb_")),
+        "KB tools must not be registered without a KB dir"
+    );
+}
+
 #[tokio::test]
 async fn test_execute_tool_rejects_disabled() {
     let res = execute_tool(
         "execute_bash",
         &json!({ "command": "ls" }),
+        None,
         None,
         None,
         None,
@@ -997,7 +1036,8 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
         &json!({ "command": "ls" }),
         true, // unsafe_reflex would normally auto-confirm -- must NOT apply
         false,
-        true, // batch
+        KbAutoConfirm::Ask, // KB gate off (non-KB tool)
+        true,  // batch
         |_| false,
     )
     .await;
@@ -1020,6 +1060,7 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         &json!({ "expressions": ["1 + 1"] }),
         false, // unsafe_reflex off
         false, // db_unsafe_reflex off (does not apply to calc)
+        KbAutoConfirm::Ask, // KB gate off (does not apply to calc)
         true,  // batch
         |_| true,
     )
@@ -1033,6 +1074,7 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         &json!({ "expressions": ["1 + 1"] }),
         false,
         true,
+        KbAutoConfirm::Ask, // KB gate off
         true,
         |_| true,
     )
@@ -1045,6 +1087,7 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         &json!({ "expressions": ["1 + 1"] }),
         true,
         false,
+        KbAutoConfirm::Ask, // KB gate off
         true,
         |_| true,
     )
@@ -1078,6 +1121,7 @@ async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
             args,
             false, // unsafe_reflex off
             false, // db_unsafe_reflex off
+            KbAutoConfirm::Ask, // KB gate off
             true,  // batch: no y/N available -> must deny, never execute
             |_| true,
         )
@@ -1105,7 +1149,8 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         &json!({ "path": "artifacts/" }),
         true, // unsafe_reflex
         false,
-        true, // batch
+        KbAutoConfirm::Ask, // KB gate off (list_directory is not a KB tool)
+        true,  // batch
         |_| true,
     )
     .await;
@@ -1122,6 +1167,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         &json!({ "path": "artifacts//" }),
         true,
         false,
+        KbAutoConfirm::Ask, // KB gate off
         true,
         |_| true,
     )
@@ -1138,12 +1184,77 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         &json!({ "path": "artifacts/" }),
         true,
         false,
+        KbAutoConfirm::Ask, // KB gate off
         true,
         |_| true,
     )
     .await;
     assert!(!decision.proceed, "read_file 'artifacts/' must stay denied");
     assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
+}
+
+/// KB approval gate: controlled only by --kb-auto-confirm (ro / rw), never
+/// by the global --unsafe-reflex.
+#[cfg(feature = "kb")]
+#[tokio::test]
+async fn kb_approval_gate_is_independent_of_global_reflex() {
+    // ro: read tools auto-approve, write tools do not.
+    let read_ro = confirm_execute_tool(
+        "data_kb_search",
+        &json!({ "query": "SELECT 1" }),
+        false,
+        false,
+        KbAutoConfirm::Ro,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(read_ro.proceed, "ro must approve KB reads");
+    assert_eq!(read_ro.kind, ToolRunDecisionKind::AutoConfirm);
+
+    let write_ro = confirm_execute_tool(
+        "data_kb_insert",
+        &json!({ "document_id": "null" }),
+        false,
+        false,
+        KbAutoConfirm::Ro,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(
+        !write_ro.proceed,
+        "ro must NOT approve KB writes (batch mode denies)"
+    );
+
+    // rw: writes auto-approve too.
+    let write_rw = confirm_execute_tool(
+        "data_kb_update",
+        &json!({ "target_type": "documents", "target_id": "x" }),
+        false,
+        false,
+        KbAutoConfirm::Rw,
+        true,
+        |_| true,
+    )
+    .await;
+    assert!(write_rw.proceed, "rw must approve KB writes");
+    assert_eq!(write_rw.kind, ToolRunDecisionKind::AutoConfirm);
+
+    // The global --unsafe-reflex must NOT leak into the KB gate at all.
+    for (name, args) in [
+        ("data_kb_search", &json!({ "query": "SELECT 1" })),
+        ("data_kb_insert", &json!({ "document_id": "null" })),
+        ("data_kb_update", &json!({ "target_type": "documents" })),
+    ] {
+        let d = confirm_execute_tool(name, args, true, false, KbAutoConfirm::Ask, true, |_| true)
+            .await;
+        assert!(
+            !d.proceed,
+            "global --unsafe-reflex must not approve {} (batch mode denies)",
+            name
+        );
+    }
 }
 
 #[test]

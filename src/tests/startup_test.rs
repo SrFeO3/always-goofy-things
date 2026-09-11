@@ -31,6 +31,9 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         db_timeout: 30,
         db_max_bytes: 65536,
         db_unsafe_reflex: false,
+        kb_dir: None,
+        kb_auto_confirm: KbAutoConfirm::Ask,
+        kb_max_bytes: 65536,
         only_tools,
         command: None,
     }
@@ -145,7 +148,12 @@ fn system_message_full_when_all_enabled() {
         msg.content
             .contains("- str_replace_editor: Replace one exact string block; prefer it over write_file for partial edits.")
     );
-    assert!(msg.content.contains("## 2-3. Information Retrieval (list_directory, grep_search, fetch_web, data_search, data_schema)"));
+    assert!(msg.content.contains("## 2-3. Information Retrieval (list_directory, grep_search, fetch_web, data_search, data_schema"));
+    #[cfg(feature = "kb")]
+    assert!(
+        msg.content.contains("data_kb_search, data_kb_schema"),
+        "KB read tools must appear in the retrieval section when the kb feature is on"
+    );
     assert!(
         msg.content
             .contains("## 2-4. Deterministic Calculation (calc)")

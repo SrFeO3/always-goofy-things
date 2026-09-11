@@ -613,14 +613,14 @@ fn ledger_records_success_and_error() {
 
 #[tokio::test]
 async fn tool_definition_and_dispatch() {
-    let defs = crate::tools::get_tool_definitions(None, |_| true);
+    let defs = crate::tools::get_tool_definitions(None, None, |_| true);
     let names: Vec<&str> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str())
         .collect();
     assert!(names.contains(&"calc"), "calc must be in default tool list");
 
-    let defs = crate::tools::get_tool_definitions(None, |n| n != "calc");
+    let defs = crate::tools::get_tool_definitions(None, None, |n| n != "calc");
     let names: Vec<&str> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str())
@@ -637,6 +637,7 @@ async fn tool_definition_and_dispatch() {
         None,
         None,
         None,
+        None,
         0,
         |_| true,
     )
@@ -648,6 +649,7 @@ async fn tool_definition_and_dispatch() {
     let res = crate::tools::execute_tool(
         "calc",
         &json!({ "expressions": ["1 + 1"] }),
+        None,
         None,
         None,
         None,

@@ -29,7 +29,7 @@ async fn test_tool_smoke_read_file_and_grep() {
     std::fs::write(&probe, "unique_probe_token_42\n").unwrap();
 
     // get_tool_definitions exposes the standard toolset.
-    let defs = crate::tools::get_tool_definitions(None, |_| true);
+    let defs = crate::tools::get_tool_definitions(None, None, |_| true);
     assert!(!defs.is_empty());
     let names = defs
         .iter()
@@ -42,6 +42,7 @@ async fn test_tool_smoke_read_file_and_grep() {
     let res = crate::tools::execute_tool(
         "read_file",
         &serde_json::json!({ "path": probe }),
+        None,
         None,
         None,
         None,
@@ -59,6 +60,7 @@ async fn test_tool_smoke_read_file_and_grep() {
         None,
         None,
         None,
+        None,
         0,
         |_| true,
     )
@@ -73,6 +75,7 @@ async fn test_tool_smoke_disabled_tool_refused() {
     let res = crate::tools::execute_tool(
         "read_file",
         &serde_json::json!({ "path": "._smtool_disabled_probe.txt" }),
+        None,
         None,
         None,
         None,
