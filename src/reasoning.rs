@@ -623,11 +623,19 @@ fn api_error_msg(
     verbose_lt_2: bool,
 ) -> anyhow::Error {
     let payload_display = if req_json.len() > 62 && verbose_lt_2 {
+        let mut head = 30;
+        while !req_json.is_char_boundary(head) {
+            head += 1;
+        }
+        let mut tail_start = req_json.len().saturating_sub(30);
+        while !req_json.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
         format!(
             "{}...({}bytes)...{}",
-            &req_json[..30],
+            &req_json[..head],
             req_json.len(),
-            &req_json[req_json.len().saturating_sub(30)..]
+            &req_json[tail_start..]
         )
     } else {
         req_json.to_string()

@@ -453,9 +453,7 @@ pub async fn execute_tool(
         #[cfg(feature = "kb")]
         "data_kb_search" => {
             let ctx = kb_ctx.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
-                )
+                anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             let query = args
                 .get("query")
@@ -466,9 +464,7 @@ pub async fn execute_tool(
         #[cfg(feature = "kb")]
         "data_kb_schema" => {
             let ctx = kb_ctx.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
-                )
+                anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             let table = args.get("table").and_then(|v| v.as_str());
             kb::execute_kb_schema(ctx, table)
@@ -476,18 +472,14 @@ pub async fn execute_tool(
         #[cfg(feature = "kb")]
         "data_kb_insert" => {
             let ctx = kb_ctx.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
-                )
+                anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_insert(ctx, args)
         }
         #[cfg(feature = "kb")]
         "data_kb_update" => {
             let ctx = kb_ctx.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[KB_CONFIG_ERROR] The knowledge base is not initialized."
-                )
+                anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_update(ctx, args)
         }
@@ -596,7 +588,9 @@ pub async fn confirm_execute_tool(
                 crate::startup::KbAutoConfirm::Ask => false,
             };
         if confirmed {
-            let reason = Some("KB-dedicated (single library.sqlite): approved by --kb-auto-confirm".to_string());
+            let reason = Some(
+                "KB-dedicated (single library.sqlite): approved by --kb-auto-confirm".to_string(),
+            );
             #[cfg(feature = "gui")]
             let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
                 name: name.to_string(),
@@ -1402,20 +1396,22 @@ async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
     // held the pipe open) but the visible tail is short, say so instead of
     // looking like a clean EOF.
     let stdout = if stdout_raw.len() > 4096 {
-        format!(
-            "[... Output truncated ...]\n{}",
-            &stdout_raw[stdout_raw.len() - 4000..]
-        )
+        let mut start = stdout_raw.len() - 4000;
+        while !stdout_raw.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("[... Output truncated ...]\n{}", &stdout_raw[start..])
     } else if output.stdout_truncated {
         format!("[... Output truncated ...]\n{}", stdout_raw)
     } else {
         stdout_raw
     };
     let stderr = if stderr_raw.len() > 4096 {
-        format!(
-            "[... stderr truncated ...]\n{}",
-            &stderr_raw[stderr_raw.len() - 4000..]
-        )
+        let mut start = stderr_raw.len() - 4000;
+        while !stderr_raw.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("[... stderr truncated ...]\n{}", &stderr_raw[start..])
     } else if output.stderr_truncated {
         format!("[... stderr truncated ...]\n{}", stderr_raw)
     } else {
@@ -1490,7 +1486,12 @@ async fn execute_fetch_web(args: &serde_json::Value) -> Result<serde_json::Value
 
     let clean_text = strip_html_tags(&body);
     let truncated_content = if clean_text.len() > 20480 {
-        format!("{}... [Output truncated]", &clean_text[..20000])
+        // Walk back to a valid UTF-8 char boundary
+        let mut end = 20000;
+        while !clean_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [Output truncated]", &clean_text[..end])
     } else {
         clean_text
     };

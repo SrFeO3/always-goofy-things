@@ -87,6 +87,20 @@ async fn test_tool_smoke_disabled_tool_refused() {
 }
 
 #[test]
+fn test_api_error_msg_multibyte_payload() {
+    // Regression: head/tail payload slicing used raw byte offsets, which
+    // panicked when the JSON contained multi-byte text (e.g. Japanese).
+    let req_json = format!(r#"{{"content": "{}"}}"#, "あ".repeat(40));
+    let err =
+        crate::reasoning::api_error_msg(reqwest::StatusCode::BAD_REQUEST, "boom", &req_json, true);
+    let msg = err.to_string();
+    assert!(msg.contains("...("), "got: {}", msg);
+    assert!(msg.contains("bytes)..."), "got: {}", msg);
+    assert!(msg.contains('あ'), "payload must be kept: {}", msg);
+    assert!(!msg.contains('\u{FFFD}'), "no split chars: {}", msg);
+}
+
+#[test]
 fn test_extract_backend_error_shapes() {
     use serde_json::json;
     let e = |v: serde_json::Value| crate::reasoning::extract_backend_error(&v);

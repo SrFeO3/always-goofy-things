@@ -791,6 +791,38 @@ async fn test_execute_bash_output_capped() {
     fs::remove_file(path).ok();
 }
 
+#[tokio::test]
+async fn test_execute_bash_output_capped_multibyte_tail() {
+    // Regression: truncating tagged output used to slice stdout at a raw
+    // byte offset, which panicked when that offset split a multi-byte UTF-8
+    // char (box-drawing '─', 3 bytes). The tail must keep whole chars only.
+    let path = get_temp_path("big_output_multibyte");
+    // 100_000 ASCII bytes followed by 100_000 '─' (300_000 bytes). The byte
+    // at len - 4000 lands 296_000 bytes into the '─' run, i.e. mid-char.
+    let mut content = String::new();
+    content.push_str(&"x".repeat(100_000));
+    content.push_str(&"─".repeat(100_000));
+    fs::write(&path, &content).unwrap();
+
+    let res = execute_bash(&json!({ "command": format!("cat {}", path.display()) }))
+        .await
+        .unwrap();
+    let stdout = res["stdout"].as_str().unwrap();
+    assert!(
+        stdout.contains("[... Output truncated ...]"),
+        "expected truncation marker, got {} bytes",
+        stdout.len()
+    );
+    assert!(stdout.len() <= 4096, "visible output must stay bounded");
+    assert!(stdout.ends_with('─'), "tail must end at a char boundary");
+    assert!(
+        !stdout.contains('\u{FFFD}'),
+        "truncation must not split a UTF-8 char"
+    );
+
+    fs::remove_file(path).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn test_validate_path_symlink_escape() {
@@ -1037,7 +1069,7 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
         true, // unsafe_reflex would normally auto-confirm -- must NOT apply
         false,
         KbAutoConfirm::Ask, // KB gate off (non-KB tool)
-        true,  // batch
+        true,               // batch
         |_| false,
     )
     .await;
@@ -1058,10 +1090,10 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
     let decision = confirm_execute_tool(
         "calc",
         &json!({ "expressions": ["1 + 1"] }),
-        false, // unsafe_reflex off
-        false, // db_unsafe_reflex off (does not apply to calc)
+        false,              // unsafe_reflex off
+        false,              // db_unsafe_reflex off (does not apply to calc)
         KbAutoConfirm::Ask, // KB gate off (does not apply to calc)
-        true,  // batch
+        true,               // batch
         |_| true,
     )
     .await;
@@ -1119,10 +1151,10 @@ async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
         let decision = confirm_execute_tool(
             name,
             args,
-            false, // unsafe_reflex off
-            false, // db_unsafe_reflex off
+            false,              // unsafe_reflex off
+            false,              // db_unsafe_reflex off
             KbAutoConfirm::Ask, // KB gate off
-            true,  // batch: no y/N available -> must deny, never execute
+            true,               // batch: no y/N available -> must deny, never execute
             |_| true,
         )
         .await;
@@ -1150,7 +1182,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         true, // unsafe_reflex
         false,
         KbAutoConfirm::Ask, // KB gate off (list_directory is not a KB tool)
-        true,  // batch
+        true,               // batch
         |_| true,
     )
     .await;
@@ -1247,8 +1279,8 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         ("data_kb_insert", &json!({ "document_id": "null" })),
         ("data_kb_update", &json!({ "target_type": "documents" })),
     ] {
-        let d = confirm_execute_tool(name, args, true, false, KbAutoConfirm::Ask, true, |_| true)
-            .await;
+        let d =
+            confirm_execute_tool(name, args, true, false, KbAutoConfirm::Ask, true, |_| true).await;
         assert!(
             !d.proceed,
             "global --unsafe-reflex must not approve {} (batch mode denies)",

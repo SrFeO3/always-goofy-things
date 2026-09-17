@@ -146,9 +146,7 @@ fn handle_kb(arg: Option<&str>, kb_ctx: crate::tools::KbCtxOpt<'_>) -> Result<()
     #[cfg(feature = "kb")]
     {
         let Some(ctx) = kb_ctx else {
-            println!(
-                "\x1b[93mThe knowledge base is not initialized.\x1b[0m"
-            );
+            println!("\x1b[93mThe knowledge base is not initialized.\x1b[0m");
             return Ok(());
         };
         let arg = arg.unwrap_or("");
