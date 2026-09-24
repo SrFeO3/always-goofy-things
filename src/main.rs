@@ -35,8 +35,6 @@ mod file;
 mod file_pdf;
 #[cfg(feature = "gui")]
 mod gui;
-#[cfg(feature = "gui")]
-mod gui_pretty;
 #[cfg(feature = "kb")]
 mod kb;
 #[cfg(feature = "kb")]
@@ -77,7 +75,6 @@ const THIRD_PARTY_LICENSES: &str =
     include_str!("../third_party_licenses/THIRD_PARTY_LICENSES-no-feature.txt");
 
 #[tokio::main]
-#[cfg_attr(feature = "gui", allow(unreachable_code))]
 async fn main() -> Result<()> {
     let config = startup::Config::parse();
 
@@ -91,11 +88,11 @@ async fn main() -> Result<()> {
         .provider
         .unwrap_or_else(|| compat_provider::detect_provider(&config.llm_url));
 
+    // A GUI build is a GUI process by default. The only internal exception is
+    // the CLI child started by the GUI process shell.
     #[cfg(feature = "gui")]
-    {
-        // eframe::run_native blocks the current thread.
-        // block_in_place lets tokio move spawned tasks to other threads.
-        tokio::task::block_in_place(|| gui::run(config, provider))?;
+    if std::env::var_os("AGT_GUI_CHILD").is_none() {
+        tokio::task::block_in_place(|| gui::run(config))?;
         return Ok(());
     }
 

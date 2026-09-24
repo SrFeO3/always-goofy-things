@@ -41,29 +41,6 @@ use crate::todo_guard::{
 
 pub(crate) const TODO_MD_PATH: &str = "./todo.md";
 
-/// Push a system message to both the session log (for persistence / completed
-/// display) and the live GUI stream buffer (so it appears during execution).
-#[cfg(feature = "gui")]
-fn push_system_msg(gui_log: &mut Session, text: &str) {
-    push_system_msg_blank(gui_log, text, true);
-}
-
-/// Same as `push_system_msg` but with control over the leading blank line.
-#[cfg(feature = "gui")]
-fn push_system_msg_blank(gui_log: &mut Session, text: &str, leading_blank: bool) {
-    gui_log.push_message(Message {
-        role: "system".to_string(),
-        content: text.to_string(),
-        ..Default::default()
-    });
-    let mut buf = crate::model::LLM_STREAM_BUF.lock().unwrap();
-    if leading_blank {
-        buf.2.push('\n');
-    }
-    buf.2.push_str(text);
-    buf.2.push('\n');
-}
-
 /// A single task item parsed from todo.md.
 #[derive(Debug, Clone)]
 struct TaskItem {
@@ -483,11 +460,6 @@ async fn final_replan_confirms_completion<'a>(
         startup::C_CYAN,
         startup::RESET
     );
-    #[cfg(feature = "gui")]
-    push_system_msg(
-        gui_log,
-        "--- [Replan] (final: all tasks done - planner may add tasks) ---",
-    );
 
     // One backoff retry before treating the completion as unconfirmed.
     let first = run_replan_loop(ctx, gui_log, user_query, app_feedback).await;
@@ -682,8 +654,6 @@ pub(crate) async fn run_todo_loop<'a>(
         todo_title, mode_name, total, pending_count, total
     );
     println!("\n{}{}{}\n", startup::C_CYAN, exec_line, startup::RESET);
-    #[cfg(feature = "gui")]
-    push_system_msg_blank(gui_log, &exec_line, false);
 
     // Ensure the free-form handover log exists (seeded with a template), so
     // every session can read it together with todo.md.
@@ -733,16 +703,6 @@ async fn run_todo_loop_mode1<'a>(
             task.description,
             startup::RESET
         );
-        // Also push to GUI so the task header appears during execution.
-        #[cfg(feature = "gui")]
-        push_system_msg(
-            gui_log,
-            &format!(
-                "--- [Task {}/{}] {} ---",
-                task_num, pending_count, task.description
-            ),
-        );
-
         let system_msg = startup::system_message_mode1_task_loop(config);
 
         let task_label = format!("{}_task{}", config.session_label, task.index);
@@ -832,12 +792,6 @@ async fn run_todo_loop_mode1<'a>(
                     content: done_msg.clone(),
                     ..Default::default()
                 });
-                #[cfg(feature = "gui")]
-                crate::model::LLM_STREAM_BUF
-                    .lock()
-                    .unwrap()
-                    .2
-                    .push_str(&format!("{}\n", done_msg));
 
                 completed += 1;
             } else {
@@ -980,8 +934,6 @@ async fn run_todo_loop_mode2<'a>(
             tokio::time::sleep(wait).await;
         }
         println!("{}--- [Replan] ---{}", startup::C_CYAN, startup::RESET);
-        #[cfg(feature = "gui")]
-        push_system_msg(gui_log, "--- [Replan] ---");
         let prev_unchecked = count_unchecked(&todo_content);
         let feedback = if app_feedback.is_empty() {
             None
@@ -1109,13 +1061,6 @@ async fn run_todo_loop_mode2<'a>(
             task.description,
             startup::RESET
         );
-        // Also push to GUI so the task header appears during execution.
-        #[cfg(feature = "gui")]
-        push_system_msg(
-            gui_log,
-            &format!("--- [Task {}] {} ---", task.index + 1, task.description),
-        );
-
         // Snapshot the plan as this session sees it: every `./todo.md`
         // rewrite is validated against it (own `[x]` + added subtasks only;
         // the next replanner session clears it).
@@ -1226,12 +1171,6 @@ async fn run_todo_loop_mode2<'a>(
                 content: done_msg.clone(),
                 ..Default::default()
             });
-            #[cfg(feature = "gui")]
-            crate::model::LLM_STREAM_BUF
-                .lock()
-                .unwrap()
-                .2
-                .push_str(&format!("{}\n", done_msg));
 
             // A task whose declared Output paths are missing does not count
             // as verified-complete; the replan feedback carries the gap.

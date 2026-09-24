@@ -21,13 +21,10 @@
 //! - `fetch_web`: Fetch and extract text content from a specified URL.
 
 use std::fs;
-#[cfg(not(feature = "gui"))]
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-#[cfg(feature = "gui")]
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -37,14 +34,11 @@ use clap::ValueEnum;
 use regex::Regex;
 use reqwest::redirect;
 use serde_json::json;
-#[cfg(feature = "gui")]
-use tokio::sync::{mpsc, oneshot};
 
 use crate::file::{self, FileType};
 #[cfg(feature = "kb")]
 use crate::kb;
 use crate::reflex::auto_confirm;
-#[cfg(not(feature = "gui"))]
 use crate::startup::{C_CYAN, RESET};
 use crate::tools_calc;
 use crate::tools_data;
@@ -181,37 +175,6 @@ pub struct ToolRunDecision {
     pub proceed: bool,
     pub kind: ToolRunDecisionKind,
     pub reason: Option<String>,
-}
-
-/// GUI: channel pair for tool interactions (user-confirm prompts and
-/// auto-confirm notices). Initialised lazily on first access; no manual
-/// setup required.
-#[cfg(feature = "gui")]
-pub(crate) static TOOL_INTERACT_CH: LazyLock<(
-    mpsc::UnboundedSender<ToolInteractMsg>,
-    Mutex<mpsc::UnboundedReceiver<ToolInteractMsg>>,
-)> = LazyLock::new(|| {
-    let (tx, rx) = mpsc::unbounded_channel();
-    (tx, Mutex::new(rx))
-});
-
-/// Tool execution notice shared by both interaction variants.
-#[cfg(feature = "gui")]
-pub(crate) struct ToolNotice {
-    pub name: String,
-    pub args: serde_json::Value,
-    pub reason: Option<String>,
-}
-
-/// A single tool interaction event flowing from core to GUI.
-/// `Prompt` blocks until the user decides; `Notice` is fire-and-forget.
-#[cfg(feature = "gui")]
-pub(crate) enum ToolInteractMsg {
-    Prompt {
-        notice: ToolNotice,
-        reply: oneshot::Sender<ToolRunDecision>,
-    },
-    Notice(ToolNotice),
 }
 
 /// Tool definitions sent to the LLM API.
@@ -591,12 +554,6 @@ pub async fn confirm_execute_tool(
             let reason = Some(
                 "KB-dedicated (single library.sqlite): approved by --kb-auto-confirm".to_string(),
             );
-            #[cfg(feature = "gui")]
-            let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
-                name: name.to_string(),
-                args: args.clone(),
-                reason: reason.clone(),
-            }));
             return ToolRunDecision {
                 proceed: true,
                 kind: ToolRunDecisionKind::AutoConfirm,
@@ -616,12 +573,6 @@ pub async fn confirm_execute_tool(
         && let (proceed, reason) = auto_confirm(name, args)
         && proceed
     {
-        #[cfg(feature = "gui")]
-        let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Notice(ToolNotice {
-            name: name.to_string(),
-            args: args.clone(),
-            reason: reason.clone(),
-        }));
         return ToolRunDecision {
             proceed: true,
             kind: ToolRunDecisionKind::AutoConfirm,
@@ -638,62 +589,41 @@ pub async fn confirm_execute_tool(
         };
     }
 
-    // -- CLI: read from stdin --
-    #[cfg(not(feature = "gui"))]
-    {
-        print!(
-            "      {}Execute this tool ({})? (y/N) {}",
-            C_CYAN, name, RESET
-        );
-        if io::stdout().flush().is_err() {
-            return ToolRunDecision {
-                proceed: false,
-                kind: ToolRunDecisionKind::SystemError,
-                reason: Some("Failed to flush stdout".to_string()),
-            };
-        }
-
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            return ToolRunDecision {
-                proceed: false,
-                kind: ToolRunDecisionKind::SystemError,
-                reason: Some("Failed to read stdin".to_string()),
-            };
-        }
-
-        if input.trim().eq_ignore_ascii_case("y") {
-            ToolRunDecision {
-                proceed: true,
-                kind: ToolRunDecisionKind::UserConfirm,
-                reason: None,
-            }
-        } else {
-            ToolRunDecision {
-                proceed: false,
-                kind: ToolRunDecisionKind::UserCancel,
-                reason: None,
-            }
-        }
+    // Tool approval is read from the child's stdin. In the GUI build this is
+    // the GUI input field, which writes `y`/`n` to the CLI process.
+    print!(
+        "      {}Execute this tool ({})? (y/N) {}",
+        C_CYAN, name, RESET
+    );
+    if io::stdout().flush().is_err() {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some("Failed to flush stdout".to_string()),
+        };
     }
 
-    // -- GUI: mpsc + oneshot to main thread --
-    #[cfg(feature = "gui")]
-    {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = TOOL_INTERACT_CH.0.send(ToolInteractMsg::Prompt {
-            notice: ToolNotice {
-                name: name.to_string(),
-                args: args.clone(),
-                reason: None,
-            },
-            reply: reply_tx,
-        });
-        reply_rx.await.unwrap_or(ToolRunDecision {
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return ToolRunDecision {
+            proceed: false,
+            kind: ToolRunDecisionKind::SystemError,
+            reason: Some("Failed to read stdin".to_string()),
+        };
+    }
+
+    if input.trim().eq_ignore_ascii_case("y") {
+        ToolRunDecision {
+            proceed: true,
+            kind: ToolRunDecisionKind::UserConfirm,
+            reason: None,
+        }
+    } else {
+        ToolRunDecision {
             proceed: false,
             kind: ToolRunDecisionKind::UserCancel,
             reason: None,
-        })
+        }
     }
 }
 

@@ -77,7 +77,7 @@ pub(crate) fn pretty_print_kb_result(result: &Value) {
     // data_kb_search: CSV content
     if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
         let lines: Vec<&str> = content.lines().collect();
-        let shown: Vec<&str> = lines.iter().take(5).map(|s| *s).collect();
+        let shown: Vec<&str> = lines.iter().take(5).copied().collect();
         println!(
             "KB Result: [{} line{}]",
             lines.len(),
@@ -116,10 +116,10 @@ pub(crate) fn pretty_print_kb_result(result: &Value) {
                 println!("  - {} ({}, ~{} rows)", name, typ, rows);
             }
         }
-        if result.get("table").and_then(|v| v.as_str()).is_some() {
-            if let Some(samples) = result.get("samples").and_then(|v| v.as_array()) {
-                println!("  {} sample row(s)", samples.len());
-            }
+        if result.get("table").and_then(|v| v.as_str()).is_some()
+            && let Some(samples) = result.get("samples").and_then(|v| v.as_array())
+        {
+            println!("  {} sample row(s)", samples.len());
         }
         return;
     }

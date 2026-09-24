@@ -3,9 +3,6 @@
 //! Contains the core data structures for messages, sessions, settings,
 //! and LLM communication payloads. All types are owned and `Clone`-able.
 
-#[cfg(feature = "gui")]
-use std::sync::{LazyLock, Mutex};
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -34,9 +31,6 @@ pub(crate) struct Message {
     #[serde(skip)]
     pub tool_call_decision: Option<ToolRunDecision>,
     #[serde(skip)]
-    #[allow(dead_code)]
-    pub tool_args: Option<serde_json::Value>,
-    #[serde(skip)]
     pub attached_files: Vec<AttachedFile>,
     /// Session ID, never sent to the LLM (`#[serde(skip)]`). Fixed for one
     /// `Session` (kept across `/rewind`/`/restore`); todo sub-sessions get their own.
@@ -56,7 +50,6 @@ impl Default for Message {
             timestamp: chrono::Utc::now(),
             model: None,
             tool_call_decision: None,
-            tool_args: None,
             attached_files: Vec::new(),
             session_id: String::new(),
         }
@@ -130,13 +123,6 @@ impl Settings {
         }
     }
 }
-
-/// Shared buffer for LLM streaming output.
-/// `.0` = reasoning, `.1` = content, `.2` = system, `.3` = user.
-/// Worker writes chunks via `push_str`; the GUI reads and clears them each frame.
-#[cfg(feature = "gui")]
-pub(crate) static LLM_STREAM_BUF: LazyLock<Mutex<(String, String, String, String)>> =
-    LazyLock::new(|| Mutex::new((String::new(), String::new(), String::new(), String::new())));
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct ToolCall {

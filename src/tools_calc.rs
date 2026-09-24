@@ -1010,7 +1010,7 @@ fn hex_decode_any(s: &str) -> Result<Vec<u8>, CalcError> {
     }
     let b = cleaned.as_bytes();
     let mut out = Vec::with_capacity(b.len() / 2);
-    for pair in b.chunks_exact(2) {
+    for pair in b.as_chunks::<2>().0 {
         let hi = hex_val(pair[0]).ok_or_else(|| {
             CalcError::invalid_arg(format!("invalid hex character '{}'", pair[0] as char))
         })?;

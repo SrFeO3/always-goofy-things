@@ -256,13 +256,8 @@ pub(crate) async fn run_reasoning_loop<'a>(
         });
         persistence::append_message_to_session(&label, last)?;
     }
-    // Push user message to GUI live stream so turn numbers appear correctly.
-    #[cfg(feature = "gui")]
-    crate::model::LLM_STREAM_BUF
-        .lock()
-        .unwrap()
-        .3
-        .push_str(&format!("{}\n", user_query));
+    // The GUI observes the CLI's stdout/stderr stream; no cross-process
+    // stream buffer is needed here.
 
     // Inner loop to handle tool execution and sequential LLM reasoning.
     // `Completed` by default; every non-completing break overrides it.
@@ -325,10 +320,6 @@ pub(crate) async fn run_reasoning_loop<'a>(
                        record_and_save(config, metrics, rec, 0);
                        println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
                        println!("Conversation history preserved. You can try again or rephrase.");
-                       #[cfg(feature = "gui")]
-                       {
-                           LLM_STREAM_BUF.lock().unwrap().1.push_str(&format!("[LLM Error] {}", e));
-                       }
                        end_reason = EndReason::LlmError;
                        break 'reasoning_loop;
                     }
@@ -968,8 +959,6 @@ pub(crate) async fn call_llm(
                     }
                     print!("{}", reasoning);
                     io::stdout().flush()?;
-                    #[cfg(feature = "gui")]
-                    LLM_STREAM_BUF.lock().unwrap().0.push_str(reasoning);
                     full_message
                         .reasoning_content
                         .get_or_insert_with(String::new)
@@ -989,8 +978,6 @@ pub(crate) async fn call_llm(
                     }
                     print!("{}", content);
                     io::stdout().flush()?;
-                    #[cfg(feature = "gui")]
-                    LLM_STREAM_BUF.lock().unwrap().1.push_str(content);
 
                     full_message.content.push_str(content);
                 }

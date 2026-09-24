@@ -597,34 +597,33 @@ pub(crate) fn execute_kb_schema(ctx: &KbContext, table: Option<&str>) -> Result<
     }
 
     let mut samples: Vec<Value> = Vec::new();
-    if !columns.is_empty() {
-        if let Ok(mut stmt) = conn.prepare(&format!("SELECT * FROM {} LIMIT 3", quote_ident(name)))
-        {
-            let col_names: Vec<String> = (0..stmt.column_count())
-                .map(|i| stmt.column_name(i).unwrap_or("").to_string())
-                .collect();
-            if let Ok(mut rows) = stmt.query([]) {
-                while let Ok(Some(row)) = rows.next() {
-                    let mut rec: Map<String, Value> = Map::new();
-                    for (i, col) in col_names.iter().enumerate() {
-                        rec.insert(
-                            col.clone(),
-                            match row.get_ref(i) {
-                                Ok(rusqlite::types::ValueRef::Null) => Value::Null,
-                                Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                                Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
-                                Ok(rusqlite::types::ValueRef::Text(t)) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                                    json!(format!("<blob {} bytes>", b.len()))
-                                }
-                                Err(_) => Value::Null,
-                            },
-                        );
-                    }
-                    samples.push(Value::Object(rec));
+    if !columns.is_empty()
+        && let Ok(mut stmt) = conn.prepare(&format!("SELECT * FROM {} LIMIT 3", quote_ident(name)))
+    {
+        let col_names: Vec<String> = (0..stmt.column_count())
+            .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+            .collect();
+        if let Ok(mut rows) = stmt.query([]) {
+            while let Ok(Some(row)) = rows.next() {
+                let mut rec: Map<String, Value> = Map::new();
+                for (i, col) in col_names.iter().enumerate() {
+                    rec.insert(
+                        col.clone(),
+                        match row.get_ref(i) {
+                            Ok(rusqlite::types::ValueRef::Null) => Value::Null,
+                            Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                            Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
+                            Ok(rusqlite::types::ValueRef::Text(t)) => {
+                                json!(String::from_utf8_lossy(t))
+                            }
+                            Ok(rusqlite::types::ValueRef::Blob(b)) => {
+                                json!(format!("<blob {} bytes>", b.len()))
+                            }
+                            Err(_) => Value::Null,
+                        },
+                    );
                 }
+                samples.push(Value::Object(rec));
             }
         }
     }
@@ -1201,10 +1200,10 @@ pub(crate) fn execute_kb_update(ctx: &KbContext, args: &Value) -> Result<Value> 
                 if let Ok(v) = row.get::<_, String>(i) {
                     cur_annos = v;
                 }
-            } else if col == "document_id" {
-                if let Ok(v) = row.get::<_, Option<String>>(i) {
-                    doc_id = v;
-                }
+            } else if col == "document_id"
+                && let Ok(v) = row.get::<_, Option<String>>(i)
+            {
+                doc_id = v;
             }
         }
     }
@@ -1261,21 +1260,21 @@ pub(crate) fn execute_kb_update(ctx: &KbContext, args: &Value) -> Result<Value> 
     if obsolete && has_obsolete_column(target_type) {
         sets.push("obsolete = 1".to_string());
     }
-    if target_type == "documents" {
-        if let Some(status) = anno_obj.get("analysis_status").and_then(|v| v.as_str()) {
-            if !matches!(status, "pending" | "analyzing" | "analyzed" | "failed") {
-                bail!(
-                    "[KB_EXEC_ERROR] Invalid analysis_status '{}': allowed values are \
-                     pending / analyzing / analyzed / failed.",
-                    status
-                );
-            }
-            sets.push("analysis_status = ?".to_string());
-            vals.push(Box::new(status.to_string()));
-            if status == "analyzed" {
-                sets.push("analyzed_at = ?".to_string());
-                vals.push(Box::new(now_iso()));
-            }
+    if target_type == "documents"
+        && let Some(status) = anno_obj.get("analysis_status").and_then(|v| v.as_str())
+    {
+        if !matches!(status, "pending" | "analyzing" | "analyzed" | "failed") {
+            bail!(
+                "[KB_EXEC_ERROR] Invalid analysis_status '{}': allowed values are \
+                 pending / analyzing / analyzed / failed.",
+                status
+            );
+        }
+        sets.push("analysis_status = ?".to_string());
+        vals.push(Box::new(status.to_string()));
+        if status == "analyzed" {
+            sets.push("analyzed_at = ?".to_string());
+            vals.push(Box::new(now_iso()));
         }
     }
     if sets.is_empty() {
@@ -2136,10 +2135,10 @@ fn orphan_report(ctx: &KbContext) -> Result<String> {
     ];
     let mut out = String::new();
     for (label, sql) in checks {
-        if let Ok(n) = conn.query_row(*sql, [], |r| r.get::<_, i64>(0)) {
-            if n > 0 {
-                out.push_str(&format!("\n  orphan {}: {}", label, n));
-            }
+        if let Ok(n) = conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+            && n > 0
+        {
+            out.push_str(&format!("\n  orphan {}: {}", label, n));
         }
     }
     Ok(out)

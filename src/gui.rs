@@ -1,963 +1,539 @@
 #![cfg(feature = "gui")]
 
-//! GUI frontend (eframe / egui) for the LLM assistant.
+//! Minimal GUI process shell.
 //!
-//! Provides an optional graphical interface as an alternative to the
-//! terminal CLI. Shares the same core logic via feature-gated channels.
+//! The GUI does not link or call the CLI application layer. It starts the
+//! same executable with `AGT_GUI_CHILD=1`, relays stdin/stdout/stderr, and
+//! provides a read-only view of the workspace files used by todo mode.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result};
 use eframe::egui;
-use tokio::sync::oneshot;
+use regex::Regex;
 
-use crate::attach;
-use crate::cmd::{self, SlashCmdResult};
-use crate::compat_provider::LlmProvider;
-use crate::gui_pretty;
-use crate::gui_pretty::{C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED};
-#[cfg(feature = "kb")]
-use crate::kb;
-use crate::llm_stats::{Metrics, fmt_tokens};
-use crate::model::{LLM_STREAM_BUF, Message, Session, Settings};
-use crate::persistence;
-use crate::reasoning::{LoopCtx, run_reasoning_loop};
-use crate::startup::{self, Config};
-use crate::todo;
-use crate::tools::{TOOL_INTERACT_CH, ToolInteractMsg, ToolRunDecision, ToolRunDecisionKind};
+use crate::startup::Config;
 
-type TurnResult = (Session, Settings, Metrics, bool, Option<String>);
+const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const CHILD_ENV: &str = "AGT_GUI_CHILD";
 
-struct GuiApp {
-    config: Arc<Config>,
-    provider: LlmProvider,
-    session: Option<Session>,
-    settings: Option<Settings>,
-    metrics: Option<Metrics>,
-    /// Knowledge Base context (single library.sqlite connection + run id);
-    /// always `Some` in kb builds (init failure aborts startup).
-    #[cfg(feature = "kb")]
-    kb: Option<Arc<kb::KbContext>>,
+static ANSI_RE: OnceLock<Regex> = OnceLock::new();
 
-    current_model: String,
-    input_text: String,
-    conversation: String,
-    /// Display buffer holding the current turn's messages in pretty format
-    /// (reasoning / content split, tool diff previews). Rebuilt from session
-    /// on completion so the display stays consistent before and after the turn.
-    stream_message_buffer: Vec<Message>,
-    /// Number of `session.messages` committed before the current turn.
-    /// Messages before this index are rendered from `session.messages`;
-    /// messages from this index onward are rendered from `stream_message_buffer`.
-    session_msg_base: usize,
-    pending_confirms: VecDeque<PendingConfirm>,
-
-    done_rx: Option<oneshot::Receiver<TurnResult>>,
-    worker_handle: Option<tokio::task::JoinHandle<()>>,
-    is_running: bool,
-    focus_input: bool,
-    todo_started: bool,
+fn ansi_re() -> &'static Regex {
+    ANSI_RE.get_or_init(|| Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]").expect("valid ANSI regex"))
 }
 
-struct PendingConfirm {
-    name: String,
-    args: serde_json::Value,
-    reply: oneshot::Sender<ToolRunDecision>,
+fn strip_ansi(text: &str) -> String {
+    ansi_re().replace_all(text, "").into_owned()
 }
 
-impl GuiApp {
-    fn new(config: Config, provider: LlmProvider) -> anyhow::Result<Self> {
-        let system_msg = startup::system_message(&config);
-        let label = config.session_label.clone();
-        let session = Session::new(label, system_msg);
-        let settings = Settings::from_config(&config);
-        let current_model = settings.llm_model.clone();
-        let metrics = Metrics::default();
+#[derive(Debug)]
+enum ProcessEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    StreamClosed(bool),
+    ReadError(String),
+}
 
-        // KB init: --kb-dir / KB_DIR or the app-data default; failure aborts.
-        #[cfg(feature = "kb")]
-        let kb = kb::kb_context_from_config(&config)?.map(Arc::new);
+struct ProcessReader {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    events: Receiver<ProcessEvent>,
+}
 
-        if let Err(e) = persistence::init_session(&session.label) {
-            eprintln!("[GUI] persistence init: {}", e);
+impl ProcessReader {
+    fn start() -> Result<Self> {
+        let exe = std::env::current_exe().context("failed to locate current executable")?;
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        let mut command = Command::new(exe);
+        command
+            .args(args)
+            .env(CHILD_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command
+            .spawn()
+            .context("failed to start CLI child process")?;
+        let stdin = child.stdin.take();
+        let (tx, rx) = mpsc::channel();
+
+        if let Some(stdout) = child.stdout.take() {
+            spawn_reader(stdout, tx.clone(), true);
         }
-        if let Err(e) = persistence::append_message_to_session(&session.label, &session.messages[0])
-        {
-            eprintln!("[GUI] persistence append: {}", e);
+        if let Some(stderr) = child.stderr.take() {
+            spawn_reader(stderr, tx, false);
         }
 
-        Ok(GuiApp {
-            config: Arc::new(config),
-            provider,
-            session: Some(session),
-            settings: Some(settings),
-            metrics: Some(metrics),
-            #[cfg(feature = "kb")]
-            kb,
-            current_model,
-            input_text: String::new(),
-            conversation: String::new(),
-            stream_message_buffer: Vec::new(),
-            session_msg_base: 1, // system message at index 0, render from index 1 onward
-            pending_confirms: VecDeque::new(),
-            done_rx: None,
-            worker_handle: None,
-            is_running: false,
-            focus_input: true,
-            todo_started: false,
+        Ok(Self {
+            child,
+            stdin,
+            events: rx,
         })
     }
 
-    fn sync_model(&mut self) {
-        if let Some(ref s) = self.settings {
-            self.current_model = s.llm_model.clone();
+    fn send_input(&mut self, input: &str) -> std::io::Result<()> {
+        if let Some(stdin) = self.stdin.as_mut() {
+            stdin.write_all(input.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            stdin.flush()?;
         }
+        Ok(())
     }
 
-    /// Render a single `Message` with consistent formatting.
-    /// Used for both completed session messages and the in-progress stream,
-    /// ensuring identical display during and after a turn.
-    fn render_message(ui: &mut egui::Ui, msg: &Message, turn: &mut u32) {
-        match msg.role.as_str() {
-            "user" => {
-                *turn += 1;
-                ui.colored_label(
-                    C_GRAY,
-                    format!("\u{2500}\u{2500} Turn {} \u{2500}\u{2500}", *turn),
-                );
-                ui.label(format!("User-{} > {}", *turn, msg.content));
-                for f in &msg.attached_files {
-                    ui.colored_label(C_GRAY, format!("[Attached] {}", f.path));
-                }
-            }
-            "assistant" => {
-                if let Some(ref rc) = msg.reasoning_content
-                    && !rc.trim().is_empty()
-                {
-                    ui.colored_label(C_GREEN, "[Thinking]");
-                    ui.colored_label(C_GREEN, rc);
-                }
-                if !msg.content.trim().is_empty() {
-                    ui.label(format!("Assistant > {}", msg.content));
-                } else if let Some(ref tc) = msg.tool_calls
-                    && !tc.is_empty()
-                {
-                    let names: Vec<&str> = tc.iter().map(|c| c.function.name.as_str()).collect();
-                    ui.label(format!("Assistant > [Tool Call: {}]", names.join(", ")));
-                }
-            }
-            "tool" => {
-                let name = msg.tool_name.as_deref().unwrap_or("?");
-                match msg.tool_call_decision.as_ref().map(|d| &d.kind) {
-                    Some(ToolRunDecisionKind::AutoConfirm) => {
-                        ui.colored_label(C_MAGENTA, format!("[Tool: {}] (AutoConfirm)", name));
-                    }
-                    Some(ToolRunDecisionKind::UserConfirm) => {
-                        ui.colored_label(C_GREEN, format!("[Tool: {}] (UserConfirm)", name));
-                    }
-                    _ => {
-                        ui.label(format!("[Tool: {}]", name));
-                    }
-                }
-                // Show pretty command preview when args are available (stream messages).
-                if let Some(ref args) = msg.tool_args {
-                    gui_pretty::gui_pretty_command(ui, name, args);
-                }
-                // Show pretty result when content is parseable JSON (completed messages).
-                // Fall back to plain text for non-JSON content.
-                if !msg.content.is_empty() {
-                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                        gui_pretty::gui_pretty_result(ui, name, &result, msg.tool_args.as_ref());
-                    } else if msg.tool_args.is_none() {
-                        // Only show raw content if we didn't already show a pretty preview.
-                        ui.label(format!("  {}", msg.content));
-                    }
-                }
-                if let Some(reason) = msg
-                    .tool_call_decision
-                    .as_ref()
-                    .and_then(|d| d.reason.as_deref())
-                {
-                    ui.colored_label(C_MAGENTA, reason);
-                }
-            }
-            "system" => {
-                if msg.content.is_empty() {
-                    // Blank line separator between todo-loop boundaries.
-                    ui.label("");
-                } else if msg.content.contains("--- [") || msg.content.starts_with("Executing todo")
-                {
-                    ui.colored_label(C_CYAN, &msg.content);
-                } else {
-                    ui.label(&msg.content);
-                }
-            }
-            _ => {}
+    fn stop(&mut self) {
+        if let Some(stdin) = self.stdin.take() {
+            drop(stdin);
         }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn poll(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().ok().flatten()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Font setup
-// ---------------------------------------------------------------------------
+impl Drop for ProcessReader {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
-fn load_cjk_font(fonts: &mut egui::FontDefinitions) {
-    let paths: &[&str] = if cfg!(target_os = "macos") {
-        &[
-            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
-            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
-            "/System/Library/Fonts/ヒラギノ丸ゴシック W4.ttc",
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        ]
-    } else if cfg!(target_os = "windows") {
-        &[
-            "C:/Windows/Fonts/msgothic.ttc",
-            "C:/Windows/Fonts/meiryo.ttc",
-            "C:/Windows/Fonts/yugothr.ttc",
-            "C:/Windows/Fonts/malgun.ttf",
-        ]
-    } else {
-        &[
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        ]
+fn spawn_reader<R>(mut reader: R, tx: Sender<ProcessEvent>, is_stdout: bool)
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let event = if is_stdout {
+                        ProcessEvent::Stdout(buffer[..n].to_vec())
+                    } else {
+                        ProcessEvent::Stderr(buffer[..n].to_vec())
+                    };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(ProcessEvent::ReadError(e.to_string()));
+                    break;
+                }
+            }
+        }
+        let _ = tx.send(ProcessEvent::StreamClosed(is_stdout));
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceTab {
+    Todo,
+    NextTask,
+    Handover,
+    Artifacts,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TaskSummary {
+    total: usize,
+    completed: usize,
+    pending: usize,
+    next_task: Option<String>,
+}
+
+struct WorkspaceInspector {
+    root: PathBuf,
+    selected: WorkspaceTab,
+    todo_md: String,
+    next_task_md: String,
+    handover_md: String,
+    artifacts: Vec<PathBuf>,
+    selected_artifact: Option<PathBuf>,
+    task_summary: TaskSummary,
+    last_refresh: Instant,
+}
+
+impl WorkspaceInspector {
+    fn new(root: PathBuf) -> Self {
+        let mut inspector = Self {
+            root,
+            selected: WorkspaceTab::Todo,
+            todo_md: String::new(),
+            next_task_md: String::new(),
+            handover_md: String::new(),
+            artifacts: Vec::new(),
+            selected_artifact: None,
+            task_summary: TaskSummary::default(),
+            last_refresh: Instant::now() - REFRESH_INTERVAL,
+        };
+        inspector.refresh();
+        inspector
+    }
+
+    fn refresh_if_due(&mut self) {
+        if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
+            self.refresh();
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.last_refresh = Instant::now();
+        self.todo_md = read_text(&self.root.join("todo.md"));
+        self.next_task_md = read_text(&self.root.join("next-task.md"));
+        self.handover_md = read_text(&self.root.join("artifacts").join("handover.md"));
+        self.task_summary = parse_task_summary(&self.todo_md);
+        self.artifacts = list_files(&self.root.join("artifacts"));
+        if self
+            .selected_artifact
+            .as_ref()
+            .is_none_or(|path| !self.artifacts.contains(path))
+        {
+            self.selected_artifact = self.artifacts.first().cloned();
+        }
+    }
+
+    fn selected_artifact_text(&self) -> String {
+        self.selected_artifact
+            .as_ref()
+            .map(|path| read_text(path))
+            .unwrap_or_else(|| "(no artifact selected)".to_string())
+    }
+}
+
+fn read_text(path: &Path) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "(not found)".to_string(),
+        Err(e) => format!("(read error: {e})"),
+    }
+}
+
+fn list_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
+    let mut files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+    files
+}
 
-    for path in paths {
-        if let Ok(data) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "CJK".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(data)),
-            );
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, "CJK".to_owned());
+fn parse_task_summary(todo_md: &str) -> TaskSummary {
+    let mut summary = TaskSummary::default();
+    let mut in_tasks = false;
+    for line in todo_md.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Tasks") {
+            in_tasks = true;
+            continue;
+        }
+        if in_tasks && trimmed.starts_with("##") {
+            break;
+        }
+        if !in_tasks {
+            continue;
+        }
+        if let Some(_description) = trimmed.strip_prefix("- [x]") {
+            summary.total += 1;
+            summary.completed += 1;
+        } else if let Some(description) = trimmed.strip_prefix("- [ ]") {
+            summary.total += 1;
+            summary.pending += 1;
+            if summary.next_task.is_none() {
+                summary.next_task = Some(description.trim().to_string());
+            }
+        }
+    }
+    summary
+}
+
+struct GuiShell {
+    process: ProcessReader,
+    input: String,
+    output: String,
+    workspace: WorkspaceInspector,
+    status: String,
+    running: bool,
+    focus_input: bool,
+    output_requested_repaint: bool,
+    stdout_pending: Vec<u8>,
+    stderr_pending: Vec<u8>,
+}
+
+impl GuiShell {
+    fn new(config: &Config) -> Result<Self> {
+        let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&config.working_dir)
+        });
+        let process = ProcessReader::start()?;
+        Ok(Self {
+            process,
+            input: String::new(),
+            output: String::new(),
+            workspace: WorkspaceInspector::new(root),
+            status: "running".to_string(),
+            running: true,
+            focus_input: true,
+            output_requested_repaint: false,
+            stdout_pending: Vec::new(),
+            stderr_pending: Vec::new(),
+        })
+    }
+
+    fn append_output_bytes(&mut self, bytes: &[u8], pending: &mut Vec<u8>) {
+        pending.extend_from_slice(bytes);
+        match String::from_utf8(pending.clone()) {
+            Ok(text) => {
+                pending.clear();
+                self.append_output_text(&text);
+            }
+            Err(error) => {
+                let valid_up_to = error.utf8_error().valid_up_to();
+                if valid_up_to > 0 {
+                    let text = String::from_utf8_lossy(&pending[..valid_up_to]).into_owned();
+                    pending.drain(..valid_up_to);
+                    self.append_output_text(&text);
+                }
+            }
+        }
+    }
+
+    fn append_output_text(&mut self, text: &str) {
+        let text = strip_ansi(text);
+        self.output.push_str(&text);
+        self.output_requested_repaint = true;
+    }
+
+    fn drain_events(&mut self) {
+        while let Ok(event) = self.process.events.try_recv() {
+            match event {
+                ProcessEvent::Stdout(bytes) => {
+                    let mut pending = std::mem::take(&mut self.stdout_pending);
+                    self.append_output_bytes(&bytes, &mut pending);
+                    self.stdout_pending = pending;
+                }
+                ProcessEvent::Stderr(bytes) => {
+                    let mut pending = std::mem::take(&mut self.stderr_pending);
+                    self.append_output_bytes(&bytes, &mut pending);
+                    self.stderr_pending = pending;
+                }
+                ProcessEvent::StreamClosed(is_stdout) => {
+                    if is_stdout && !self.stdout_pending.is_empty() {
+                        let text = String::from_utf8_lossy(&self.stdout_pending).into_owned();
+                        self.stdout_pending.clear();
+                        self.append_output_text(&text);
+                    } else if !is_stdout && !self.stderr_pending.is_empty() {
+                        let text = String::from_utf8_lossy(&self.stderr_pending).into_owned();
+                        self.stderr_pending.clear();
+                        self.append_output_text(&text);
+                    }
+                }
+                ProcessEvent::ReadError(error) => {
+                    self.output
+                        .push_str(&format!("\n[process read error] {error}\n"));
+                    self.output_requested_repaint = true;
+                }
+            }
+        }
+        if self.output.len() > OUTPUT_LIMIT {
+            let mut cut = self.output.len() - OUTPUT_LIMIT;
+            while cut < self.output.len() && !self.output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.output.drain(..cut);
+        }
+    }
+
+    fn send_input(&mut self) {
+        if self.input.trim().is_empty() || !self.running {
             return;
         }
+        let input = std::mem::take(&mut self.input);
+        if let Err(e) = self.process.send_input(&input) {
+            self.status = format!("input error: {e}");
+        }
+        self.focus_input = true;
+    }
+
+    fn stop(&mut self) {
+        self.process.stop();
+        self.running = false;
+        self.status = "stopped".to_string();
+    }
+
+    fn update_process(&mut self) {
+        if self.running
+            && let Some(status) = self.process.poll()
+        {
+            self.running = false;
+            self.status = format!("exited ({status})");
+            self.output
+                .push_str(&format!("\n[CLI process exited: {status}]\n"));
+            self.output_requested_repaint = true;
+        }
+    }
+
+    fn draw_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Workspace");
+        ui.horizontal_wrapped(|ui| {
+            for (tab, label) in [
+                (WorkspaceTab::Todo, "Todo"),
+                (WorkspaceTab::NextTask, "Next task"),
+                (WorkspaceTab::Handover, "Handover"),
+                (WorkspaceTab::Artifacts, "Artifacts"),
+            ] {
+                if ui
+                    .selectable_label(self.workspace.selected == tab, label)
+                    .clicked()
+                {
+                    self.workspace.selected = tab;
+                }
+            }
+        });
+        ui.separator();
+
+        let summary = &self.workspace.task_summary;
+        ui.label(format!(
+            "Progress: {} / {} ({} pending)",
+            summary.completed, summary.total, summary.pending
+        ));
+        if let Some(next) = &summary.next_task {
+            ui.label(format!("Next: {next}"));
+        }
+        ui.separator();
+
+        match self.workspace.selected {
+            WorkspaceTab::Todo => text_view(ui, &self.workspace.todo_md),
+            WorkspaceTab::NextTask => text_view(ui, &self.workspace.next_task_md),
+            WorkspaceTab::Handover => text_view(ui, &self.workspace.handover_md),
+            WorkspaceTab::Artifacts => {
+                egui::ScrollArea::vertical()
+                    .id_salt("artifact_list")
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        if self.workspace.artifacts.is_empty() {
+                            ui.label("(no artifacts)");
+                        }
+                        for path in self.workspace.artifacts.clone() {
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string());
+                            let selected = self.workspace.selected_artifact.as_ref() == Some(&path);
+                            if ui.selectable_label(selected, name).clicked() {
+                                self.workspace.selected_artifact = Some(path.clone());
+                            }
+                        }
+                    });
+                ui.separator();
+                text_view(ui, &self.workspace.selected_artifact_text());
+            }
+        }
+    }
+
+    fn draw_input(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Message, slash command, or y/n"),
+            );
+            if self.focus_input {
+                response.request_focus();
+                self.focus_input = false;
+            }
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Send").clicked() || enter {
+                self.send_input();
+            }
+            if ui.button("Stop").clicked() {
+                self.stop();
+            }
+            if ui.button("Clear").clicked() {
+                self.output.clear();
+            }
+        });
     }
 }
 
-// ---------------------------------------------------------------------------
-// eframe entry-point
-// ---------------------------------------------------------------------------
+fn text_view(ui: &mut egui::Ui, text: &str) {
+    egui::ScrollArea::vertical()
+        .id_salt("workspace_text")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.monospace(text);
+        });
+}
 
-pub fn run(config: Config, provider: LlmProvider) -> anyhow::Result<()> {
-    let cwd = match std::fs::canonicalize(&config.working_dir) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[GUI] bad working dir '{}': {}", config.working_dir, e);
-            return Ok(());
+impl eframe::App for GuiShell {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_events();
+        self.update_process();
+        self.workspace.refresh_if_due();
+
+        if self.running || self.output_requested_repaint {
+            ctx.request_repaint_after(Duration::from_millis(50));
+            self.output_requested_repaint = false;
         }
-    };
-    if let Err(e) = std::env::set_current_dir(&cwd) {
-        eprintln!("[GUI] chdir failed: {}", e);
-        return Ok(());
     }
 
-    // Register the workspace root and tool execution limits for path
-    // validation and child-process hardening.
-    crate::tools::set_workspace_root(cwd.clone());
-    crate::tools_process::set_tool_limits(crate::tools_process::ToolLimits {
-        max_output_bytes: config.max_tool_output_bytes,
-        tool_timeout_secs: config.tool_timeout_secs,
-    });
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::top("status").show(root_ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("status: {}", self.status));
+                if self.running {
+                    ui.label("(CLI child is running)");
+                }
+            });
+        });
 
+        egui::Panel::bottom("input").show(root_ui, |ui| self.draw_input(ui));
+
+        egui::Panel::right("workspace")
+            .default_size(360.0)
+            .show(root_ui, |ui| self.draw_workspace(ui));
+
+        egui::CentralPanel::default().show(root_ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("cli_output")
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.monospace(&self.output);
+                });
+        });
+    }
+}
+
+/// Start the GUI shell. This function is compiled only with the `gui` feature.
+pub fn run(config: Config) -> Result<()> {
+    let app = GuiShell::new(&config)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 600.0])
-            .with_min_inner_size([400.0, 300.0]),
+            .with_inner_size([1100.0, 700.0])
+            .with_min_inner_size([700.0, 450.0]),
         ..Default::default()
     };
-
-    // Resolve the KB directory once (--kb-dir / KB_DIR, or the app-data
-    // default after chdir) so the whole app sees one value - including tool
-    // registration and the system prompt.
-    #[cfg(feature = "kb")]
-    let config = {
-        let mut c = config;
-        if c.kb_dir.is_none() {
-            c.kb_dir = kb::default_kb_dir().map(|d| d.to_string_lossy().into_owned());
-        }
-        c
-    };
-
-    // Build the app before opening the window so KB misconfiguration
-    // (kb feature on, no --kb-dir / KB_DIR) fails the same way as the CLI.
-    let app = GuiApp::new(config, provider)?;
-    let _ = eframe::run_native(
+    eframe::run_native(
         "always-goofy-things",
         options,
-        Box::new(move |cc| {
-            let mut fonts = egui::FontDefinitions::default();
-            load_cjk_font(&mut fonts);
-            cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(app))
-        }),
-    );
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// eframe::App
-// ---------------------------------------------------------------------------
-
-impl eframe::App for GuiApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain streaming text into the stream message buffer.
-        let mut had_update = false;
-        {
-            let mut buf = LLM_STREAM_BUF.lock().unwrap();
-            let (ref mut reasoning, ref mut content, ref mut system, ref mut user) = *buf;
-            let has_stream = !reasoning.is_empty()
-                || !content.is_empty()
-                || !system.is_empty()
-                || !user.is_empty();
-            if has_stream {
-                // System messages come first (task headers, etc.).
-                if !system.is_empty() {
-                    let text = std::mem::take(system);
-                    // Split preserving blank lines (\n\n -> empty entry).
-                    let lines: Vec<&str> = text.split('\n').collect();
-                    let last_nonempty = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
-                    for (i, line) in lines.iter().enumerate() {
-                        if i > last_nonempty {
-                            break;
-                        }
-                        self.stream_message_buffer.push(Message {
-                            role: "system".to_string(),
-                            content: line.to_string(),
-                            ..Default::default()
-                        });
-                    }
-                    had_update = true;
-                }
-                // User messages from the reasoning loop (turn-start markers).
-                if !user.is_empty() {
-                    let text = std::mem::take(user);
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            // If send_message pre-pushed a user message, update it
-                            // instead of creating a duplicate.
-                            if self
-                                .stream_message_buffer
-                                .last()
-                                .is_some_and(|m| m.role == "user")
-                            {
-                                let last = self.stream_message_buffer.last_mut().unwrap();
-                                last.content = trimmed.to_string();
-                            } else {
-                                self.stream_message_buffer.push(Message {
-                                    role: "user".to_string(),
-                                    content: trimmed.to_string(),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                    had_update = true;
-                }
-                // Reasoning and content go to separate messages so they
-                // display in strict chronological order without the visual
-                // glitch of two independently-expanding sections.
-                if !reasoning.is_empty() {
-                    let text = std::mem::take(reasoning);
-                    // Append to the last assistant that already has reasoning,
-                    // otherwise push a fresh one.
-                    let can_append = self
-                        .stream_message_buffer
-                        .last()
-                        .is_some_and(|m| m.role == "assistant" && m.reasoning_content.is_some());
-                    if !can_append {
-                        self.stream_message_buffer.push(Message {
-                            role: "assistant".to_string(),
-                            ..Default::default()
-                        });
-                    }
-                    self.stream_message_buffer
-                        .last_mut()
-                        .unwrap()
-                        .reasoning_content
-                        .get_or_insert_default()
-                        .push_str(&text);
-                    had_update = true;
-                }
-                if !content.is_empty() {
-                    let text = std::mem::take(content);
-                    // LLM errors are written to the content buffer with a
-                    // marker; route to conversation so they survive stream
-                    // cleanup on completion.
-                    if text.starts_with("[LLM Error]") {
-                        self.conversation.push_str(&text);
-                    } else {
-                        // Push a fresh assistant for content when the last
-                        // message has reasoning (so the two stay separate).
-                        let last_has_reasoning =
-                            self.stream_message_buffer.last().is_some_and(|m| {
-                                m.role == "assistant"
-                                    && m.reasoning_content.as_ref().is_some_and(|r| !r.is_empty())
-                            });
-                        if last_has_reasoning
-                            || self
-                                .stream_message_buffer
-                                .last()
-                                .is_none_or(|m| m.role != "assistant")
-                        {
-                            self.stream_message_buffer.push(Message {
-                                role: "assistant".to_string(),
-                                ..Default::default()
-                            });
-                        }
-                        self.stream_message_buffer
-                            .last_mut()
-                            .unwrap()
-                            .content
-                            .push_str(&text);
-                    }
-                    had_update = true;
-                }
-            }
-        }
-
-        // Drain tool interactions.
-        while let Ok(msg) = TOOL_INTERACT_CH.1.lock().unwrap().try_recv() {
-            match msg {
-                ToolInteractMsg::Prompt { notice, reply } => {
-                    self.pending_confirms.push_back(PendingConfirm {
-                        name: notice.name,
-                        args: notice.args,
-                        reply,
-                    });
-                    had_update = true;
-                }
-                ToolInteractMsg::Notice(notice) => {
-                    // Push as a "tool" message so it renders in chronological
-                    // order between assistant messages.
-                    let args_str = serde_json::to_string(&notice.args).unwrap_or_default();
-                    self.stream_message_buffer.push(Message {
-                        role: "tool".to_string(),
-                        content: format!("Args: {}", args_str),
-                        tool_name: Some(notice.name),
-                        tool_args: Some(notice.args),
-                        tool_call_decision: Some(ToolRunDecision {
-                            proceed: true,
-                            kind: ToolRunDecisionKind::AutoConfirm,
-                            reason: notice.reason,
-                        }),
-                        ..Default::default()
-                    });
-                    had_update = true;
-                }
-            }
-        }
-        if had_update {
-            ctx.request_repaint();
-        }
-
-        // Check worker completion.
-        let mut had_completion = false;
-        if let Some(ref mut rx) = self.done_rx
-            && let Ok((mut session, settings, metrics, done, err_msg)) = rx.try_recv()
-        {
-            // Only advance turn when the reasoning loop completed successfully.
-            // On interruption (Stop / error) the user message is reused on the
-            // next send, matching CLI Ctrl+C behaviour.
-            if done {
-                session.turn += 1;
-            }
-            if let Some(msg) = err_msg {
-                self.conversation
-                    .push_str(&format!("\n[LLM Error] {}\n", msg));
-            }
-            self.session = Some(session);
-            self.settings = Some(settings);
-            self.metrics = Some(metrics);
-            self.done_rx = None;
-            self.worker_handle = None;
-            self.is_running = false;
-            self.sync_model();
-
-            // Rebuild stream buffer from completed session (keeps display consistent).
-            rebuild_stream_from_session(
-                &mut self.stream_message_buffer,
-                self.session.as_ref(),
-                self.session_msg_base,
-            );
-            self.pending_confirms.clear();
-            self.focus_input = true;
-            had_completion = true;
-        }
-        if had_completion {
-            ctx.request_repaint();
-        }
-
-        // eframe sleeps when idle; keep waking it every 16ms while a worker is running.
-        if self.is_running {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
-
-        // Auto-start todo mode on first frame
-        if self.config.todo_mode > 0 && !self.todo_started && self.session.is_some() {
-            self.todo_started = true;
-            self.input_text = String::new();
-            self.send_message(ctx);
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // -- top bar --
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("model: {}", self.current_model));
-                // LLM resource usage summary (token totals).
-                if let Some(m) = &self.metrics {
-                    let t = &m.totals;
-                    ui.label(format!(
-                        "In {} | Cache {} | Out {}",
-                        fmt_tokens(t.in_normal + t.in_cached + t.in_cache_write + t.in_audio),
-                        fmt_tokens(t.in_cached),
-                        fmt_tokens(t.out_normal),
-                    ));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.is_running && ui.button("\u{23f9} Stop").clicked() {
-                        // Abort the worker task.
-                        if let Some(handle) = self.worker_handle.take() {
-                            handle.abort();
-                        }
-                        // Recover session if the worker finished just before this click.
-                        if let Some(mut rx) = self.done_rx.take() {
-                            let recovered = rx.try_recv().ok();
-                            match recovered {
-                                Some((mut session, settings, metrics, done, err_msg)) => {
-                                    if done {
-                                        session.turn += 1;
-                                    }
-                                    if let Some(msg) = err_msg {
-                                        self.conversation
-                                            .push_str(&format!("\n[LLM Error] {}\n", msg));
-                                    }
-                                    self.session = Some(session);
-                                    self.settings = Some(settings);
-                                    self.metrics = Some(metrics);
-                                    // Rebuild stream buffer from completed session messages.
-                                    rebuild_stream_from_session(
-                                        &mut self.stream_message_buffer,
-                                        self.session.as_ref(),
-                                        self.session_msg_base,
-                                    );
-                                }
-                                None => {
-                                    // Worker was aborted; the pre-pushed user
-                                    // message stays visible (matching CLI Ctrl+C).
-                                }
-                            }
-                        }
-                        self.is_running = false;
-                        self.pending_confirms.clear();
-                        self.focus_input = true;
-                    }
-                });
-            });
-        });
-
-        // -- bottom: input --
-        egui::Panel::bottom("input_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let mut te = egui::TextEdit::multiline(&mut self.input_text)
-                    .frame(egui::Frame::default())
-                    .hint_text(
-                        "Describe your task... (Enter to send, Shift+Enter for newline, @file for attachments)",
-                    )
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(3);
-                if self.is_running {
-                    te = te.interactive(false);
-                }
-                let resp = ui.add(te);
-
-                if self.focus_input {
-                    resp.request_focus();
-                    self.focus_input = false;
-                }
-
-                // Enter sends, Shift+Enter inserts newline (the TextEdit already
-                // inserted the newline; we detect plain Enter here).
-                let enter_send = ui
-                    .input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                    && !self.input_text.trim().is_empty()
-                    && !self.is_running;
-
-                let send_clicked = ui
-                    .add_enabled(
-                        !self.is_running && !self.input_text.trim().is_empty(),
-                        egui::Button::new("Send"),
-                    )
-                    .clicked();
-
-                if send_clicked || enter_send {
-                    let ctx = ui.ctx().clone();
-                    self.send_message(&ctx);
-                }
-            });
-        });
-
-        // -- centre: conversation --
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-
-                    let mut turn = 0u32;
-
-                    // Render completed session messages from previous turns.
-                    if let Some(ref s) = self.session {
-                        let limit = self.session_msg_base.min(s.messages.len());
-                        for msg in s.messages.iter().skip(1).take(limit.saturating_sub(1)) {
-                            Self::render_message(ui, msg, &mut turn);
-                        }
-                    }
-
-                    // Render current turn from stream buffer (always pretty format).
-                    for msg in &self.stream_message_buffer {
-                        Self::render_message(ui, msg, &mut turn);
-                    }
-
-                    // Error messages (set by send_message on early returns).
-                    if !self.conversation.is_empty() {
-                        ui.colored_label(C_RED, &self.conversation);
-                    }
-
-                    // Interruption indicator: unanswered user without an error message.
-                    // (LLM errors are displayed separately via self.conversation.)
-                    if !self.is_running
-                        && self.stream_message_buffer.is_empty()
-                        && self.conversation.is_empty()
-                        && self
-                            .session
-                            .as_ref()
-                            .is_some_and(|s| s.messages.last().is_some_and(|m| m.role == "user"))
-                    {
-                        ui.colored_label(C_RED, "[interrupted]");
-                    }
-
-                    // Status indicators.
-                    let has_session_msgs =
-                        self.session.as_ref().is_some_and(|s| s.messages.len() > 1);
-                    let is_idle = !self.is_running
-                        && self.stream_message_buffer.is_empty()
-                        && self.conversation.is_empty()
-                        && !has_session_msgs;
-                    if is_idle {
-                        ui.colored_label(C_GRAY, "Type a task and press Enter.");
-                    }
-                    if self.is_running
-                        && self.stream_message_buffer.is_empty()
-                        && self.conversation.is_empty()
-                    {
-                        ui.colored_label(C_GRAY, "Waiting for response...");
-                    }
-                });
-        });
-
-        // -- modal: tool confirm (oldest unhandled request only) --
-        let mut confirm_response: Option<ToolRunDecision> = None;
-        if let Some(pending) = self.pending_confirms.front() {
-            egui::Window::new("Confirm Tool Execution")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label("LLM wants to execute:");
-                    ui.separator();
-                    ui.monospace(format!("Tool: {}", pending.name));
-                    ui.monospace(format!(
-                        "Args: {}",
-                        serde_json::to_string_pretty(&pending.args)
-                            .unwrap_or_else(|_| "<unprintable>".to_string())
-                    ));
-                    ui.separator();
-                    // Pretty command preview (diff, etc.)
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            gui_pretty::gui_pretty_command(ui, &pending.name, &pending.args);
-                        });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Deny").clicked() {
-                            confirm_response = Some(ToolRunDecision {
-                                proceed: false,
-                                kind: ToolRunDecisionKind::UserCancel,
-                                reason: None,
-                            });
-                        }
-                        if ui.button("Allow").clicked() {
-                            confirm_response = Some(ToolRunDecision {
-                                proceed: true,
-                                kind: ToolRunDecisionKind::UserConfirm,
-                                reason: None,
-                            });
-                        }
-                    });
-                });
-        }
-        if let Some(resp) = confirm_response
-            && let Some(pending) = self.pending_confirms.pop_front()
-        {
-            let _ = pending.reply.send(resp);
-        }
-    }
-}
-
-/// Rebuild `stream_message_buffer` from session messages starting at `base`,
-/// converting to display format: reasoning split from content, tool / user as-is.
-fn rebuild_stream_from_session(buf: &mut Vec<Message>, session: Option<&Session>, base: usize) {
-    buf.clear();
-    if let Some(s) = session {
-        let start = base.min(s.messages.len());
-        for msg in &s.messages[start..] {
-            match msg.role.as_str() {
-                "assistant" => {
-                    if let Some(ref rc) = msg.reasoning_content
-                        && !rc.trim().is_empty()
-                    {
-                        buf.push(Message {
-                            role: "assistant".to_string(),
-                            reasoning_content: Some(rc.clone()),
-                            ..Default::default()
-                        });
-                    }
-                    let has_body = !msg.content.trim().is_empty() || msg.tool_calls.is_some();
-                    if has_body {
-                        let mut m = msg.clone();
-                        m.reasoning_content = None;
-                        buf.push(m);
-                    }
-                }
-                "user" | "tool" | "system" => {
-                    buf.push(msg.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Message handling
-// ---------------------------------------------------------------------------
-
-impl GuiApp {
-    fn send_message(&mut self, ctx: &egui::Context) {
-        let mut input = std::mem::take(&mut self.input_text);
-        // Strip the trailing newline that Enter-to-send inserts in multiline mode.
-        if input.ends_with('\n') {
-            input.pop();
-        }
-        if input.trim().is_empty() && self.config.todo_mode == 0 {
-            return;
-        }
-
-        // Slash commands.
-        {
-            let session = match self.session.as_mut() {
-                Some(s) => s,
-                None => {
-                    self.conversation
-                        .push_str("\n[Error] session is busy or lost (try stopping).\n");
-                    self.focus_input = true;
-                    return;
-                }
-            };
-            let settings = match self.settings.as_mut() {
-                Some(s) => s,
-                None => {
-                    self.conversation
-                        .push_str("\n[Error] settings are busy or lost (try stopping).\n");
-                    self.focus_input = true;
-                    return;
-                }
-            };
-            if let Some(result) = cmd::try_handle_slash_command(
-                &input,
-                session,
-                settings,
-                self.metrics.as_ref().unwrap_or(&Metrics::default()),
-                None, // GUI /kb command UI: not implemented in the initial version
-            ) {
-                match result {
-                    SlashCmdResult::NoAdvance => {}
-                    SlashCmdResult::RewoundTo(target) => session.turn = target + 1,
-                    SlashCmdResult::RestoredTo {
-                        turn: target,
-                        label,
-                    } => {
-                        session.turn = target + 1;
-                        session.label = label.clone();
-                        // Rebuild resource stats for the restored label.
-                        if let Some(m) = self.metrics.as_mut()
-                            && let Ok(records) = persistence::load_stats(&label)
-                        {
-                            *m = Metrics::from_records(records);
-                        }
-                    }
-                    SlashCmdResult::Exit => std::process::exit(0),
-                }
-                self.sync_model();
-                self.focus_input = true;
-                return;
-            }
-        }
-
-        // @file attachments.
-        let (query_text, specs, parse_mode) = attach::parse_attached_files(&input);
-        let attached_files = if !specs.is_empty() {
-            match attach::validate_files(&specs) {
-                Ok(()) => match attach::read_attached_files(&specs, parse_mode) {
-                    Ok(files) => files,
-                    Err(e) => {
-                        self.conversation.push_str(&format!("\n[Error] {}\n", e));
-                        self.focus_input = true;
-                        return;
-                    }
-                },
-                Err(missing) => {
-                    self.conversation
-                        .push_str(&format!("\n[File not found] {}\n", missing.join(", ")));
-                    self.focus_input = true;
-                    return;
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let mut session = match self.session.clone() {
-            Some(s) => s,
-            None => {
-                self.conversation
-                    .push_str("\n[Error] session is busy or lost (try stopping).\n");
-                self.focus_input = true;
-                return;
-            }
-        };
-        let mut settings = match self.settings.clone() {
-            Some(s) => s,
-            None => {
-                self.conversation
-                    .push_str("\n[Error] settings are busy or lost (try stopping).\n");
-                self.session = Some(session); // restore session
-                self.focus_input = true;
-                return;
-            }
-        };
-        let mut metrics = match self.metrics.clone() {
-            Some(m) => m,
-            None => {
-                self.conversation
-                    .push_str("\n[Error] metrics are busy or lost (try stopping).\n");
-                self.session = Some(session);
-                self.settings = Some(settings);
-                self.focus_input = true;
-                return;
-            }
-        };
-
-        let config = Arc::clone(&self.config);
-        let provider = self.provider;
-        #[cfg(feature = "kb")]
-        let kb = self.kb.clone();
-        let (done_tx, done_rx) = oneshot::channel();
-
-        self.conversation.clear();
-        self.is_running = true;
-
-        // Snapshot: session messages before this turn are rendered from session;
-        // the current turn's messages come from stream_message_buffer.
-        self.session_msg_base = self.session.as_ref().map_or(0, |s| s.messages.len());
-
-        // Push / update user message in session for display.
-        // If the previous turn left an unanswered user message (Stop / error),
-        // update it in-place so the turn counter stays correct.
-        if let Some(ref mut s) = self.session {
-            if s.messages.last().is_some_and(|m| m.role == "user") {
-                let last = s.messages.last_mut().unwrap();
-                last.content = query_text.clone();
-                last.attached_files = attached_files.clone();
-            } else {
-                let user_msg = Message {
-                    role: "user".to_string(),
-                    content: query_text.clone(),
-                    attached_files: attached_files.clone(),
-                    ..Default::default()
-                };
-                s.push_message(user_msg.clone());
-                // In todo mode the reasoning loop pushes the real user message
-                // (task description) via LLM_STREAM_BUF.3, so skip the empty one.
-                if self.config.todo_mode == 0 {
-                    self.stream_message_buffer.push(user_msg);
-                }
-            }
-        }
-        self.pending_confirms.clear();
-
-        // This runs in ui (after logic), so kick off the 16ms wakeup here too.
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
-
-        let handle = tokio::spawn(async move {
-            // `ctx` is the egui context in the surrounding method; use a
-            // distinct name for the run context shared by the loops.
-            #[cfg(feature = "kb")]
-            let kb_ctx = kb.as_deref();
-            #[cfg(not(feature = "kb"))]
-            let kb_ctx: crate::tools::KbCtxOpt<'_> = None;
-            let mut loop_ctx = LoopCtx {
-                config: &config,
-                provider,
-                settings: &mut settings,
-                metrics: &mut metrics,
-                plan_guard: None,
-                kb_ctx,
-            };
-            let (done, err_msg) = if config.todo_mode > 0 {
-                match todo::run_todo_loop(&mut loop_ctx, &mut session, query_text, attached_files)
-                    .await
-                {
-                    Ok(summary) => {
-                        session.push_message(Message {
-                            role: "assistant".to_string(),
-                            content: summary,
-                            ..Default::default()
-                        });
-                        (true, None)
-                    }
-                    Err(e) => (false, Some(e.to_string())),
-                }
-            } else {
-                match run_reasoning_loop(
-                    &mut loop_ctx,
-                    &mut session,
-                    "main",
-                    query_text,
-                    attached_files,
-                )
-                .await
-                {
-                    Ok(end_reason) => (end_reason.is_completed(), None),
-                    Err(e) => (false, Some(e.to_string())),
-                }
-            };
-
-            let _ = done_tx.send((session, settings, metrics, done, err_msg));
-        });
-
-        self.done_rx = Some(done_rx);
-        self.worker_handle = Some(handle);
-    }
+        Box::new(|_cc| Ok(Box::new(app))),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
