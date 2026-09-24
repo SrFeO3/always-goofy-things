@@ -1,6 +1,6 @@
 #![cfg(feature = "gui")]
 
-//! Minimal GUI process shell.
+//! Minimal GUI process shell with lightweight ANSI SGR rendering.
 //!
 //! The GUI does not link or call the CLI application layer. It starts the
 //! same executable with `AGT_GUI_CHILD=1`, relays stdin/stdout/stderr, and
@@ -9,13 +9,11 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use regex::Regex;
 
 use crate::startup::Config;
 
@@ -23,14 +21,242 @@ const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const CHILD_ENV: &str = "AGT_GUI_CHILD";
 
-static ANSI_RE: OnceLock<Regex> = OnceLock::new();
-
-fn ansi_re() -> &'static Regex {
-    ANSI_RE.get_or_init(|| Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]").expect("valid ANSI regex"))
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OutputStyle {
+    foreground: Option<egui::Color32>,
+    background: Option<egui::Color32>,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
 }
 
-fn strip_ansi(text: &str) -> String {
-    ansi_re().replace_all(text, "").into_owned()
+#[derive(Debug, Clone)]
+struct OutputSpan {
+    text: String,
+    style: OutputStyle,
+}
+
+#[derive(Debug, Default, Clone)]
+struct OutputLine {
+    spans: Vec<OutputSpan>,
+}
+
+#[derive(Debug, Default)]
+struct AnsiParser {
+    style: OutputStyle,
+    pending: String,
+}
+
+impl AnsiParser {
+    fn feed(&mut self, text: &str, output: &mut Vec<OutputLine>, output_bytes: &mut usize) {
+        self.pending.push_str(text);
+        let input = std::mem::take(&mut self.pending);
+        let chars: Vec<char> = input.chars().collect();
+        let mut index = 0;
+        ensure_output_line(output);
+
+        while index < chars.len() {
+            let ch = chars[index];
+            if ch == '\u{1b}' {
+                if index + 1 >= chars.len() {
+                    self.pending = chars[index..].iter().collect();
+                    break;
+                }
+                match chars[index + 1] {
+                    '[' => {
+                        let mut end = index + 2;
+                        while end < chars.len() && !chars[end].is_ascii_alphabetic() {
+                            if chars[end] == '\u{1b}' {
+                                break;
+                            }
+                            end += 1;
+                        }
+                        if end >= chars.len() {
+                            self.pending = chars[index..].iter().collect();
+                            break;
+                        }
+                        let sequence: String = chars[index + 2..end].iter().collect();
+                        if chars[end] == 'm' {
+                            self.apply_sgr(&sequence);
+                        }
+                        index = end + 1;
+                        continue;
+                    }
+                    ']' => {
+                        let mut end = index + 2;
+                        while end < chars.len() {
+                            if chars[end] == '\u{7}' {
+                                end += 1;
+                                break;
+                            }
+                            if chars[end] == '\u{1b}'
+                                && end + 1 < chars.len()
+                                && chars[end + 1] == '\\'
+                            {
+                                end += 2;
+                                break;
+                            }
+                            end += 1;
+                        }
+                        if end >= chars.len() {
+                            self.pending = chars[index..].iter().collect();
+                            break;
+                        }
+                        index = end;
+                        continue;
+                    }
+                    _ => {
+                        index += 2;
+                        continue;
+                    }
+                }
+            }
+            index += 1;
+            if ch == '\n' {
+                output.push(OutputLine::default());
+                continue;
+            }
+            if ch == '\r' {
+                continue;
+            }
+            let line = output.last_mut().expect("output line exists");
+            if let Some(span) = line.spans.last_mut()
+                && span.style == self.style
+            {
+                span.text.push(ch);
+            } else {
+                line.spans.push(OutputSpan {
+                    text: ch.to_string(),
+                    style: self.style,
+                });
+            }
+            *output_bytes += ch.len_utf8();
+        }
+    }
+
+    fn finish(&mut self, output: &mut Vec<OutputLine>, output_bytes: &mut usize) {
+        if !self.pending.is_empty() {
+            let pending = std::mem::take(&mut self.pending);
+            self.feed(&pending, output, output_bytes);
+        }
+    }
+
+    fn apply_sgr(&mut self, params: &str) {
+        let values: Vec<u16> = if params.is_empty() {
+            vec![0]
+        } else {
+            params
+                .split(';')
+                .map(|part| part.parse().unwrap_or(0))
+                .collect()
+        };
+        let mut index = 0;
+        while index < values.len() {
+            match values[index] {
+                0 => self.style = OutputStyle::default(),
+                1 => self.style.bold = true,
+                2 => self.style.dim = true,
+                3 => self.style.italic = true,
+                4 => self.style.underline = true,
+                22 => {
+                    self.style.bold = false;
+                    self.style.dim = false;
+                }
+                23 => self.style.italic = false,
+                24 => self.style.underline = false,
+                30..=37 => self.style.foreground = ansi_color(values[index] - 30, false),
+                39 => self.style.foreground = None,
+                40..=47 => self.style.background = ansi_color(values[index] - 40, false),
+                49 => self.style.background = None,
+                90..=97 => self.style.foreground = ansi_color(values[index] - 90, true),
+                100..=107 => self.style.background = ansi_color(values[index] - 100, true),
+                38 | 48 => {
+                    let is_foreground = values[index] == 38;
+                    let Some((color, next_index)) = parse_extended_color(&values, index + 1) else {
+                        break;
+                    };
+                    if is_foreground {
+                        self.style.foreground = Some(color);
+                    } else {
+                        self.style.background = Some(color);
+                    }
+                    index = next_index;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+}
+
+fn ensure_output_line(output: &mut Vec<OutputLine>) {
+    if output.is_empty() {
+        output.push(OutputLine::default());
+    }
+}
+
+fn parse_extended_color(values: &[u16], start: usize) -> Option<(egui::Color32, usize)> {
+    match values.get(start).copied()? {
+        5 => {
+            let value = *values.get(start + 1)?;
+            Some((ansi_256_color(value), start + 2))
+        }
+        2 => {
+            let red = (*values.get(start + 1)?).min(255) as u8;
+            let green = (*values.get(start + 2)?).min(255) as u8;
+            let blue = (*values.get(start + 3)?).min(255) as u8;
+            Some((egui::Color32::from_rgb(red, green, blue), start + 4))
+        }
+        _ => None,
+    }
+}
+
+fn ansi_color(index: u16, bright: bool) -> Option<egui::Color32> {
+    let colors = if bright {
+        [
+            egui::Color32::from_gray(130),
+            egui::Color32::from_rgb(255, 92, 92),
+            egui::Color32::from_rgb(92, 255, 92),
+            egui::Color32::from_rgb(255, 255, 92),
+            egui::Color32::from_rgb(92, 92, 255),
+            egui::Color32::from_rgb(255, 92, 255),
+            egui::Color32::from_rgb(92, 255, 255),
+            egui::Color32::from_gray(230),
+        ]
+    } else {
+        [
+            egui::Color32::from_gray(60),
+            egui::Color32::from_rgb(205, 65, 65),
+            egui::Color32::from_rgb(65, 205, 65),
+            egui::Color32::from_rgb(205, 205, 65),
+            egui::Color32::from_rgb(65, 65, 205),
+            egui::Color32::from_rgb(205, 65, 205),
+            egui::Color32::from_rgb(65, 205, 205),
+            egui::Color32::from_gray(180),
+        ]
+    };
+    colors.get(index as usize).copied()
+}
+
+fn ansi_256_color(value: u16) -> egui::Color32 {
+    match value {
+        0..=7 => ansi_color(value, false).unwrap_or(egui::Color32::WHITE),
+        8..=15 => ansi_color(value - 8, true).unwrap_or(egui::Color32::WHITE),
+        16..=231 => {
+            let value = value - 16;
+            let red = (value / 36) % 6;
+            let green = (value / 6) % 6;
+            let blue = value % 6;
+            let component = |value: u16| if value == 0 { 0 } else { 55 + value * 40 } as u8;
+            egui::Color32::from_rgb(component(red), component(green), component(blue))
+        }
+        232..=255 => {
+            let gray = (8 + (value - 232) * 10).min(255) as u8;
+            egui::Color32::from_gray(gray)
+        }
+        _ => egui::Color32::WHITE,
+    }
 }
 
 #[derive(Debug)]
@@ -247,7 +473,7 @@ fn parse_task_summary(todo_md: &str) -> TaskSummary {
         if !in_tasks {
             continue;
         }
-        if let Some(_description) = trimmed.strip_prefix("- [x]") {
+        if trimmed.starts_with("- [x]") {
             summary.total += 1;
             summary.completed += 1;
         } else if let Some(description) = trimmed.strip_prefix("- [ ]") {
@@ -264,14 +490,17 @@ fn parse_task_summary(todo_md: &str) -> TaskSummary {
 struct GuiShell {
     process: ProcessReader,
     input: String,
-    output: String,
+    output: Vec<OutputLine>,
+    output_bytes: usize,
+    stdout_parser: AnsiParser,
+    stderr_parser: AnsiParser,
+    stdout_pending: Vec<u8>,
+    stderr_pending: Vec<u8>,
     workspace: WorkspaceInspector,
     status: String,
     running: bool,
     focus_input: bool,
     output_requested_repaint: bool,
-    stdout_pending: Vec<u8>,
-    stderr_pending: Vec<u8>,
 }
 
 impl GuiShell {
@@ -285,39 +514,80 @@ impl GuiShell {
         Ok(Self {
             process,
             input: String::new(),
-            output: String::new(),
+            output: Vec::new(),
+            output_bytes: 0,
+            stdout_parser: AnsiParser::default(),
+            stderr_parser: AnsiParser::default(),
+            stdout_pending: Vec::new(),
+            stderr_pending: Vec::new(),
             workspace: WorkspaceInspector::new(root),
             status: "running".to_string(),
             running: true,
             focus_input: true,
             output_requested_repaint: false,
-            stdout_pending: Vec::new(),
-            stderr_pending: Vec::new(),
         })
     }
 
-    fn append_output_bytes(&mut self, bytes: &[u8], pending: &mut Vec<u8>) {
+    fn append_output_bytes(
+        output: &mut Vec<OutputLine>,
+        output_bytes: &mut usize,
+        bytes: &[u8],
+        pending: &mut Vec<u8>,
+        parser: &mut AnsiParser,
+    ) {
         pending.extend_from_slice(bytes);
         match String::from_utf8(pending.clone()) {
             Ok(text) => {
                 pending.clear();
-                self.append_output_text(&text);
+                parser.feed(&text, output, output_bytes);
             }
             Err(error) => {
                 let valid_up_to = error.utf8_error().valid_up_to();
                 if valid_up_to > 0 {
                     let text = String::from_utf8_lossy(&pending[..valid_up_to]).into_owned();
                     pending.drain(..valid_up_to);
-                    self.append_output_text(&text);
+                    parser.feed(&text, output, output_bytes);
+                }
+                if error.utf8_error().error_len().is_some() {
+                    pending.drain(..1);
+                    parser.feed("\u{fffd}", output, output_bytes);
                 }
             }
         }
     }
 
-    fn append_output_text(&mut self, text: &str) {
-        let text = strip_ansi(text);
-        self.output.push_str(&text);
-        self.output_requested_repaint = true;
+    fn append_internal_text(&mut self, text: &str) {
+        self.stdout_parser
+            .feed(text, &mut self.output, &mut self.output_bytes);
+    }
+
+    fn trim_output(&mut self) {
+        while self.output_bytes > OUTPUT_LIMIT && !self.output.is_empty() {
+            let mut remove = self.output_bytes - OUTPUT_LIMIT;
+            let first = &mut self.output[0];
+            while remove > 0 && !first.spans.is_empty() {
+                let span = &mut first.spans[0];
+                if span.text.len() <= remove {
+                    remove -= span.text.len();
+                    self.output_bytes -= span.text.len();
+                    first.spans.remove(0);
+                } else {
+                    let mut cut = remove;
+                    while cut > 0 && !span.text.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    span.text.drain(..cut);
+                    self.output_bytes -= remove;
+                    remove = 0;
+                }
+            }
+            if first.spans.is_empty() {
+                self.output.remove(0);
+            }
+            if remove > 0 {
+                break;
+            }
+        }
     }
 
     fn drain_events(&mut self) {
@@ -325,39 +595,47 @@ impl GuiShell {
             match event {
                 ProcessEvent::Stdout(bytes) => {
                     let mut pending = std::mem::take(&mut self.stdout_pending);
-                    self.append_output_bytes(&bytes, &mut pending);
+                    Self::append_output_bytes(
+                        &mut self.output,
+                        &mut self.output_bytes,
+                        &bytes,
+                        &mut pending,
+                        &mut self.stdout_parser,
+                    );
                     self.stdout_pending = pending;
                 }
                 ProcessEvent::Stderr(bytes) => {
                     let mut pending = std::mem::take(&mut self.stderr_pending);
-                    self.append_output_bytes(&bytes, &mut pending);
+                    Self::append_output_bytes(
+                        &mut self.output,
+                        &mut self.output_bytes,
+                        &bytes,
+                        &mut pending,
+                        &mut self.stderr_parser,
+                    );
                     self.stderr_pending = pending;
                 }
                 ProcessEvent::StreamClosed(is_stdout) => {
-                    if is_stdout && !self.stdout_pending.is_empty() {
-                        let text = String::from_utf8_lossy(&self.stdout_pending).into_owned();
-                        self.stdout_pending.clear();
-                        self.append_output_text(&text);
-                    } else if !is_stdout && !self.stderr_pending.is_empty() {
-                        let text = String::from_utf8_lossy(&self.stderr_pending).into_owned();
-                        self.stderr_pending.clear();
-                        self.append_output_text(&text);
+                    let (pending, parser) = if is_stdout {
+                        (&mut self.stdout_pending, &mut self.stdout_parser)
+                    } else {
+                        (&mut self.stderr_pending, &mut self.stderr_parser)
+                    };
+                    if !pending.is_empty() {
+                        let text = String::from_utf8_lossy(pending).into_owned();
+                        pending.clear();
+                        let (output, output_bytes) = (&mut self.output, &mut self.output_bytes);
+                        parser.feed(&text, output, output_bytes);
                     }
+                    let (output, output_bytes) = (&mut self.output, &mut self.output_bytes);
+                    parser.finish(output, output_bytes);
                 }
                 ProcessEvent::ReadError(error) => {
-                    self.output
-                        .push_str(&format!("\n[process read error] {error}\n"));
-                    self.output_requested_repaint = true;
+                    self.append_internal_text(&format!("\n[process read error] {error}\n"));
                 }
             }
         }
-        if self.output.len() > OUTPUT_LIMIT {
-            let mut cut = self.output.len() - OUTPUT_LIMIT;
-            while cut < self.output.len() && !self.output.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.output.drain(..cut);
-        }
+        self.trim_output();
     }
 
     fn send_input(&mut self) {
@@ -383,9 +661,7 @@ impl GuiShell {
         {
             self.running = false;
             self.status = format!("exited ({status})");
-            self.output
-                .push_str(&format!("\n[CLI process exited: {status}]\n"));
-            self.output_requested_repaint = true;
+            self.append_internal_text(&format!("\n[CLI process exited: {status}]\n"));
         }
     }
 
@@ -467,6 +743,40 @@ impl GuiShell {
             }
             if ui.button("Clear").clicked() {
                 self.output.clear();
+                self.output_bytes = 0;
+            }
+        });
+    }
+}
+
+fn draw_output(ui: &mut egui::Ui, lines: &[OutputLine]) {
+    for line in lines {
+        ui.horizontal_wrapped(|ui| {
+            if line.spans.is_empty() {
+                ui.label("");
+                return;
+            }
+            for span in &line.spans {
+                let mut text = egui::RichText::new(&span.text).monospace();
+                if let Some(color) = span.style.foreground {
+                    text = text.color(color);
+                }
+                if let Some(color) = span.style.background {
+                    text = text.background_color(color);
+                }
+                if span.style.bold {
+                    text = text.strong();
+                }
+                if span.style.dim {
+                    text = text.color(egui::Color32::LIGHT_GRAY);
+                }
+                if span.style.italic {
+                    text = text.italics();
+                }
+                if span.style.underline {
+                    text = text.underline();
+                }
+                ui.label(text);
             }
         });
     }
@@ -514,9 +824,7 @@ impl eframe::App for GuiShell {
                 .id_salt("cli_output")
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.monospace(&self.output);
-                });
+                .show(ui, |ui| draw_output(ui, &self.output));
         });
     }
 }
