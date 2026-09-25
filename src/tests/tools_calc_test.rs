@@ -631,32 +631,17 @@ async fn tool_definition_and_dispatch() {
     );
 
     // Dispatch through execute_tool, no ledger attached.
-    let res = crate::tools::execute_tool(
-        "calc",
-        &json!({ "expressions": ["1425 * 32"] }),
-        None,
-        None,
-        None,
-        None,
-        0,
-        |_| true,
-    )
-    .await
-    .unwrap();
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
+    let res =
+        crate::tools::execute_tool("calc", &json!({ "expressions": ["1425 * 32"] }), &context)
+            .await
+            .unwrap();
     assert_eq!(res[0]["result"].as_i64(), Some(45600));
 
     // Disabled tools are refused even if called (defense in depth).
-    let res = crate::tools::execute_tool(
-        "calc",
-        &json!({ "expressions": ["1 + 1"] }),
-        None,
-        None,
-        None,
-        None,
-        0,
-        |_| false,
-    )
-    .await;
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| false);
+    let res =
+        crate::tools::execute_tool("calc", &json!({ "expressions": ["1 + 1"] }), &context).await;
     let err = res.unwrap_err().to_string();
     assert!(err.contains("[TOOL_DISABLED]"), "{}", err);
 }

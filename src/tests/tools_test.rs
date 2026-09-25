@@ -3,20 +3,27 @@ use std::fs;
 
 use crate::startup::KbAutoConfirm;
 
+fn tool_context<'a, F>(
+    todo_mode: u8,
+    plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
+    is_enabled: F,
+) -> ToolExecutionContext<'a, F>
+where
+    F: Fn(&str) -> bool,
+{
+    ToolExecutionContext::new(None, None, None, todo_mode, plan_guard, is_enabled)
+}
+
 #[tokio::test]
 async fn test_execute_tool_mode2_denies_state_file_writes() {
     // Todo mode 2: LLM writes to guard-managed state files are rejected at
     // the dispatch layer. The decision itself lives in todo_guard
     // (llm_guard_state_file_write); here we prove execute_tool wires it.
+    let context = tool_context(2, None, |_| true);
     let denied = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": "artifacts/handover.md" }),
-        None,
-        None,
-        None,
-        None,
-        2,
-        |_| true,
+        &context,
     )
     .await;
     let err = denied.unwrap_err().to_string();
@@ -30,12 +37,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
             "old_string": "a",
             "new_string": "b"
         }),
-        None,
-        None,
-        None,
-        None,
-        2,
-        |_| true,
+        &context,
     )
     .await;
     assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
@@ -48,12 +50,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
     let ok = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": outside.to_str().unwrap() }),
-        None,
-        None,
-        None,
-        None,
-        2,
-        |_| true,
+        &context,
     )
     .await;
     assert!(
@@ -64,15 +61,11 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
 
     // Mode 1 / non-todo: no denial at the dispatch layer either.
     for mode in [0u8, 1u8] {
+        let context = tool_context(mode, None, |_| true);
         let ok = execute_tool(
             "write_file",
             &json!({ "content": "x", "path": outside.to_str().unwrap() }),
-            None,
-            None,
-            None,
-            None,
-            mode,
-            |_| true,
+            &context,
         )
         .await;
         assert!(
@@ -91,6 +84,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
     crate::tools::set_workspace_root(std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let plan = "# Plan\n\n## Tasks\n- [ ] a\n- [ ] b\n";
     let guard = crate::todo_guard::PlanWriteGuard::capture(plan, 0);
+    let context = tool_context(2, Some(&guard), |_| true);
 
     // Violation: the executor flips a task it was not assigned.
     let violated = execute_tool(
@@ -99,12 +93,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
             "content": "# Plan\n\n## Tasks\n- [x] a\n- [x] b\n",
             "path": "./todo.md"
         }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     let err = violated.unwrap_err().to_string();
@@ -119,12 +108,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
     let ok = execute_tool(
         "write_file",
         &json!({ "content": "x", "path": other.to_str().unwrap() }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     assert!(
@@ -852,17 +836,13 @@ fn test_validate_path_symlink_escape() {
     assert!(validate_path(ws.join("new_dir/file.txt").to_str().unwrap()).is_ok());
 
     // The same escape through the dispatch path (execute_tool).
+    let context = tool_context(0, None, |_| true);
     let blocked = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(execute_tool(
             "read_file",
             &json!({ "path": link_str }),
-            None,
-            None,
-            None,
-            None,
-            0,
-            |_| true,
+            &context,
         ));
     assert!(blocked.is_err());
     assert!(
@@ -1040,17 +1020,8 @@ fn test_get_tool_definitions_kb_tools_with_kb_dir() {
 
 #[tokio::test]
 async fn test_execute_tool_rejects_disabled() {
-    let res = execute_tool(
-        "execute_bash",
-        &json!({ "command": "ls" }),
-        None,
-        None,
-        None,
-        None,
-        0,
-        |_| false,
-    )
-    .await;
+    let context = tool_context(0, None, |_| false);
+    let res = execute_tool("execute_bash", &json!({ "command": "ls" }), &context).await;
     let err = res.unwrap_err().to_string();
     assert!(
         err.contains("[TOOL_DISABLED]"),

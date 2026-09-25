@@ -267,6 +267,15 @@ pub(crate) async fn run_reasoning_loop<'a>(
     // Number ledger for calc results (spec: number ledger): todo modes append
     // under <workspace>/artifacts/, other modes to the session data dir.
     let calc_ledger = tools_calc::CalcLedger::new(&session.label, config.todo_mode);
+    let db_ctx = tools_data::db_context_from_config(config);
+    let tool_context = tools::ToolExecutionContext::new(
+        db_ctx.as_ref(),
+        kb_ctx,
+        Some(&calc_ledger),
+        config.todo_mode,
+        plan_guard,
+        |name| config.is_tool_enabled(name),
+    );
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
@@ -544,19 +553,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     }
 
                     // execute tool and get tool_result json for following steps
-                    let db_ctx = tools_data::db_context_from_config(config);
-                    match tools::execute_tool(
-                        &call.function.name,
-                        &args,
-                        db_ctx.as_ref(),
-                        kb_ctx,
-                        Some(&calc_ledger),
-                        plan_guard,
-                        config.todo_mode,
-                        |name| config.is_tool_enabled(name),
-                    )
-                    .await
-                    {
+                    match tools::execute_tool(&call.function.name, &args, &tool_context).await {
                         Ok(res) => {
                             println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                             tool_result = res;

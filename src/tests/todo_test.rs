@@ -373,6 +373,8 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
     std::fs::write(TODO_MD_PATH, plan).unwrap();
     let session_plan = std::fs::read_to_string(TODO_MD_PATH).unwrap();
     let guard = crate::todo_guard::PlanWriteGuard::capture(&session_plan, 0);
+    let context =
+        crate::tools::ToolExecutionContext::new(None, None, None, 2, Some(&guard), |_| true);
 
     // Allowed: the executor marks its own task with a targeted edit.
     let ok = crate::tools::execute_tool(
@@ -382,12 +384,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ] a",
             "new_string": "- [x] a"
         }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     assert!(
@@ -407,12 +404,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ] b",
             "new_string": "- [x] b"
         }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     let err = denied.unwrap_err().to_string();
@@ -432,12 +424,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ]  b",
             "new_string": "- [ ] b\n- [ ] fuzzy-sub"
         }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     assert!(
@@ -460,12 +447,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "old_string": "- [ ]  b",
             "new_string": "- [x] b"
         }),
-        None,
-        None,
-        None,
-        Some(&guard),
-        2,
-        |_| true,
+        &context,
     )
     .await;
     let err = denied.unwrap_err().to_string();

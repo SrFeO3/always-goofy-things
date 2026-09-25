@@ -59,6 +59,46 @@ pub(crate) type KbCtxOpt<'a> = Option<KbCtx<'a>>;
 #[cfg(not(feature = "kb"))]
 pub(crate) type KbCtxOpt<'a> = Option<KbCtx<'a>>;
 
+/// Run-scoped dependencies and policy required to execute one tool call.
+///
+/// The context is built once per reasoning-loop invocation. It deliberately
+/// contains only values consumed by tool dispatch; LLM/provider/settings state
+/// remains in `reasoning::LoopCtx`.
+pub(crate) struct ToolExecutionContext<'a, F>
+where
+    F: Fn(&str) -> bool,
+{
+    db_ctx: Option<&'a tools_data::DbContext>,
+    kb_ctx: KbCtxOpt<'a>,
+    calc_ledger: Option<&'a tools_calc::CalcLedger>,
+    todo_mode: u8,
+    plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
+    is_enabled: F,
+}
+
+impl<'a, F> ToolExecutionContext<'a, F>
+where
+    F: Fn(&str) -> bool,
+{
+    pub(crate) fn new(
+        db_ctx: Option<&'a tools_data::DbContext>,
+        kb_ctx: KbCtxOpt<'a>,
+        calc_ledger: Option<&'a tools_calc::CalcLedger>,
+        todo_mode: u8,
+        plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
+        is_enabled: F,
+    ) -> Self {
+        Self {
+            db_ctx,
+            kb_ctx,
+            calc_ledger,
+            todo_mode,
+            plan_guard,
+            is_enabled,
+        }
+    }
+}
+
 pub const ALLOW_COMMAND_LIST: &[&str] = &[
     "^ls",
     "^cat",
@@ -347,20 +387,18 @@ pub fn get_tool_definitions(
     tools
 }
 
-pub async fn execute_tool(
+pub(crate) async fn execute_tool<F>(
     name: &str,
     args: &serde_json::Value,
-    db_ctx: Option<&tools_data::DbContext>,
-    kb_ctx: KbCtxOpt<'_>,
-    calc_ledger: Option<&tools_calc::CalcLedger>,
-    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
-    todo_mode: u8,
-    is_enabled: impl Fn(&str) -> bool,
-) -> Result<serde_json::Value> {
+    context: &ToolExecutionContext<'_, F>,
+) -> Result<serde_json::Value>
+where
+    F: Fn(&str) -> bool,
+{
     #[cfg(not(feature = "kb"))]
-    let _ = kb_ctx;
+    let _ = context.kb_ctx;
     // Refuse disabled tools even if the LLM calls them anyway (defense in depth).
-    if !is_enabled(name) {
+    if !(context.is_enabled)(name) {
         return Err(anyhow!(
             "[TOOL_DISABLED] Tool '{}' is disabled in this configuration.",
             name
@@ -372,12 +410,14 @@ pub async fn execute_tool(
     // files (artifacts/handover.md, artifacts/calc_ledger.jsonl).
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
-        if let Some(msg) = crate::todo_guard::llm_guard_state_file_write(name, path, todo_mode) {
+        if let Some(msg) =
+            crate::todo_guard::llm_guard_state_file_write(name, path, context.todo_mode)
+        {
             return Err(anyhow!("{}", msg));
         }
         // Executor sessions: validate plan-file writes against the session
         // snapshot before they land (`./next-task.md` is denied too).
-        if let Some(guard) = plan_guard
+        if let Some(guard) = context.plan_guard
             && let Some(msg) = crate::todo_guard::llm_guard_plan_file_write(name, path, args, guard)
         {
             return Err(anyhow!("{}", msg));
@@ -387,13 +427,13 @@ pub async fn execute_tool(
     match name {
         "read_file" => execute_read_file(args),
         "write_file" => execute_write_file(args),
-        "str_replace_editor" => execute_str_replace_guarded(args, plan_guard),
+        "str_replace_editor" => execute_str_replace_guarded(args, context.plan_guard),
         "grep_search" => execute_grep_search(args).await,
         "list_directory" => execute_list_directory(args),
         "execute_bash" => execute_bash(args).await,
         "fetch_web" => execute_fetch_web(args).await,
         "data_search" => {
-            let ctx = db_ctx.ok_or_else(|| {
+            let ctx = context.db_ctx.ok_or_else(|| {
                 anyhow::anyhow!(
                     "[DB_CONFIG_ERROR] --db-url is required when --db-type is set. Provide the database HTTP endpoint URL."
                 )
@@ -405,7 +445,7 @@ pub async fn execute_tool(
             tools_data::execute_data_search(ctx, query).await
         }
         "data_schema" => {
-            let ctx = db_ctx.ok_or_else(|| {
+            let ctx = context.db_ctx.ok_or_else(|| {
                 anyhow::anyhow!(
                     "[DB_CONFIG_ERROR] --db-url is required when --db-type is set. Provide the database HTTP endpoint URL."
                 )
@@ -415,7 +455,7 @@ pub async fn execute_tool(
         }
         #[cfg(feature = "kb")]
         "data_kb_search" => {
-            let ctx = kb_ctx.ok_or_else(|| {
+            let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             let query = args
@@ -426,7 +466,7 @@ pub async fn execute_tool(
         }
         #[cfg(feature = "kb")]
         "data_kb_schema" => {
-            let ctx = kb_ctx.ok_or_else(|| {
+            let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             let table = args.get("table").and_then(|v| v.as_str());
@@ -434,14 +474,14 @@ pub async fn execute_tool(
         }
         #[cfg(feature = "kb")]
         "data_kb_insert" => {
-            let ctx = kb_ctx.ok_or_else(|| {
+            let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_insert(ctx, args)
         }
         #[cfg(feature = "kb")]
         "data_kb_update" => {
-            let ctx = kb_ctx.ok_or_else(|| {
+            let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_update(ctx, args)
@@ -452,7 +492,7 @@ pub async fn execute_tool(
                 "[KB_CONFIG_ERROR] This binary was built without the 'kb' feature. Rebuild with --features kb to use data_kb_* tools."
             ))
         }
-        "calc" => Ok(tools_calc::execute_calc(args, calc_ledger)),
+        "calc" => Ok(tools_calc::execute_calc(args, context.calc_ledger)),
         _ => Err(anyhow::anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
     }
 }
