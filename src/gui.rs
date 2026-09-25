@@ -9,6 +9,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -487,6 +488,38 @@ fn parse_task_summary(todo_md: &str) -> TaskSummary {
     summary
 }
 
+fn is_todo_mode(todo_mode: u8) -> bool {
+    matches!(todo_mode, 1 | 2)
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let (_, _, fonts) = system_fonts::find_for_system_locale(system_fonts::FontStyle::Sans);
+    let mut definitions = egui::FontDefinitions::default();
+
+    for font in fonts {
+        let bytes = match font.source {
+            system_fonts::FoundFontSource::Path(path) => match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            },
+            system_fonts::FoundFontSource::Bytes(bytes) => bytes.to_vec(),
+        };
+        definitions.font_data.insert(
+            font.key.clone(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            definitions
+                .families
+                .entry(family)
+                .or_default()
+                .push(font.key.clone());
+        }
+    }
+
+    ctx.set_fonts(definitions);
+}
+
 struct GuiShell {
     process: ProcessReader,
     input: String,
@@ -496,7 +529,7 @@ struct GuiShell {
     stderr_parser: AnsiParser,
     stdout_pending: Vec<u8>,
     stderr_pending: Vec<u8>,
-    workspace: WorkspaceInspector,
+    workspace: Option<WorkspaceInspector>,
     status: String,
     running: bool,
     focus_input: bool,
@@ -505,12 +538,17 @@ struct GuiShell {
 
 impl GuiShell {
     fn new(config: &Config) -> Result<Self> {
-        let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(&config.working_dir)
-        });
         let process = ProcessReader::start()?;
+        let workspace = if is_todo_mode(config.todo_mode) {
+            let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(&config.working_dir)
+            });
+            Some(WorkspaceInspector::new(root))
+        } else {
+            None
+        };
         Ok(Self {
             process,
             input: String::new(),
@@ -520,7 +558,7 @@ impl GuiShell {
             stderr_parser: AnsiParser::default(),
             stdout_pending: Vec::new(),
             stderr_pending: Vec::new(),
-            workspace: WorkspaceInspector::new(root),
+            workspace,
             status: "running".to_string(),
             running: true,
             focus_input: true,
@@ -666,6 +704,10 @@ impl GuiShell {
     }
 
     fn draw_workspace(&mut self, ui: &mut egui::Ui) {
+        let Some(workspace) = self.workspace.as_mut() else {
+            return;
+        };
+
         ui.heading("Workspace");
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in [
@@ -675,16 +717,16 @@ impl GuiShell {
                 (WorkspaceTab::Artifacts, "Artifacts"),
             ] {
                 if ui
-                    .selectable_label(self.workspace.selected == tab, label)
+                    .selectable_label(workspace.selected == tab, label)
                     .clicked()
                 {
-                    self.workspace.selected = tab;
+                    workspace.selected = tab;
                 }
             }
         });
         ui.separator();
 
-        let summary = &self.workspace.task_summary;
+        let summary = &workspace.task_summary;
         ui.label(format!(
             "Progress: {} / {} ({} pending)",
             summary.completed, summary.total, summary.pending
@@ -694,31 +736,31 @@ impl GuiShell {
         }
         ui.separator();
 
-        match self.workspace.selected {
-            WorkspaceTab::Todo => text_view(ui, &self.workspace.todo_md),
-            WorkspaceTab::NextTask => text_view(ui, &self.workspace.next_task_md),
-            WorkspaceTab::Handover => text_view(ui, &self.workspace.handover_md),
+        match workspace.selected {
+            WorkspaceTab::Todo => text_view(ui, &workspace.todo_md),
+            WorkspaceTab::NextTask => text_view(ui, &workspace.next_task_md),
+            WorkspaceTab::Handover => text_view(ui, &workspace.handover_md),
             WorkspaceTab::Artifacts => {
                 egui::ScrollArea::vertical()
                     .id_salt("artifact_list")
                     .max_height(100.0)
                     .show(ui, |ui| {
-                        if self.workspace.artifacts.is_empty() {
+                        if workspace.artifacts.is_empty() {
                             ui.label("(no artifacts)");
                         }
-                        for path in self.workspace.artifacts.clone() {
+                        for path in workspace.artifacts.clone() {
                             let name = path
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_else(|| path.display().to_string());
-                            let selected = self.workspace.selected_artifact.as_ref() == Some(&path);
+                            let selected = workspace.selected_artifact.as_ref() == Some(&path);
                             if ui.selectable_label(selected, name).clicked() {
-                                self.workspace.selected_artifact = Some(path.clone());
+                                workspace.selected_artifact = Some(path.clone());
                             }
                         }
                     });
                 ui.separator();
-                text_view(ui, &self.workspace.selected_artifact_text());
+                text_view(ui, &workspace.selected_artifact_text());
             }
         }
     }
@@ -795,7 +837,9 @@ impl eframe::App for GuiShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.update_process();
-        self.workspace.refresh_if_due();
+        if let Some(workspace) = &mut self.workspace {
+            workspace.refresh_if_due();
+        }
 
         if self.running || self.output_requested_repaint {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -815,9 +859,11 @@ impl eframe::App for GuiShell {
 
         egui::Panel::bottom("input").show(root_ui, |ui| self.draw_input(ui));
 
-        egui::Panel::right("workspace")
-            .default_size(360.0)
-            .show(root_ui, |ui| self.draw_workspace(ui));
+        if self.workspace.is_some() {
+            egui::Panel::right("workspace")
+                .default_size(360.0)
+                .show(root_ui, |ui| self.draw_workspace(ui));
+        }
 
         egui::CentralPanel::default().show(root_ui, |ui| {
             egui::ScrollArea::vertical()
@@ -841,7 +887,22 @@ pub fn run(config: Config) -> Result<()> {
     eframe::run_native(
         "always-goofy-things",
         options,
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(|cc| {
+            install_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_todo_mode;
+
+    #[test]
+    fn workspace_is_enabled_only_for_todo_modes() {
+        assert!(!is_todo_mode(0));
+        assert!(is_todo_mode(1));
+        assert!(is_todo_mode(2));
+    }
 }
