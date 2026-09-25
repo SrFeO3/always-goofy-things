@@ -10,6 +10,12 @@ use crate::compat_provider::LlmProvider;
 use crate::llm_stats::{CallStatus, LlmCallRecord};
 use crate::model::{FunctionCall, ToolCall, Usage};
 
+fn load_current_session(label: &str) -> anyhow::Result<Vec<crate::model::Message>> {
+    let path = super::last_session_path(label)
+        .ok_or_else(|| anyhow::anyhow!("Could not determine session file path"))?;
+    super::read_messages_from(&path)
+}
+
 /// Serializes persistence tests (`SESSION_DATA_DIR` is process-global).
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 

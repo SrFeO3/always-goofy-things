@@ -203,15 +203,6 @@ pub fn restore_previous_session(label: &str) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
-/// Read the current session (`last_session_{label}.jsonl`) back into memory.
-/// Test-only (no production path reads it back).
-#[cfg(test)]
-pub fn load_current_session(label: &str) -> Result<Vec<Message>> {
-    let path =
-        last_session_path(label).ok_or_else(|| anyhow!("Could not determine session file path"))?;
-    read_messages_from(&path)
-}
-
 /// Archive a todo task's session: rename `last_session_{label}.jsonl` -> `todo_loop_{task_index}_{label}.jsonl`.
 ///
 /// Called after a todo task completes to preserve its conversation history

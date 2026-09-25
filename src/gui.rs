@@ -1,10 +1,9 @@
 #![cfg(feature = "gui")]
 
-//! Minimal GUI process shell with lightweight ANSI SGR rendering.
+//! GUI frontend for the application.
 //!
-//! The GUI does not link or call the CLI application layer. It starts the
-//! same executable with `AGT_GUI_CHILD=1`, relays stdin/stdout/stderr, and
-//! provides a read-only view of the workspace files used by todo mode.
+//! Provides a native egui interface that runs the CLI child process,
+//! renders its ANSI output, and displays the todo workspace files.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -260,6 +259,12 @@ fn ansi_256_color(value: u16) -> egui::Color32 {
     }
 }
 
+fn foreground_for_style(style: OutputStyle) -> Option<egui::Color32> {
+    style
+        .foreground
+        .or_else(|| style.background.map(|_| egui::Color32::WHITE))
+}
+
 #[derive(Debug)]
 enum ProcessEvent {
     Stdout(Vec<u8>),
@@ -493,8 +498,15 @@ fn is_todo_mode(todo_mode: u8) -> bool {
 }
 
 fn install_fonts(ctx: &egui::Context) {
-    let (_, _, fonts) = system_fonts::find_for_system_locale(system_fonts::FontStyle::Sans);
+    let fonts = system_fonts::find_from_presets(
+        [
+            system_fonts::FontPreset::Japanese,
+            system_fonts::FontPreset::Latin,
+        ],
+        system_fonts::FontStyle::Sans,
+    );
     let mut definitions = egui::FontDefinitions::default();
+    let mut font_keys = Vec::with_capacity(fonts.len());
 
     for font in fonts {
         let bytes = match font.source {
@@ -508,12 +520,15 @@ fn install_fonts(ctx: &egui::Context) {
             font.key.clone(),
             Arc::new(egui::FontData::from_owned(bytes)),
         );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            definitions
-                .families
-                .entry(family)
-                .or_default()
-                .push(font.key.clone());
+        font_keys.push(font.key);
+    }
+
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let family_fonts = definitions.families.entry(family).or_default();
+        for key in font_keys.iter().rev() {
+            if !family_fonts.contains(key) {
+                family_fonts.insert(0, key.clone());
+            }
         }
     }
 
@@ -792,15 +807,24 @@ impl GuiShell {
 }
 
 fn draw_output(ui: &mut egui::Ui, lines: &[OutputLine]) {
+    let previous_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+
     for line in lines {
+        let trailing_background = line.spans.last().and_then(|span| span.style.background);
         ui.horizontal_wrapped(|ui| {
             if line.spans.is_empty() {
                 ui.label("");
                 return;
             }
+
+            let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
+            let mut parts = Vec::with_capacity(line.spans.len());
             for span in &line.spans {
-                let mut text = egui::RichText::new(&span.text).monospace();
-                if let Some(color) = span.style.foreground {
+                let mut text = egui::RichText::new(&span.text)
+                    .monospace()
+                    .line_height(Some(line_height));
+                if let Some(color) = foreground_for_style(span.style) {
                     text = text.color(color);
                 }
                 if let Some(color) = span.style.background {
@@ -818,10 +842,33 @@ fn draw_output(ui: &mut egui::Ui, lines: &[OutputLine]) {
                 if span.style.underline {
                     text = text.underline();
                 }
-                ui.label(text);
+                parts.push(text);
+            }
+            let mut job = egui::text::LayoutJob::default();
+            for text in parts {
+                text.append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::Default,
+                    ui.text_valign(),
+                );
+            }
+            let last_rect = ui.label(job).rect;
+
+            if let Some(background) = trailing_background {
+                let remaining_width = ui.available_width();
+                if remaining_width > 0.0 {
+                    let fill_rect = egui::Rect::from_min_size(
+                        egui::pos2(last_rect.max.x, last_rect.min.y),
+                        egui::vec2(remaining_width, last_rect.height()),
+                    );
+                    ui.painter().rect_filled(fill_rect, 0.0, background);
+                }
             }
         });
     }
+
+    ui.spacing_mut().item_spacing = previous_spacing;
 }
 
 fn text_view(ui: &mut egui::Ui, text: &str) {
@@ -896,13 +943,5 @@ pub fn run(config: Config) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::is_todo_mode;
-
-    #[test]
-    fn workspace_is_enabled_only_for_todo_modes() {
-        assert!(!is_todo_mode(0));
-        assert!(is_todo_mode(1));
-        assert!(is_todo_mode(2));
-    }
-}
+#[path = "tests/gui_test.rs"]
+mod tests;

@@ -7,6 +7,11 @@
 
 use super::*;
 use serde_json::Value;
+use std::path::PathBuf;
+
+fn calc_ledger_at(path: PathBuf) -> CalcLedger {
+    CalcLedger { path: Some(path) }
+}
 
 /// Evaluate one batch and return the result array (asserting the call
 /// produced an array).
@@ -579,7 +584,7 @@ fn ledger_records_success_and_error() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("calc_ledger.jsonl");
 
-    let ledger = CalcLedger::at(path.clone());
+    let ledger = calc_ledger_at(path.clone());
     execute_calc(
         &json!({ "expressions": ["percent(17121, 17267)", "1 / 0"] }),
         Some(&ledger),

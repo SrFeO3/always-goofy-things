@@ -3,6 +3,10 @@ use std::fs;
 
 use crate::startup::KbAutoConfirm;
 
+fn execute_str_replace(args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    super::execute_str_replace_guarded(args, None)
+}
+
 fn tool_context<'a, F>(
     todo_mode: u8,
     plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,

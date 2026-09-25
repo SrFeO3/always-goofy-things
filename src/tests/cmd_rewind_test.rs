@@ -66,6 +66,18 @@ fn setup_temp_session_dir() -> PathBuf {
     dir
 }
 
+fn load_current_session(label: &str) -> Vec<Message> {
+    let path = persistence::data_dir()
+        .expect("test session data directory should be configured")
+        .join(format!("last_session_{label}.jsonl"));
+    std::fs::read_to_string(path)
+        .expect("rewritten session file should exist")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("session line should be valid JSON"))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Target validation / error paths (no confirmation, no file rewrite)
 // ---------------------------------------------------------------------------
@@ -486,7 +498,7 @@ fn helper_rewind_persists_to_disk() {
     assert_eq!(pair(&msgs), pair(&history(2)));
 
     // The on-disk session must now match the truncated in-memory messages.
-    let on_disk = persistence::load_current_session(label).unwrap();
+    let on_disk = load_current_session(label);
     assert_eq!(
         pair(&on_disk),
         pair(&msgs),

@@ -1014,12 +1014,6 @@ fn guard_plan_write(
     Ok(())
 }
 
-/// str_replace_editor without plan-write validation (test-only).
-#[cfg(test)]
-fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
-    execute_str_replace_guarded(args, None)
-}
-
 /// str_replace_editor execution; the computed result is validated against
 /// the plan snapshot before the write lands.
 fn execute_str_replace_guarded(

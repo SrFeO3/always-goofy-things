@@ -42,10 +42,10 @@ pub const APP_DESCRIPTION: &str = "A lightweight LLM loop for software developme
 
 // ANSI escape sequences for text styling.
 pub const HDR_RED: &str = "\x1b[48;2;218;75;80m";
-pub const HDR_GREEN: &str = "\x1b[48;2;45;180;103m";
+pub const HDR_GREEN: &str = "\x1b[48;2;33;131;75m";
 
 pub const BG_RED: &str = "\x1b[48;2;190;85;85m";
-pub const BG_GREEN: &str = "\x1b[48;2;80;150;95m";
+pub const BG_GREEN: &str = "\x1b[48;2;65;123;78m";
 pub const BG_GRAY: &str = "\x1b[48;2;85;85;90m";
 
 pub const C_GRAY: &str = "\x1b[90m";

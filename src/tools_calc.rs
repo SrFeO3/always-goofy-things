@@ -1415,12 +1415,6 @@ impl CalcLedger {
         }
     }
 
-    /// Explicit destination (tests).
-    #[cfg(test)]
-    pub(crate) fn at(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
     pub(crate) fn record(&self, rec: &CalcRecord) {
         let Some(path) = &self.path else { return };
         let json = match serde_json::to_string(rec) {
