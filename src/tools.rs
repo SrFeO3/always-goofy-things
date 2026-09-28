@@ -651,6 +651,8 @@ pub async fn confirm_execute_tool(
             reason: Some("Failed to read stdin".to_string()),
         };
     }
+    #[cfg(feature = "gui")]
+    let input = crate::gui::decode_child_input(input);
 
     if input.trim().eq_ignore_ascii_case("y") {
         ToolRunDecision {

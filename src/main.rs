@@ -24,8 +24,8 @@ use std::io::Write;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use rustyline::{Cmd, DefaultEditor, KeyEvent};
 
 mod attach;
 mod cmd;
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     // A GUI build is a GUI process by default. The only internal exception is
     // the CLI child started by the GUI process shell.
     #[cfg(feature = "gui")]
-    if std::env::var_os("AGT_GUI_CHILD").is_none() {
+    if std::env::var_os(gui::GUI_CHILD_ENV).is_none() {
         tokio::task::block_in_place(|| gui::run(config))?;
         return Ok(());
     }
@@ -130,6 +130,8 @@ async fn main() -> Result<()> {
     let kb_ctx: Option<()> = None;
 
     let mut query_reader = DefaultEditor::new()?;
+    // Enter sends the line (rustyline default); Ctrl+O inserts a newline.
+    query_reader.bind_sequence(KeyEvent::ctrl('O'), Cmd::Newline);
 
     // Runtime settings, occasionally changed by `/model` / `/config`.
     let mut settings = Settings::from_config(&config);
@@ -171,11 +173,14 @@ async fn main() -> Result<()> {
             break;
         } else {
             // Interactive: read from the user
-            let query_prompt = format!("\nUser-{} > ", session.turn);
+            let query_prompt = format!("\nUser-{} (Enter=send, Ctrl+O=newline) > ", session.turn);
             let readline = query_reader.readline(&query_prompt);
 
             match readline {
                 Ok(line) => {
+                    // The GUI child receives framed multiline messages from the GUI.
+                    #[cfg(feature = "gui")]
+                    let line = gui::decode_child_input(line);
                     // Add to CLI input history (allows using arrow keys to recall previous inputs)
                     query_reader.add_history_entry(line.as_str())?;
                     line
@@ -265,9 +270,10 @@ async fn main() -> Result<()> {
                                 print!("Attach these files anyway? (y/N) ");
                                 let _ = io::stdout().flush();
                                 let mut confirm = String::new();
-                                if io::stdin().read_line(&mut confirm).is_err()
-                                    || !confirm.trim().eq_ignore_ascii_case("y")
-                                {
+                                let read_ok = io::stdin().read_line(&mut confirm).is_ok();
+                                #[cfg(feature = "gui")]
+                                let confirm = gui::decode_child_input(confirm);
+                                if !read_ok || !confirm.trim().eq_ignore_ascii_case("y") {
                                     // User cancelled or error - do not advance
                                     continue;
                                 }

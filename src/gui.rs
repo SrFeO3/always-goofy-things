@@ -19,7 +19,60 @@ use crate::startup::Config;
 
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-const CHILD_ENV: &str = "AGT_GUI_CHILD";
+
+/// Environment variable identifying the CLI child spawned by the GUI.
+pub(crate) const GUI_CHILD_ENV: &str = "AGT_GUI_CHILD";
+
+/// The GUI child reads stdin line-by-line (rustyline file mode), so the GUI
+/// frames messages containing newlines as one JSON-escaped physical line.
+const GUI_FRAME_PREFIX: &str = "\x1bAGT_GUI_INPUT:";
+
+/// Encode a GUI message; single-line input (e.g. y/n confirmations) passes
+/// through unchanged, so the child's plain stdin readers keep working.
+fn encode_gui_input(input: &str) -> String {
+    if !input.contains('\n') && !input.starts_with(GUI_FRAME_PREFIX) {
+        return input.to_owned();
+    }
+    // JSON serialization of a &str escapes newlines and cannot fail.
+    format!(
+        "{GUI_FRAME_PREFIX}{}",
+        serde_json::to_string(input).expect("serializing a string cannot fail")
+    )
+}
+
+/// Decode a framed message; unframed input passes through unchanged.
+fn decode_gui_input(input: &str) -> String {
+    let Some(payload) = input.strip_prefix(GUI_FRAME_PREFIX) else {
+        return input.to_owned();
+    };
+    serde_json::from_str(payload).unwrap_or_else(|_| input.to_owned())
+}
+
+/// Decode an input line read by the CLI child of the GUI.
+///
+/// Every stdin reader in the child (query, y/n confirmations) must pass its
+/// line through this before use.
+pub(crate) fn decode_child_input(line: String) -> String {
+    if std::env::var_os(GUI_CHILD_ENV).is_none() {
+        return line;
+    }
+    decode_gui_input(&line)
+}
+
+/// True when a plain Enter (no modifiers) was pressed this frame.
+fn plain_enter_pressed(input: &egui::InputState) -> bool {
+    input.events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.is_none()
+        )
+    })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct OutputStyle {
@@ -286,7 +339,7 @@ impl ProcessReader {
         let mut command = Command::new(exe);
         command
             .args(args)
-            .env(CHILD_ENV, "1")
+            .env(GUI_CHILD_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -313,6 +366,7 @@ impl ProcessReader {
 
     fn send_input(&mut self, input: &str) -> std::io::Result<()> {
         if let Some(stdin) = self.stdin.as_mut() {
+            let input = encode_gui_input(input);
             stdin.write_all(input.as_bytes())?;
             stdin.write_all(b"\n")?;
             stdin.flush()?;
@@ -782,16 +836,22 @@ impl GuiShell {
 
     fn draw_input(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            // Ctrl+O is TextEdit's return key, so it inserts a newline at the
+            // cursor; a plain Enter (no modifiers) sends the input instead.
             let response = ui.add(
-                egui::TextEdit::singleline(&mut self.input)
+                egui::TextEdit::multiline(&mut self.input)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Message, slash command, or y/n"),
+                    .return_key(egui::KeyboardShortcut::new(
+                        egui::Modifiers::CTRL,
+                        egui::Key::O,
+                    ))
+                    .hint_text("Message, slash command, or y/n\nEnter: send / Ctrl+O: newline"),
             );
             if self.focus_input {
                 response.request_focus();
                 self.focus_input = false;
             }
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter = response.has_focus() && ui.input(plain_enter_pressed);
             if ui.button("Send").clicked() || enter {
                 self.send_input();
             }

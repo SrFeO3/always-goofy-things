@@ -127,6 +127,14 @@ cargo run -- -m gemini-2.5-pro
 
 Then type a query like "Who are you and what tools can you use?".
 
+#### Entering Queries
+
+In the CLI and GUI:
+
+- `Enter` sends the current input.
+- `Ctrl+O` inserts a newline without sending.
+- Pasted multiline text is preserved as one input.
+
 #### Basic Queries
 - "Translate this Rust project into Shakespearean English without breaking code syntax."
 - "Fetch RFC 9110 from the IETF website, extract the core changes regarding HTTP semantics compared to RFC 7230, and summarize them in 3 bullet points."

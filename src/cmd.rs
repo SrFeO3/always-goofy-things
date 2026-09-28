@@ -496,6 +496,8 @@ pub(crate) fn handle_rewind(
     io::stdin()
         .read_line(&mut confirm)
         .context("Failed to read confirmation")?;
+    #[cfg(feature = "gui")]
+    let confirm = crate::gui::decode_child_input(confirm);
     if !confirm.trim().eq_ignore_ascii_case("y") {
         println!("\x1b[93mCancelled.\x1b[0m");
         return Err(anyhow!("User cancelled the rewind"));
@@ -711,6 +713,8 @@ pub(crate) fn handle_restore(
     io::stdin()
         .read_line(&mut confirm)
         .context("Failed to read confirmation")?;
+    #[cfg(feature = "gui")]
+    let confirm = crate::gui::decode_child_input(confirm);
     if !confirm.trim().eq_ignore_ascii_case("y") {
         println!("\x1b[93mCancelled.\x1b[0m");
         return Err(anyhow!("User cancelled the restore"));
