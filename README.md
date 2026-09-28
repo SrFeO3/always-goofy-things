@@ -18,6 +18,30 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Backend**: Ollama, OpenAI (Chat Completions / Responses), or Anthropic-compatible API.
 - **Execution Environment**: System tools and network capabilities required for tool execution, such as bash, grep, and web fetching.
 
+## Quick Start
+
+Default execution with Local Ollama + gemma4:12b
+```bash
+cargo run
+# (GUI: cargo run --features gui)
+```
+
+Alternatively, with a cloud provider
+```bash
+export LLM_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+ export LLM_API_KEY="..."
+cargo run -- -m gemini-3.5-flash-lite
+```
+
+Other OpenAI-compatible gateways such as OpenRouter work the same way; `--llm-provider` selects the API format (OpenAI- or Anthropic-compatible), `--provider-extras` adds extras like OpenCode Go.
+
+Then type a query at the prompt:
+- "Who are you and what tools can you use?"
+- "Translate this Rust project into Shakespearean English without breaking the code."
+- "@spec.md Build a CLI puzzle game in Rust based on this spec."
+
+Batch mode (`-q`) runs a single query non-interactively, and todo mode (`-t N`) works through long job lists while resetting the LLM context between tasks. See [Usage](#usage) below for input keys, these modes, and more examples.
+
 ## Options and Settings
 
 Options can be set via environment variables or command-line flags (flags take precedence).
@@ -111,32 +135,25 @@ See [docs/todo-mode.md](docs/todo-mode.md) for sample `./todo.md` files and quic
 
 ## Usage
 
-### Quick Start
+### Interactive Mode
 
-Default execution with Local Ollama + gemma4:12b
+Default execution with Local Ollama + gemma4:12b. (A simple GUI is available as an optional feature for use without a terminal.)
 ```bash
 cargo run
+# (GUI: cargo run --features gui)
 ```
 
-Alternatively, with a cloud provider
+Alternatively, with OpenCode Go
 ```bash
-export LLM_URL="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+export LLM_URL="https://opencode.ai/zen/go/v1/chat/completions"
  export LLM_API_KEY="..."
-cargo run -- -m gemini-2.5-pro
+cargo run -- --provider-extras opencode -m space-bunny-free
 ```
 
-Then type a query like "Who are you and what tools can you use?".
-
-#### Entering Queries
-
-In the CLI and GUI:
-
-- `Enter` sends the current input.
-- `Ctrl+O` inserts a newline without sending.
-- Pasted multiline text is preserved as one input.
+Then type a query like "Who are you and what tools can you use?" (`Enter` sends it, `Ctrl+O` inserts a newline).
 
 #### Basic Queries
-- "Translate this Rust project into Shakespearean English without breaking code syntax."
+- "Translate this Rust project into Shakespearean English without breaking the code."
 - "Fetch RFC 9110 from the IETF website, extract the core changes regarding HTTP semantics compared to RFC 7230, and summarize them in 3 bullet points."
 - "Fetch the latest versions of the rand and fastrand crates, create a simple CLI guessing game using each of them, and generate a comparison report on their APIs and performance."
 
@@ -162,7 +179,7 @@ Use todo mode for tasks too large for a single LLM context.
 
 See [docs/todo-mode.md](docs/todo-mode.md) for detailed usage instructions.
 
-# Special Syntax in CLI Queries
+## Special Syntax in CLI Queries
 
 ### Context Modifiers: Attaching Files (`@`) and Text Extraction (`@@`)
 
