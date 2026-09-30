@@ -385,6 +385,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "new_string": "- [x] a"
         }),
         &context,
+        None,
     )
     .await;
     assert!(
@@ -405,6 +406,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "new_string": "- [x] b"
         }),
         &context,
+        None,
     )
     .await;
     let err = denied.unwrap_err().to_string();
@@ -425,6 +427,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "new_string": "- [ ] b\n- [ ] fuzzy-sub"
         }),
         &context,
+        None,
     )
     .await;
     assert!(
@@ -448,6 +451,7 @@ async fn test_execute_tool_mode2_str_replace_plan_write_guard() {
             "new_string": "- [x] b"
         }),
         &context,
+        None,
     )
     .await;
     let err = denied.unwrap_err().to_string();

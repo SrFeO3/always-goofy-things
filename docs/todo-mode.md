@@ -98,6 +98,8 @@ What happens:
 3. It repeats for the next task, until all three are `[x]`.
 4. When all tasks are `[x]`, it checks the goal deliverables (the files listed in the optional `## Deliverables` section) and prints a completion report as the job's final answer, listing the goal deliverables and the tasks' own output files separately. Then it exits.
 
+Todo modes run in batch mode: tool calls are never interactively confirmed, and `mini_python_interpreter` denies non-auto-confirmed calls. To let tasks use the sandboxed Python tool unattended, pass `--mini-python-auto-confirm=ro` (read-only workspace; writes fail inside the sandbox). `rw` also works but lets the sandbox modify any workspace file without confirmation — including `./todo.md` and `artifacts/handover.md` — so prefer `ro` unless a task really needs to write.
+
 ## Mode 2: Dynamic Replan
 
 The plan may change while the job runs. You write the Goal and an initial task list in `./todo.md` (it may be incomplete or wrong); before each task the LLM reviews and rewrites the plan - adding, removing, reordering, or splitting tasks - and marks tasks `[x]` as they finish (it may add subtasks). Each task session may only mark its own task `[x]` and add subtasks it discovered; the application validates every `./todo.md` write against that. Task reports and planner notes are all appended to `artifacts/handover.md` - never into `./todo.md` - and only the application writes them. If execution is interrupted, rerunning `-t 2` resumes from the first unchecked task.

@@ -1,7 +1,7 @@
 use super::*;
 use std::fs;
 
-use crate::startup::KbAutoConfirm;
+use crate::startup::{KbAutoConfirm, MiniPythonAutoConfirm};
 
 fn execute_str_replace(args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     super::execute_str_replace_guarded(args, None)
@@ -28,6 +28,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         "write_file",
         &json!({ "content": "x", "path": "artifacts/handover.md" }),
         &context,
+        None,
     )
     .await;
     let err = denied.unwrap_err().to_string();
@@ -42,6 +43,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
             "new_string": "b"
         }),
         &context,
+        None,
     )
     .await;
     assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
@@ -55,6 +57,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
         "write_file",
         &json!({ "content": "x", "path": outside.to_str().unwrap() }),
         &context,
+        None,
     )
     .await;
     assert!(
@@ -70,6 +73,7 @@ async fn test_execute_tool_mode2_denies_state_file_writes() {
             "write_file",
             &json!({ "content": "x", "path": outside.to_str().unwrap() }),
             &context,
+            None,
         )
         .await;
         assert!(
@@ -98,6 +102,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
             "path": "./todo.md"
         }),
         &context,
+        None,
     )
     .await;
     let err = violated.unwrap_err().to_string();
@@ -113,6 +118,7 @@ async fn test_execute_tool_mode2_plan_write_guard() {
         "write_file",
         &json!({ "content": "x", "path": other.to_str().unwrap() }),
         &context,
+        None,
     )
     .await;
     assert!(
@@ -847,6 +853,7 @@ fn test_validate_path_symlink_escape() {
             "read_file",
             &json!({ "path": link_str }),
             &context,
+            None,
         ));
     assert!(blocked.is_err());
     assert!(
@@ -970,7 +977,9 @@ fn test_tab_skip_blank_with_mixed_whitespace_indent() {
 
 #[test]
 fn test_get_tool_definitions_filters_disabled() {
-    let defs = get_tool_definitions(None, None, |n| n != "execute_bash" && n != "fetch_web");
+    let defs = get_tool_definitions(None, None, MiniPythonAutoConfirm::Ask, |n| {
+        n != "execute_bash" && n != "fetch_web"
+    });
     let names: Vec<&str> = defs
         .iter()
         .map(|d| d["function"]["name"].as_str().unwrap())
@@ -983,7 +992,7 @@ fn test_get_tool_definitions_filters_disabled() {
 
 #[test]
 fn test_get_tool_definitions_only_data_tools_with_db_type() {
-    let defs = get_tool_definitions(Some("greptimedb"), None, |n| {
+    let defs = get_tool_definitions(Some("greptimedb"), None, MiniPythonAutoConfirm::Ask, |n| {
         n == "data_search" || n == "data_schema"
     });
     let names: Vec<&str> = defs
@@ -998,7 +1007,13 @@ fn test_get_tool_definitions_only_data_tools_with_db_type() {
 #[cfg(feature = "kb")]
 #[test]
 fn test_get_tool_definitions_kb_tools_with_kb_dir() {
-    let defs = get_tool_definitions(None, Some("my-doc-library"), |_| true);
+    let defs = get_tool_definitions(
+        None,
+        Some("my-doc-library"),
+        MiniPythonAutoConfirm::Ask,
+        |_| true,
+    );
+    let defs = get_tool_definitions(None, None, MiniPythonAutoConfirm::Ask, |_| true);
     let names: Vec<&str> = defs
         .iter()
         .map(|d| d["function"]["name"].as_str().unwrap())
@@ -1025,7 +1040,7 @@ fn test_get_tool_definitions_kb_tools_with_kb_dir() {
 #[tokio::test]
 async fn test_execute_tool_rejects_disabled() {
     let context = tool_context(0, None, |_| false);
-    let res = execute_tool("execute_bash", &json!({ "command": "ls" }), &context).await;
+    let res = execute_tool("execute_bash", &json!({ "command": "ls" }), &context, None).await;
     let err = res.unwrap_err().to_string();
     assert!(
         err.contains("[TOOL_DISABLED]"),
@@ -1043,8 +1058,9 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
         &json!({ "command": "ls" }),
         true, // unsafe_reflex would normally auto-confirm -- must NOT apply
         false,
-        KbAutoConfirm::Ask, // KB gate off (non-KB tool)
-        true,               // batch
+        KbAutoConfirm::Ask,         // KB gate off (non-KB tool)
+        MiniPythonAutoConfirm::Ask, // mini gate off (non-mini tool)
+        true,                       // batch
         |_| false,
     )
     .await;
@@ -1065,10 +1081,11 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
     let decision = confirm_execute_tool(
         "calc",
         &json!({ "expressions": ["1 + 1"] }),
-        false,              // unsafe_reflex off
-        false,              // db_unsafe_reflex off (does not apply to calc)
-        KbAutoConfirm::Ask, // KB gate off (does not apply to calc)
-        true,               // batch
+        false,                      // unsafe_reflex off
+        false,                      // db_unsafe_reflex off (does not apply to calc)
+        KbAutoConfirm::Ask,         // KB gate off (does not apply to calc)
+        MiniPythonAutoConfirm::Ask, // mini gate off (does not apply to calc)
+        true,                       // batch
         |_| true,
     )
     .await;
@@ -1082,6 +1099,7 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         false,
         true,
         KbAutoConfirm::Ask, // KB gate off
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1095,6 +1113,7 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         true,
         false,
         KbAutoConfirm::Ask, // KB gate off
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1126,10 +1145,11 @@ async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
         let decision = confirm_execute_tool(
             name,
             args,
-            false,              // unsafe_reflex off
-            false,              // db_unsafe_reflex off
-            KbAutoConfirm::Ask, // KB gate off
-            true,               // batch: no y/N available -> must deny, never execute
+            false,                      // unsafe_reflex off
+            false,                      // db_unsafe_reflex off
+            KbAutoConfirm::Ask,         // KB gate off
+            MiniPythonAutoConfirm::Ask, // mini gate off
+            true,                       // batch: no y/N available -> must deny, never execute
             |_| true,
         )
         .await;
@@ -1157,6 +1177,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         true, // unsafe_reflex
         false,
         KbAutoConfirm::Ask, // KB gate off (list_directory is not a KB tool)
+        MiniPythonAutoConfirm::Ask, // mini gate off
         true,               // batch
         |_| true,
     )
@@ -1175,6 +1196,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         true,
         false,
         KbAutoConfirm::Ask, // KB gate off
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1192,6 +1214,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         true,
         false,
         KbAutoConfirm::Ask, // KB gate off
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1212,6 +1235,7 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         false,
         false,
         KbAutoConfirm::Ro,
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1225,6 +1249,7 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         false,
         false,
         KbAutoConfirm::Ro,
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1241,6 +1266,7 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         false,
         false,
         KbAutoConfirm::Rw,
+        MiniPythonAutoConfirm::Ask,
         true,
         |_| true,
     )
@@ -1254,8 +1280,17 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         ("data_kb_insert", &json!({ "document_id": "null" })),
         ("data_kb_update", &json!({ "target_type": "documents" })),
     ] {
-        let d =
-            confirm_execute_tool(name, args, true, false, KbAutoConfirm::Ask, true, |_| true).await;
+        let d = confirm_execute_tool(
+            name,
+            args,
+            true,
+            false,
+            KbAutoConfirm::Ask,
+            MiniPythonAutoConfirm::Ask,
+            true,
+            |_| true,
+        )
+        .await;
         assert!(
             !d.proceed,
             "global --unsafe-reflex must not approve {} (batch mode denies)",

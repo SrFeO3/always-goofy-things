@@ -14,7 +14,7 @@ To demonstrate the core mechanics of iterative LLM function-calling, this lightw
 - **Local KB (`--features kb`)**: an optional local document library you can search and analyze with the AI. See [docs/kb.md](docs/kb.md).
 
 ## Requirements
-- **Rust**: Latest stable version (Cargo).
+- **Rust**: Latest stable toolchain, plus a C compiler for the native dependencies (`aws-lc-sys`; `monty` via `psm`).
 - **Backend**: Ollama, OpenAI (Chat Completions / Responses), or Anthropic-compatible API.
 - **Execution Environment**: System tools and network capabilities required for tool execution, such as bash, grep, and web fetching.
 
@@ -58,7 +58,7 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
-| `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured per output stream (stdout/stderr) for `execute_bash` / `grep_search`; excess output keeps the tail (`0` = unlimited). | `1048576` |
+| `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured for `execute_bash` / `grep_search` (per output stream: stdout and stderr each); excess output keeps the tail (`0` = unlimited). `mini_python_interpreter` applies the same value to its stdout and stderr **combined**. | `1048576` |
 | `--tool-timeout-secs <NUM>` | `TOOL_TIMEOUT_SECS` | Wall-clock timeout in seconds for `execute_bash` / `grep_search` (`0` = unlimited). | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `--only-tools <NAMES>` | `ONLY_TOOLS` | Only these AI tools are enabled (comma-separated or repeated). Unset = all tools. Disabled tools are hidden from the LLM and refuse to execute. | (all) |
@@ -69,7 +69,8 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. In todo mode (`-t`), the query is appended to every replan and task session's user message as additional instructions. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
 | `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static Plan, `2`=Dynamic Replan (AI-driven). | `0` |
-| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for todo modes (`-t`): they run in batch, where non-auto-confirmed tool calls are denied. | false |
+| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for todo modes (`-t`): they run in batch, where non-auto-confirmed tool calls are denied. Never applies to `mini_python_interpreter` (it runs arbitrary code). | false |
+| `--mini-python-auto-confirm <MODE>` | `MINI_PYTHON_AUTO_CONFIRM` | Auto-approve `mini_python_interpreter` without confirmation: `ro` = read-only workspace mount (writes fail inside the sandbox), `rw` = read-write workspace mount. `ask` (default) prompts `y/N`; batch / todo modes deny. Independent of `--unsafe-reflex`. | `ask` |
 | `license` | (none) | Subcommand: print the third-party license notices bundled into this binary and exit. | (none) |
 
 ### LLM Provider (`LLM_PROVIDER`)
@@ -96,7 +97,7 @@ Controls how tool results are structured when sent back to the LLM.
 
 Restricts which AI tools the LLM can use. When unset, all tools are enabled. When set (comma-separated or repeated), **only** the listed tools are enabled; disabled tools are hidden from the LLM and refuse to execute even if called.
 
-Available names: `list_directory`, `read_file`, `write_file`, `str_replace_editor`, `grep_search`, `execute_bash`, `fetch_web`, `data_search`, `data_schema`, `calc`.
+Available names: `list_directory`, `read_file`, `write_file`, `str_replace_editor`, `grep_search`, `execute_bash`, `fetch_web`, `data_search`, `data_schema`, `calc`, `mini_python_interpreter`.
 
 ```bash
 # Read-only exploration session

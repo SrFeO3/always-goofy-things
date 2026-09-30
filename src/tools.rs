@@ -177,6 +177,7 @@ pub enum ToolName {
     DataKbSchema,
     DataKbInsert,
     DataKbUpdate,
+    MiniPythonInterpreter,
 }
 
 impl ToolName {
@@ -197,6 +198,7 @@ impl ToolName {
             ToolName::DataKbSchema => "data_kb_schema",
             ToolName::DataKbInsert => "data_kb_insert",
             ToolName::DataKbUpdate => "data_kb_update",
+            ToolName::MiniPythonInterpreter => "mini_python_interpreter",
         }
     }
 }
@@ -215,6 +217,21 @@ pub struct ToolRunDecision {
     pub proceed: bool,
     pub kind: ToolRunDecisionKind,
     pub reason: Option<String>,
+    /// `Some(write)` when a `mini_python_interpreter` call is approved,
+    /// `None` for all other tools. Filled by the dedicated mini gate only.
+    pub mini_python_write: Option<bool>,
+}
+
+impl ToolRunDecision {
+    /// A decision that carries no mini-python mount mode.
+    fn new(proceed: bool, kind: ToolRunDecisionKind, reason: Option<String>) -> Self {
+        Self {
+            proceed,
+            kind,
+            reason,
+            mini_python_write: None,
+        }
+    }
 }
 
 /// Tool definitions sent to the LLM API.
@@ -225,6 +242,7 @@ pub struct ToolRunDecision {
 pub fn get_tool_definitions(
     db_type: Option<&str>,
     kb_dir: Option<&str>,
+    mini_python_auto_confirm: crate::startup::MiniPythonAutoConfirm,
     is_enabled: impl Fn(&str) -> bool,
 ) -> Vec<serde_json::Value> {
     let mut tools = vec![
@@ -353,6 +371,25 @@ pub fn get_tool_definitions(
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "mini_python_interpreter",
+                "description": crate::tools_pymini::tool_description(
+                    mini_python_auto_confirm != crate::startup::MiniPythonAutoConfirm::Ro
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": crate::tools_pymini::CODE_PARAM_DESCRIPTION
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
+        }),
     ];
 
     // Conditionally append data tools when db_type is configured
@@ -391,6 +428,7 @@ pub(crate) async fn execute_tool<F>(
     name: &str,
     args: &serde_json::Value,
     context: &ToolExecutionContext<'_, F>,
+    mini_python_write: Option<bool>,
 ) -> Result<serde_json::Value>
 where
     F: Fn(&str) -> bool,
@@ -493,6 +531,18 @@ where
             ))
         }
         "calc" => Ok(tools_calc::execute_calc(args, context.calc_ledger)),
+        "mini_python_interpreter" => {
+            // Mount mode comes from the per-call approval decision, never the
+            // request; a missing decision is an internal bug.
+            let Some(write) = mini_python_write else {
+                return Ok(serde_json::to_value(
+                    crate::tools_pymini::MiniPythonResponse::internal_error_response(),
+                )?);
+            };
+            Ok(serde_json::to_value(
+                crate::tools_pymini::execute(args, write).await,
+            )?)
+        }
         _ => Err(anyhow::anyhow!("[INVALID_TOOL] Unknown tool: {}", name)),
     }
 }
@@ -558,20 +608,21 @@ pub async fn confirm_execute_tool(
     unsafe_reflex: bool,
     db_unsafe_reflex: bool,
     kb_auto_confirm: crate::startup::KbAutoConfirm,
+    mini_python_auto_confirm: crate::startup::MiniPythonAutoConfirm,
     batch: bool,
     is_enabled: impl Fn(&str) -> bool,
 ) -> ToolRunDecision {
     // Disabled tools are rejected before any prompt or auto-confirm:
     // no user interaction, just a system error result fed back to the LLM.
     if !is_enabled(name) {
-        return ToolRunDecision {
-            proceed: false,
-            kind: ToolRunDecisionKind::SystemError,
-            reason: Some(format!(
+        return ToolRunDecision::new(
+            false,
+            ToolRunDecisionKind::SystemError,
+            Some(format!(
                 "[TOOL_DISABLED] Tool '{}' is disabled in this configuration.",
                 name
             )),
-        };
+        );
     }
 
     // data_search / data_schema are read-only queries, auto-confirmed under
@@ -594,39 +645,51 @@ pub async fn confirm_execute_tool(
             let reason = Some(
                 "KB-dedicated (single library.sqlite): approved by --kb-auto-confirm".to_string(),
             );
-            return ToolRunDecision {
-                proceed: true,
-                kind: ToolRunDecisionKind::AutoConfirm,
-                reason,
-            };
+            return ToolRunDecision::new(true, ToolRunDecisionKind::AutoConfirm, reason);
         }
         is_kb_tool
     };
-    #[cfg(feature = "kb")]
-    let effective_unsafe = (unsafe_reflex || (is_data_tool && db_unsafe_reflex)) && !is_kb_tool;
-    #[cfg(not(feature = "kb"))]
-    let effective_unsafe = unsafe_reflex || (is_data_tool && db_unsafe_reflex);
     #[cfg(not(feature = "kb"))]
     let _ = kb_auto_confirm;
+
+    // mini_python_interpreter runs arbitrary code, approved ONLY by its own
+    // gate (--mini-python-auto-confirm). The global --unsafe-reflex never
+    // applies; `ask` mode falls through to the interactive y/N prompt below
+    // (batch / todo modes deny there).
+    let is_mini_python = name == "mini_python_interpreter";
+    if is_mini_python && let Some(write) = mini_python_auto_confirm.auto_approve() {
+        let reason = Some(format!(
+            "mini_python_interpreter: approved by --mini-python-auto-confirm ({})",
+            if write { "rw" } else { "ro" }
+        ));
+        return ToolRunDecision {
+            proceed: true,
+            kind: ToolRunDecisionKind::AutoConfirm,
+            reason,
+            mini_python_write: Some(write),
+        };
+    }
+
+    #[cfg(feature = "kb")]
+    let effective_unsafe =
+        (unsafe_reflex || (is_data_tool && db_unsafe_reflex)) && !is_kb_tool && !is_mini_python;
+    #[cfg(not(feature = "kb"))]
+    let effective_unsafe = (unsafe_reflex || (is_data_tool && db_unsafe_reflex)) && !is_mini_python;
 
     if effective_unsafe
         && let (proceed, reason) = auto_confirm(name, args)
         && proceed
     {
-        return ToolRunDecision {
-            proceed: true,
-            kind: ToolRunDecisionKind::AutoConfirm,
-            reason,
-        };
+        return ToolRunDecision::new(true, ToolRunDecisionKind::AutoConfirm, reason);
     }
 
     // In batch mode, deny any tool that wasn't auto-confirmed (no stdin available).
     if batch {
-        return ToolRunDecision {
-            proceed: false,
-            kind: ToolRunDecisionKind::SystemError,
-            reason: Some("Skipped: please try simpler and safer operations.".to_string()),
-        };
+        return ToolRunDecision::new(
+            false,
+            ToolRunDecisionKind::SystemError,
+            Some("Skipped: please try simpler and safer operations.".to_string()),
+        );
     }
 
     // Tool approval is read from the child's stdin. In the GUI build this is
@@ -636,20 +699,20 @@ pub async fn confirm_execute_tool(
         C_CYAN, name, RESET
     );
     if io::stdout().flush().is_err() {
-        return ToolRunDecision {
-            proceed: false,
-            kind: ToolRunDecisionKind::SystemError,
-            reason: Some("Failed to flush stdout".to_string()),
-        };
+        return ToolRunDecision::new(
+            false,
+            ToolRunDecisionKind::SystemError,
+            Some("Failed to flush stdout".to_string()),
+        );
     }
 
     let mut input = String::new();
     if io::stdin().read_line(&mut input).is_err() {
-        return ToolRunDecision {
-            proceed: false,
-            kind: ToolRunDecisionKind::SystemError,
-            reason: Some("Failed to read stdin".to_string()),
-        };
+        return ToolRunDecision::new(
+            false,
+            ToolRunDecisionKind::SystemError,
+            Some("Failed to read stdin".to_string()),
+        );
     }
     #[cfg(feature = "gui")]
     let input = crate::gui::decode_child_input(input);
@@ -659,13 +722,11 @@ pub async fn confirm_execute_tool(
             proceed: true,
             kind: ToolRunDecisionKind::UserConfirm,
             reason: None,
+            // ask-mode approval of mini python runs read-write.
+            mini_python_write: is_mini_python.then_some(true),
         }
     } else {
-        ToolRunDecision {
-            proceed: false,
-            kind: ToolRunDecisionKind::UserCancel,
-            reason: None,
-        }
+        ToolRunDecision::new(false, ToolRunDecisionKind::UserCancel, None)
     }
 }
 

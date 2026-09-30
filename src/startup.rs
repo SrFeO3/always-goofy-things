@@ -35,6 +35,41 @@ impl std::fmt::Display for KbAutoConfirm {
     }
 }
 
+/// Auto-approval level for `mini_python_interpreter` (the global
+/// `--unsafe-reflex` never applies to it: it runs arbitrary code).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub(crate) enum MiniPythonAutoConfirm {
+    /// Always ask `y/N` (interactive); batch / todo modes deny instead.
+    #[default]
+    Ask,
+    /// Auto-approve with a read-only workspace mount (writes fail structurally).
+    Ro,
+    /// Auto-approve with a read-write workspace mount.
+    Rw,
+}
+
+impl std::fmt::Display for MiniPythonAutoConfirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MiniPythonAutoConfirm::Ask => "ask",
+            MiniPythonAutoConfirm::Ro => "ro",
+            MiniPythonAutoConfirm::Rw => "rw",
+        })
+    }
+}
+
+impl MiniPythonAutoConfirm {
+    /// The write permission this gate auto-approves, or `None` when it asks
+    /// (interactive y/N; batch / todo modes deny).
+    pub(crate) fn auto_approve(self) -> Option<bool> {
+        match self {
+            MiniPythonAutoConfirm::Rw => Some(true),
+            MiniPythonAutoConfirm::Ro => Some(false),
+            MiniPythonAutoConfirm::Ask => None,
+        }
+    }
+}
+
 /// The official name and description of this application
 pub const APP_NAME: &str = "Always-Goofy-Things";
 pub const APP_BIN_NAME: &str = "always-goofy-things";
@@ -263,6 +298,11 @@ pub struct Config {
     /// `rw` = all four (writes too). Independent of --unsafe-reflex.
     #[arg(long, env = "KB_AUTO_CONFIRM", value_enum, default_value_t = KbAutoConfirm::Ask)]
     pub kb_auto_confirm: KbAutoConfirm,
+
+    /// Auto-approve mini_python_interpreter: `ro` = read-only mount (writes denied),
+    /// `rw` = read-write, `ask` (default) = y/N; batch/todo deny. --unsafe-reflex never applies.
+    #[arg(long, env = "MINI_PYTHON_AUTO_CONFIRM", value_enum, default_value_t = MiniPythonAutoConfirm::Ask)]
+    pub mini_python_auto_confirm: MiniPythonAutoConfirm,
 
     /// Maximum response size in bytes of a data_kb_search result before
     /// truncation (default: 65536 = 64KB).
@@ -579,6 +619,10 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
     println!("  max-tool-output-bytes: {}", config.max_tool_output_bytes);
     println!("  tool-timeout-secs   : {}", config.tool_timeout_secs);
+    println!(
+        "  mini-python-auto-confirm: {}",
+        config.mini_python_auto_confirm
+    );
     println!("  session-label      : {}", config.session_label);
 
     // --- Tool enablement ---

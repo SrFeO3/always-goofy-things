@@ -41,7 +41,9 @@ pub fn set_tool_limits(limits: ToolLimits) {
     let _ = TOOL_LIMITS.set(limits);
 }
 
-fn tool_limits() -> ToolLimits {
+/// Tool limits registered at startup; shared by the mini python interpreter's
+/// output cap (spec: reuse `--max-tool-output-bytes`).
+pub(crate) fn tool_limits() -> ToolLimits {
     TOOL_LIMITS.get().copied().unwrap_or_default()
 }
 

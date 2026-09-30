@@ -1,6 +1,6 @@
 [package]
 name = "always-goofy-things"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["full"] }
 unicode-normalization = { version = "0.1", optional = true }  # optional: kb feature (entities.name_norm NFKC)
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+monty = "1.0.0"
+monty-types = "1.0.0"
+monty-fs = "1.0.0"
 eframe = { version = "0.35", optional = true }
 system-fonts = { version = "0.1.2", optional = true }
 

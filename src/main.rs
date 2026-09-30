@@ -57,6 +57,7 @@ mod tools_calc;
 mod tools_data;
 mod tools_fuzzy;
 mod tools_process;
+mod tools_pymini;
 
 use attach::AttachedFile;
 use compat_provider::LlmProvider;

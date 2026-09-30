@@ -31,6 +31,10 @@
 //! - `fetch_web`: Fetch and extract text content from a specified URL.
 //!     - Success: Extracted size, first 10 chars, and last 10 chars (excluding newlines) (1 line)
 //!     - Error: Error reason (multi-line)
+//! - `mini_python_interpreter`: Run a sandboxed Python program in the workspace.
+//!     - Preview: First lines of the code plus the total line count (multi-line)
+//!     - Success: status and stdout/stderr byte summary (1 line)
+//!     - Error: error code and message (1 line)
 
 use serde_json::{Value, json};
 
@@ -612,6 +616,60 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
         "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
             pretty_kb::pretty_print_kb_result(result)
         }
+        "mini_python_interpreter" => match obj.get("status").and_then(|v| v.as_str()) {
+            Some("completed") => {
+                let co = obj.get("code_output").and_then(|v| v.as_object());
+                let stdout = co
+                    .and_then(|c| c.get("stdout"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let stderr = co
+                    .and_then(|c| c.get("stderr"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let trunc = co
+                    .and_then(|c| c.get("truncated"))
+                    .and_then(|v| v.as_object());
+                let was_truncated = trunc.is_some_and(|t| {
+                    t.get("stdout").and_then(|v| v.as_bool()).unwrap_or(false)
+                        || t.get("stderr").and_then(|v| v.as_bool()).unwrap_or(false)
+                });
+                let mut parts = Vec::new();
+                if !stdout.is_empty() {
+                    parts.push(format!("stdout {}B", stdout.len()));
+                }
+                if !stderr.is_empty() {
+                    parts.push(format!("stderr {}B", stderr.len()));
+                }
+                println!(
+                    "[{}completed{}: {}{}]",
+                    C_GREEN,
+                    RESET,
+                    if parts.is_empty() {
+                        "no output".to_string()
+                    } else {
+                        parts.join(", ")
+                    },
+                    if was_truncated { ", truncated" } else { "" }
+                );
+            }
+            Some("error") => {
+                let code = obj
+                    .get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let msg = obj
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                println!("{}[{}] {}{}", C_RED, code, msg, RESET);
+            }
+            _ => {
+                println!("\x1b[90mResult:\x1b[0m {}", result);
+            }
+        },
         _ => {
             println!("\x1b[90mResult:\x1b[0m {}", result);
         }
@@ -809,6 +867,25 @@ pub fn pretty_print_command(name: &str, args: &Value) {
                 line.push_str(&format!(" (+{} more)", more));
             }
             println!("{}{}{}", C_YELLOW, line, RESET);
+        }
+        "mini_python_interpreter" => {
+            let code = match args.get("code").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return,
+            };
+            let total = code.lines().count();
+            println!(
+                "-- Python ({} line{}):",
+                total,
+                if total != 1 { "s" } else { "" }
+            );
+            for line in code.lines().take(3) {
+                println!("    {}{}{}", C_GRAY, line, RESET);
+            }
+            let shown = code.lines().take(3).count();
+            if total > shown {
+                println!("    ... (+{} more)", total - shown);
+            }
         }
         _ => {}
     }

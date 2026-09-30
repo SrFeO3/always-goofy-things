@@ -618,14 +618,24 @@ fn ledger_records_success_and_error() {
 
 #[tokio::test]
 async fn tool_definition_and_dispatch() {
-    let defs = crate::tools::get_tool_definitions(None, None, |_| true);
+    let defs = crate::tools::get_tool_definitions(
+        None,
+        None,
+        crate::startup::MiniPythonAutoConfirm::Ask,
+        |_| true,
+    );
     let names: Vec<&str> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str())
         .collect();
     assert!(names.contains(&"calc"), "calc must be in default tool list");
 
-    let defs = crate::tools::get_tool_definitions(None, None, |n| n != "calc");
+    let defs = crate::tools::get_tool_definitions(
+        None,
+        None,
+        crate::startup::MiniPythonAutoConfirm::Ask,
+        |n| n != "calc",
+    );
     let names: Vec<&str> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str())
@@ -637,16 +647,21 @@ async fn tool_definition_and_dispatch() {
 
     // Dispatch through execute_tool, no ledger attached.
     let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
-    let res =
-        crate::tools::execute_tool("calc", &json!({ "expressions": ["1425 * 32"] }), &context)
-            .await
-            .unwrap();
+    let res = crate::tools::execute_tool(
+        "calc",
+        &json!({ "expressions": ["1425 * 32"] }),
+        &context,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(res[0]["result"].as_i64(), Some(45600));
 
     // Disabled tools are refused even if called (defense in depth).
     let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| false);
     let res =
-        crate::tools::execute_tool("calc", &json!({ "expressions": ["1 + 1"] }), &context).await;
+        crate::tools::execute_tool("calc", &json!({ "expressions": ["1 + 1"] }), &context, None)
+            .await;
     let err = res.unwrap_err().to_string();
     assert!(err.contains("[TOOL_DISABLED]"), "{}", err);
 }

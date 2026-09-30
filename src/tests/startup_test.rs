@@ -34,6 +34,7 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         kb_dir: None,
         kb_auto_confirm: KbAutoConfirm::Ask,
         kb_max_bytes: 65536,
+        mini_python_auto_confirm: MiniPythonAutoConfirm::Ask,
         only_tools,
         command: None,
     }

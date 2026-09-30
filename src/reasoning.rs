@@ -490,6 +490,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     config.unsafe_reflex,
                     config.db_unsafe_reflex,
                     config.kb_auto_confirm,
+                    config.mini_python_auto_confirm,
                     is_batch,
                     |name| config.is_tool_enabled(name),
                 )
@@ -553,7 +554,14 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     }
 
                     // execute tool and get tool_result json for following steps
-                    match tools::execute_tool(&call.function.name, &args, &tool_context).await {
+                    match tools::execute_tool(
+                        &call.function.name,
+                        &args,
+                        &tool_context,
+                        tool_call_decision.mini_python_write,
+                    )
+                    .await
+                    {
                         Ok(res) => {
                             println!("{}*{} Tool executed successfully.", C_GREEN, RESET);
                             tool_result = res;
@@ -643,10 +651,12 @@ pub(crate) async fn call_llm(
     messages: &[Message],
 ) -> Result<(Message, Option<Usage>, LlmRequestInfo)> {
     let client = reqwest::Client::new();
-    let tools =
-        tools::get_tool_definitions(config.db_type.as_deref(), config.kb_dir.as_deref(), |n| {
-            config.is_tool_enabled(n)
-        });
+    let tools = tools::get_tool_definitions(
+        config.db_type.as_deref(),
+        config.kb_dir.as_deref(),
+        config.mini_python_auto_confirm,
+        |n| config.is_tool_enabled(n),
+    );
     let messages_vec = messages.to_vec();
 
     let mut req = ChatRequest {
@@ -1067,6 +1077,7 @@ pub(crate) async fn call_llm(
             &tools::get_tool_definitions(
                 config.db_type.as_deref(),
                 config.kb_dir.as_deref(),
+                config.mini_python_auto_confirm,
                 |n| config.is_tool_enabled(n),
             ),
         );

@@ -29,7 +29,12 @@ async fn test_tool_smoke_read_file_and_grep() {
     std::fs::write(&probe, "unique_probe_token_42\n").unwrap();
 
     // get_tool_definitions exposes the standard toolset.
-    let defs = crate::tools::get_tool_definitions(None, None, |_| true);
+    let defs = crate::tools::get_tool_definitions(
+        None,
+        None,
+        crate::startup::MiniPythonAutoConfirm::Ask,
+        |_| true,
+    );
     assert!(!defs.is_empty());
     let names = defs
         .iter()
@@ -40,10 +45,14 @@ async fn test_tool_smoke_read_file_and_grep() {
 
     // read_file reads a text file.
     let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
-    let res =
-        crate::tools::execute_tool("read_file", &serde_json::json!({ "path": probe }), &context)
-            .await
-            .unwrap();
+    let res = crate::tools::execute_tool(
+        "read_file",
+        &serde_json::json!({ "path": probe }),
+        &context,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(res.to_string().contains("unique_probe_token_42"));
 
     // grep_search finds the token in the temp dir.
@@ -51,6 +60,7 @@ async fn test_tool_smoke_read_file_and_grep() {
         "grep_search",
         &serde_json::json!({ "query": "unique_probe_token_42", "path": dirname }),
         &context,
+        None,
     )
     .await
     .unwrap();
@@ -65,6 +75,7 @@ async fn test_tool_smoke_disabled_tool_refused() {
         "read_file",
         &serde_json::json!({ "path": "._smtool_disabled_probe.txt" }),
         &context,
+        None,
     )
     .await;
     assert!(res.is_err());
