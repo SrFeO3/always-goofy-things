@@ -2,7 +2,7 @@
 //!
 //! Defines the DDL from `work/spec/knowledge-schema.md` (tables, FTS, views,
 //! indexes, triggers, PRAGMA setup, and the metadata map behind
-//! `data_kb_schema`) and applies it as migrations. Called from `kb.rs`.
+//! `kb_schema`) and applies it as migrations. Called from `kb.rs`.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -24,14 +24,24 @@ pub(crate) const KNOWLEDGE_TABLES: &[&str] = &[
     "annotation_versions",
 ];
 
-/// Provided views exposed to the LLM (`data_kb_schema` lists them and
-/// `data_kb_search` may query them).
-pub(crate) const KNOWLEDGE_VIEWS: &[&str] = &["v_documents_current", "v_claims_with_evidence"];
+/// Provided views exposed to the LLM (`kb_schema` lists them and
+/// `kb_search` may query them).
+pub(crate) const KNOWLEDGE_VIEWS: &[&str] = &[
+    "v_documents_current",
+    "v_claims_with_evidence",
+    "v_document_units_current",
+    "v_entities_current",
+    "v_claims_current",
+    "v_relations_current",
+    "v_conditions_current",
+    "v_events_current",
+    "v_evidence_current",
+];
 
 /// FTS virtual table name (external content over `document_units`).
 pub(crate) const FTS_TABLE: &str = "units_fts";
 
-/// Allowed values for `data_kb_update.target_type` /
+/// Allowed values for `kb_update.target_type` /
 /// `annotation_versions.target_type`.
 pub(crate) const UPDATE_TARGET_TYPES: &[&str] = &[
     "documents",
@@ -104,6 +114,34 @@ pub(crate) fn table_meta() -> &'static [(&'static str, &'static str)] {
         (
             "v_claims_with_evidence",
             "View: claims + evidence + source-unit excerpt in one query (prevents JOIN mistakes)",
+        ),
+        (
+            "v_document_units_current",
+            "View: current-version document_units only (obsolete = 0)",
+        ),
+        (
+            "v_entities_current",
+            "View: current-version entities only (obsolete = 0)",
+        ),
+        (
+            "v_claims_current",
+            "View: current-version claims only (obsolete = 0)",
+        ),
+        (
+            "v_relations_current",
+            "View: current-version relations; cross-document (document_id IS NULL) always included (obsolete = 0)",
+        ),
+        (
+            "v_conditions_current",
+            "View: current-version conditions; cross-document (document_id IS NULL) always included (obsolete = 0)",
+        ),
+        (
+            "v_events_current",
+            "View: current-version events only (obsolete = 0)",
+        ),
+        (
+            "v_evidence_current",
+            "View: current-version evidence only (obsolete = 0)",
         ),
         (
             "units_fts",
@@ -384,6 +422,46 @@ LEFT JOIN document_units u ON u.id = e.source_unit_id AND u.obsolete = 0
 WHERE c.obsolete = 0;
 "#;
 
+/// Schema v2: current-version views. Each exposes only non-obsolete rows whose
+/// `document_id` belongs to a current document (`superseded_by IS NULL`);
+/// cross-document rows (`document_id IS NULL`) are always included.
+const DDL_V2: &str = r#"
+CREATE VIEW IF NOT EXISTS v_document_units_current AS
+SELECT * FROM document_units
+WHERE obsolete = 0
+  AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+
+CREATE VIEW IF NOT EXISTS v_entities_current AS
+SELECT * FROM entities
+WHERE obsolete = 0
+  AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+
+CREATE VIEW IF NOT EXISTS v_claims_current AS
+SELECT * FROM claims
+WHERE obsolete = 0
+  AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+
+CREATE VIEW IF NOT EXISTS v_relations_current AS
+SELECT * FROM relations
+WHERE obsolete = 0
+  AND (document_id IS NULL OR document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL));
+
+CREATE VIEW IF NOT EXISTS v_conditions_current AS
+SELECT * FROM conditions
+WHERE obsolete = 0
+  AND (document_id IS NULL OR document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL));
+
+CREATE VIEW IF NOT EXISTS v_events_current AS
+SELECT * FROM events
+WHERE obsolete = 0
+  AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+
+CREATE VIEW IF NOT EXISTS v_evidence_current AS
+SELECT * FROM evidence
+WHERE obsolete = 0
+  AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+"#;
+
 /// Run pending schema migrations (idempotent; starts at user_version = 0).
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
@@ -397,6 +475,12 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
         // AFTER INSERT trigger automatically.
         conn.execute_batch("PRAGMA user_version = 1;")
             .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 1")?;
+    }
+    if version < 2 {
+        conn.execute_batch(DDL_V2)
+            .context("[KB_CONFIG_ERROR] Failed to apply KB schema v2")?;
+        conn.execute_batch("PRAGMA user_version = 2;")
+            .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 2")?;
     }
     Ok(())
 }

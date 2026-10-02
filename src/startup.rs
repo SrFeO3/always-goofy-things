@@ -19,9 +19,9 @@ pub(crate) enum KbAutoConfirm {
     /// Always ask `y/N` (interactive); batch / todo modes deny instead.
     #[default]
     Ask,
-    /// Auto-approve only the read-only tools (data_kb_search / data_kb_schema).
+    /// Auto-approve only the read-only tools (kb_search / kb_schema / kb_read).
     Ro,
-    /// Auto-approve all four KB tools (reads and writes).
+    /// Auto-approve all five KB tools (reads and writes).
     Rw,
 }
 
@@ -295,7 +295,7 @@ pub struct Config {
     pub kb_dir: Option<String>,
 
     /// Auto-approve the KB tools without confirmation: `ro` = reads only,
-    /// `rw` = all four (writes too). Independent of --unsafe-reflex.
+    /// `rw` = all five (writes too). Independent of --unsafe-reflex.
     #[arg(long, env = "KB_AUTO_CONFIRM", value_enum, default_value_t = KbAutoConfirm::Ask)]
     pub kb_auto_confirm: KbAutoConfirm,
 
@@ -304,7 +304,7 @@ pub struct Config {
     #[arg(long, env = "MINI_PYTHON_AUTO_CONFIRM", value_enum, default_value_t = MiniPythonAutoConfirm::Ask)]
     pub mini_python_auto_confirm: MiniPythonAutoConfirm,
 
-    /// Maximum response size in bytes of a data_kb_search result before
+    /// Maximum response size in bytes of a kb_search result before
     /// truncation (default: 65536 = 64KB).
     #[arg(long, env = "KB_MAX_BYTES", default_value_t = 65536)]
     pub kb_max_bytes: usize,
@@ -342,7 +342,7 @@ pub fn system_message(config: &Config) -> crate::model::Message {
 /// intentional when tools are disabled.
 /// - ## 1 / ## 3: always present
 /// - ## 2: umbrella for tool sections, present only when at least one tool
-///   is enabled; ## 2-1 / ## 2-2 / ## 2-3 are the fixed tool categories
+///   is enabled; ## 2-1 ... ## 2-5 are the fixed tool categories
 /// - ## 4: Todo Context (appended by the todo-mode builders)
 fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
     let mut sections = vec![
@@ -421,10 +421,10 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         );
     }
     #[cfg(feature = "kb")]
-    if is_enabled("data_kb_search") || is_enabled("data_kb_schema") {
-        retrieval_names.push("data_kb_search, data_kb_schema");
+    if is_enabled("kb_search") || is_enabled("kb_schema") || is_enabled("kb_read") {
+        retrieval_names.push("kb_search, kb_schema, kb_read");
         retrieval_lines.push(
-            "- data_kb_search / data_kb_schema: Read-only queries against the local Knowledge Base sqlite file. Write tools data_kb_insert / data_kb_update are also available.",
+            "- kb_read: Read a document's units (paragraphs/pages) in order. kb_search / kb_schema: read-only SQL against the local Knowledge Base sqlite file. Write tools kb_insert / kb_update are also available.",
         );
     }
     if !retrieval_names.is_empty() {
@@ -439,6 +439,21 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         tool_sections.push(
             "## 2-4. Deterministic Calculation (calc)\n\
              - calc: Deterministic, side-effect-free evaluator for arithmetic, percentages, rates, byte/unit conversion, epoch (ns/s/ms) to UTC datetime conversion, decoding (base64/hex/url/json), and string normalization; accepts all needed expressions as one batch in a single call. Use it for ALL computations and conversions; never compute or convert values by mental arithmetic or guesswork."
+                .to_string(),
+        );
+    }
+
+    #[cfg(feature = "kb")]
+    if is_enabled("kb_search") || is_enabled("kb_schema") {
+        tool_sections.push(
+            "## 2-5. Knowledge Base (kb_*)\n\
+             - Answer from the KB: base every statement about a document's content on kb_search / kb_schema results, never on memory; cite the source unit(s) (matched_text / position) that back each answer. Use the v_*_current views so superseded (old) document versions do not leak into answers.\n\
+             - Analysis procedure (when asked to analyze a document or extract its knowledge):\n\
+               (1) Call kb_schema first, then find the CURRENT version's id (query v_documents_current, or documents WHERE superseded_by IS NULL) and read its units with kb_read (page through them with limit/offset).\n\
+               (2) Register entities, claims, relations, conditions, and events with kb_insert, together with their evidence.\n\
+               (3) Evidence is mandatory: every claim / relation / event must have an evidence row whose matched_text is a verbatim excerpt from the source unit and whose source_unit_id points at that unit. Never paraphrase or invent matched_text; do not insert a statement with no source unit to back it.\n\
+               (4) Check coverage for gaps: re-read any unit that produced no claims, and kb_search for claims with no evidence; then correct mistakes by inserting a replacement row and marking the old row obsolete via kb_update (never delete).\n\
+               (5) When the document is fully analyzed, set analysis_status to \"analyzed\" via kb_update (target_type=documents, annotations.analysis_status=\"analyzed\")."
                 .to_string(),
         );
     }
@@ -652,14 +667,15 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         if config.only_tools.iter().any(|t| {
             matches!(
                 t,
-                ToolName::DataKbSearch
-                    | ToolName::DataKbSchema
-                    | ToolName::DataKbInsert
-                    | ToolName::DataKbUpdate
+                ToolName::KbSearch
+                    | ToolName::KbSchema
+                    | ToolName::KbRead
+                    | ToolName::KbInsert
+                    | ToolName::KbUpdate
             )
         }) {
             println!(
-                "{C_YELLOW}[Warning] data_kb_* tools require a binary built with --features kb.{RESET}"
+                "{C_YELLOW}[Warning] kb_* tools require a binary built with --features kb.{RESET}"
             );
         }
     }

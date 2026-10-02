@@ -33,4 +33,4 @@ data_search / data_schema, --only-tools, child-process isolation (bash / grep), 
 Adding OpenAI Responses API compatibility and OpenCode Go via --provider-extras; stable session ID; README / docs refresh.
 
 ## v0.7.0 (2026-09 early) - Local KB
-Local KB (--features kb): builds a searchable knowledge base from your documents; AI extracts structured knowledge (entities / claims / relations, with evidence to source) into SQLite and answers via data_kb_* tools. Details: docs/kb.md
+Local KB (--features kb): builds a searchable knowledge base from your documents; AI extracts structured knowledge (entities / claims / relations, with evidence to source) into SQLite and answers via kb_* tools. Details: docs/kb.md

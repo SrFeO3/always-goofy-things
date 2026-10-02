@@ -151,10 +151,16 @@ fn system_message_full_when_all_enabled() {
     );
     assert!(msg.content.contains("## 2-3. Information Retrieval (list_directory, grep_search, fetch_web, data_search, data_schema"));
     #[cfg(feature = "kb")]
-    assert!(
-        msg.content.contains("data_kb_search, data_kb_schema"),
-        "KB read tools must appear in the retrieval section when the kb feature is on"
-    );
+    {
+        assert!(
+            msg.content.contains("kb_search, kb_schema"),
+            "KB read tools must appear in the retrieval section when the kb feature is on"
+        );
+        assert!(
+            msg.content.contains("## 2-5. Knowledge Base (kb_*)"),
+            "KB analysis playbook must appear when the kb feature is on"
+        );
+    }
     assert!(
         msg.content
             .contains("## 2-4. Deterministic Calculation (calc)")
@@ -190,6 +196,7 @@ fn system_message_omits_disabled_tools() {
     assert!(!msg.content.contains("fetch_web"));
     assert!(!msg.content.contains("data_search"));
     assert!(!msg.content.contains("data_schema"));
+    assert!(!msg.content.contains("## 2-5."));
     assert!(
         !msg.content.contains("calc"),
         "calc must be omitted when disabled"

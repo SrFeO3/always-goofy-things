@@ -1,4 +1,4 @@
-//! Tests for `src/kb.rs`: the four `data_kb_*` tools and the `/kb` command.
+//! Tests for `src/kb.rs`: the five `kb_*` tools and the `/kb` command.
 //!
 //! Uses an in-memory SQLite connection (`:memory:`) for tool behavior and a
 //! temp directory for `/kb` file operations.
@@ -19,6 +19,25 @@ fn mem_ctx() -> KbContext {
             .join(format!("kb-mem-test-{}", run_id))
             .to_string_lossy()
             .to_string(),
+        max_bytes: KB_DEFAULT_MAX_BYTES,
+        conn: Arc::new(Mutex::new(conn)),
+        run_id,
+    }
+}
+
+/// File-based KB context in a temp dir (for /kb restore, which reopens the DB).
+fn file_ctx() -> KbContext {
+    let dir = std::env::temp_dir().join(format!("kb-file-test-{}", Uuid::new_v4()));
+    let db_dir = dir.join("db");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let db_path = db_dir.join("library.sqlite");
+    let conn = Connection::open(&db_path).unwrap();
+    kb_schema::apply_pragmas(&conn).unwrap();
+    kb_schema::migrate(&conn).unwrap();
+    let run_id = Uuid::new_v4();
+    create_run(&conn, &run_id);
+    KbContext {
+        kb_dir: dir.to_string_lossy().to_string(),
         max_bytes: KB_DEFAULT_MAX_BYTES,
         conn: Arc::new(Mutex::new(conn)),
         run_id,
@@ -94,7 +113,7 @@ fn migrate_creates_kb_schema() {
     assert_eq!(fts_rows, 1, "AFTER INSERT trigger must index the unit text");
 }
 
-/// 2. data_kb_insert: local ref resolution entity -> claim.subject_ref -> evidence.target_ref.
+/// 2. kb_insert: local ref resolution entity -> claim.subject_ref -> evidence.target_ref.
 #[test]
 fn insert_resolves_local_refs() {
     let ctx = mem_ctx();
@@ -180,7 +199,364 @@ fn insert_resolves_local_refs() {
     assert!(err.contains("[KB_CONFLICT]"), "{}", err);
 }
 
-/// 3. data_kb_update: annotations versioned; current value = latest version.
+/// Re-analysis must not create duplicate entity rows: inserting the same
+/// (document, name_norm, entity_type) reuses the existing entity id.
+#[test]
+fn insert_reuses_existing_entity() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [{ "ref": "e1", "name": "甲社", "entity_type": "organization" }]
+        }),
+    )
+    .unwrap();
+    let first_id = res["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        res["inserted"]["entities"][0]["reused"].as_bool(),
+        Some(false)
+    );
+
+    // Same name + type -> reuse (no new row, reused=true).
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [{ "ref": "e1", "name": "甲社", "entity_type": "organization" }]
+        }),
+    )
+    .unwrap();
+    let second_id = res["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(second_id, first_id);
+    assert_eq!(
+        res["inserted"]["entities"][0]["reused"].as_bool(),
+        Some(true)
+    );
+
+    // Different type -> NOT deduped (a distinct entity row).
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [{ "ref": "e2", "name": "甲社", "entity_type": "product" }]
+        }),
+    )
+    .unwrap();
+    let third_id = res["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(third_id, first_id);
+
+    let count: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE obsolete = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+/// Re-analysis must not create duplicate claim rows: inserting the same
+/// (document, fingerprint) reuses the existing claim id.
+#[test]
+fn insert_reuses_existing_claim() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let insert = || {
+        execute_kb_insert(
+            &ctx,
+            &json!({
+                "document_id": doc,
+                "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }],
+                "evidence": [{ "target_type": "claim", "target_ref": "c1", "matched_text": "A is B" }]
+            }),
+        )
+        .unwrap()
+    };
+
+    let res = insert();
+    let first_id = res["inserted"]["claims"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        res["inserted"]["claims"][0]["reused"].as_bool(),
+        Some(false)
+    );
+
+    let res = insert();
+    let second_id = res["inserted"]["claims"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(second_id, first_id);
+    assert_eq!(res["inserted"]["claims"][0]["reused"].as_bool(), Some(true));
+
+    let count: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM claims WHERE obsolete = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// A claim / relation / event that declares a local ref must be backed by an
+/// evidence item in the same call.
+#[test]
+fn insert_requires_evidence_for_refd_items() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let err = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }]
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("[KB_EVIDENCE_REQUIRED]"), "{}", err);
+
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }],
+            "evidence": [{ "target_type": "claim", "target_ref": "c1", "matched_text": "A is B" }]
+        }),
+    )
+    .unwrap();
+    assert_eq!(res["total"].as_u64(), Some(2));
+}
+
+/// kb_insert can create canonical entities and link document entities to them
+/// (cross-document identity resolution), with dedup on name/type and link.
+#[test]
+fn insert_canonical_entities_and_entity_links() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [{ "ref": "e1", "name": "HTTP", "entity_type": "protocol" }],
+            "canonical_entities": [{ "ref": "ce1", "name": "HTTP", "entity_type": "protocol", "aliases": ["HyperText Transfer Protocol"] }],
+            "entity_links": [{ "entity_ref": "e1", "canonical_ref": "ce1", "confidence": 0.9 }]
+        }),
+    )
+    .unwrap();
+
+    let e1 = res["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ce1 = res["inserted"]["canonical_entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let link = res["inserted"]["entity_links"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    {
+        let conn = ctx.conn.lock().unwrap();
+        let (entity_id, canonical_id): (String, String) = conn
+            .query_row(
+                "SELECT entity_id, canonical_id FROM entity_links WHERE id = ?1",
+                [&link],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(entity_id, e1);
+        assert_eq!(canonical_id, ce1);
+    }
+
+    // Re-inserting the same canonical entity reuses it.
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "canonical_entities": [{ "ref": "ce2", "name": "HTTP", "entity_type": "protocol" }]
+        }),
+    )
+    .unwrap();
+    let ce2 = res["inserted"]["canonical_entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(ce2, ce1);
+    assert_eq!(
+        res["inserted"]["canonical_entities"][0]["reused"].as_bool(),
+        Some(true)
+    );
+
+    // Re-linking the same entity->canonical reuses the link.
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entity_links": [{ "entity_id": e1, "canonical_id": ce1 }]
+        }),
+    )
+    .unwrap();
+    let link2 = res["inserted"]["entity_links"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(link2, link);
+
+    let count: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM entity_links", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// /kb restore replaces the live DB with a snapshot and reopens the connection.
+#[test]
+fn restore_replaces_live_db_with_snapshot() {
+    let ctx = file_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    execute_kb_insert(
+        &ctx,
+        &json!({ "document_id": doc, "entities": [{ "name": "甲社" }] }),
+    )
+    .unwrap();
+
+    // Snapshot the DB.
+    let snapshot = std::env::temp_dir().join(format!("kb-snapshot-{}.sqlite", Uuid::new_v4()));
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute_batch(&format!(
+            "VACUUM INTO '{}'",
+            snapshot.to_string_lossy().replace('\'', "''")
+        ))
+        .unwrap();
+    }
+
+    // Diverge from the snapshot.
+    execute_kb_insert(
+        &ctx,
+        &json!({ "document_id": doc, "entities": [{ "name": "乙社" }] }),
+    )
+    .unwrap();
+
+    let msg = kb_restore(&ctx, snapshot.to_str().unwrap()).unwrap();
+    assert!(msg.contains("Restored"), "{}", msg);
+
+    let count: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "restore must revert to the snapshot state");
+}
+
+/// Current-version views exclude rows belonging to superseded document
+/// versions (and obsolete rows); cross-document relations always stay.
+#[test]
+fn current_views_exclude_superseded_documents() {
+    let ctx = mem_ctx();
+    let old = add_doc(&ctx, "old", "data/old.md");
+    let cur = add_doc(&ctx, "cur", "data/cur.md");
+
+    {
+        let conn = ctx.conn.lock().unwrap();
+        // Superseded document: one entity + one claim.
+        conn.execute(
+            "INSERT INTO entities (id, document_id, name, name_norm) \
+             VALUES (?1, ?2, 'old-entity', 'old-entity')",
+            params![Uuid::new_v4().to_string(), old],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claims (id, document_id, subject_value, predicate, object_value) \
+             VALUES (?1, ?2, 's', 'old-pred', 'o')",
+            params![Uuid::new_v4().to_string(), old],
+        )
+        .unwrap();
+        // Current document: one entity + one claim.
+        conn.execute(
+            "INSERT INTO entities (id, document_id, name, name_norm) \
+             VALUES (?1, ?2, 'cur-entity', 'cur-entity')",
+            params![Uuid::new_v4().to_string(), cur],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claims (id, document_id, subject_value, predicate, object_value) \
+             VALUES (?1, ?2, 's', 'cur-pred', 'o')",
+            params![Uuid::new_v4().to_string(), cur],
+        )
+        .unwrap();
+        // A cross-document relation (document_id NULL) must always be included.
+        conn.execute(
+            "INSERT INTO relations (id, document_id, source_type, source_id, relation_type, target_type, target_id) \
+             VALUES (?1, NULL, 'claim', 'src', 'depends_on', 'claim', 'dst')",
+            params![Uuid::new_v4().to_string()],
+        )
+        .unwrap();
+        // A relation tied to the superseded document must be excluded.
+        conn.execute(
+            "INSERT INTO relations (id, document_id, source_type, source_id, relation_type, target_type, target_id) \
+             VALUES (?1, ?2, 'claim', 'src', 'depends_on', 'claim', 'dst')",
+            params![Uuid::new_v4().to_string(), old],
+        )
+        .unwrap();
+        // Supersede the old document.
+        conn.execute(
+            "UPDATE documents SET superseded_by = ?1 WHERE id = ?2",
+            params![cur, old],
+        )
+        .unwrap();
+    }
+
+    let conn = ctx.conn.lock().unwrap();
+    let entities: i64 = conn
+        .query_row("SELECT COUNT(*) FROM v_entities_current", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        entities, 1,
+        "superseded document's entities must be excluded"
+    );
+    let claims: i64 = conn
+        .query_row("SELECT COUNT(*) FROM v_claims_current", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(claims, 1, "superseded document's claims must be excluded");
+    let relations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM v_relations_current", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        relations, 1,
+        "cross-document relation must stay; superseded-tied relation must go"
+    );
+}
+
+/// 3. kb_update: annotations versioned; current value = latest version.
 #[test]
 fn update_appends_annotation_versions() {
     let ctx = mem_ctx();
@@ -234,7 +610,7 @@ fn update_appends_annotation_versions() {
     assert_eq!(cur["assessment"], "good");
 }
 
-/// data_kb_update: `analysis_status` transitions are whitelisted, and a
+/// kb_update: `analysis_status` transitions are whitelisted, and a
 /// transition to `analyzed` stamps `analyzed_at` (schema column). Invalid
 /// values are rejected without persisting anything (tx rollback).
 #[test]
@@ -336,8 +712,121 @@ fn search_sanitizes_readonly() {
     assert!(err.contains("[KB_SYNTAX_ERROR]"), "{}", err);
 }
 
+/// Data-modifying statements prefixed with WITH (e.g. `WITH ... DELETE ...
+/// RETURNING`) start with the keyword `WITH`, so the keyword sanitizer alone
+/// lets them through. `readonly()` must reject them at prepare time.
+#[test]
+fn search_rejects_data_modifying_cte() {
+    let ctx = mem_ctx();
+
+    // Read-only CTE still works.
+    let ok = execute_kb_search(&ctx, "WITH c AS (SELECT 1 AS one) SELECT one FROM c").unwrap();
+    let csv = ok["content"].as_str().unwrap();
+    let mut lines = csv.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "one",
+        "CSV header must name the column"
+    );
+    assert_eq!(
+        lines.next().unwrap(),
+        "1",
+        "CSV data row must hold the value"
+    );
+
+    // EXPLAIN remains allowed (it never executes).
+    let ok = execute_kb_search(&ctx, "EXPLAIN SELECT 1").unwrap();
+    assert!(!ok["content"].as_str().unwrap().is_empty());
+
+    // Data-modifying CTEs must be rejected as write operations.
+    for bad in [
+        "WITH c AS (SELECT 1 AS one) DELETE FROM entities WHERE 1 = (SELECT one FROM c) RETURNING *",
+        "WITH c AS (SELECT 1 AS one) UPDATE documents SET title = 'x' WHERE 1 = (SELECT one FROM c) RETURNING *",
+        "WITH c AS (SELECT 1 AS one) INSERT INTO documents (id, title, source, version) SELECT 'a','b','c','1' FROM c RETURNING *",
+    ] {
+        let err = execute_kb_search(&ctx, bad).unwrap_err().to_string();
+        assert!(err.contains("[KB_READONLY_VIOLATION]"), "{}: {}", bad, err);
+    }
+}
+
+/// Truncation keeps whole CSV rows (line boundary) rather than cutting a
+/// field mid-row, and appends the [KB_TRUNCATED] notice.
+#[test]
+fn truncate_body_keeps_whole_rows() {
+    let body = "h1,h2\nrow1a,row1b\nrow2a,row2b\n";
+    let out = truncate_body(body, 20);
+    assert!(
+        out.starts_with("h1,h2\nrow1a,row1b\n[KB_TRUNCATED]"),
+        "{}",
+        out
+    );
+    assert!(!out.contains("row2a"), "{}", out);
+
+    // No newline before the cap -> UTF-8 boundary fallback.
+    let out = truncate_body("abcdef", 3);
+    assert!(out.starts_with("abc\n[KB_TRUNCATED]"), "{}", out);
+}
+
+/// kb_read returns a document's units in position order, with
+/// unit_type / position-range filters and limit/offset paging.
+#[test]
+fn read_returns_units_in_position_order() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/t.md");
+
+    {
+        let conn = ctx.conn.lock().unwrap();
+        for (i, text) in ["first", "second", "third"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO document_units (id, document_id, unit_type, text, position) \
+                 VALUES (?1, ?2, 'paragraph', ?3, ?4)",
+                params![Uuid::new_v4().to_string(), doc, text, i as i64],
+            )
+            .unwrap();
+        }
+    }
+
+    // All units, in position order.
+    let out = execute_kb_read(&ctx, &json!({ "document_id": doc })).unwrap();
+    let units = out["units"].as_array().unwrap();
+    assert_eq!(units.len(), 3);
+    assert_eq!(units[0]["text"], "first");
+    assert_eq!(units[1]["text"], "second");
+    assert_eq!(units[2]["text"], "third");
+    assert_eq!(units[0]["position"], 0);
+    assert_eq!(units[2]["position"], 2);
+    assert_eq!(out["truncated"], false);
+    assert_eq!(out["total"], 3, "total must count all matching units");
+
+    // Position range filter (inclusive).
+    let out = execute_kb_read(
+        &ctx,
+        &json!({ "document_id": doc, "start_position": 1, "end_position": 1 }),
+    )
+    .unwrap();
+    let units = out["units"].as_array().unwrap();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0]["text"], "second");
+
+    // unit_type filter matches nothing here (only paragraphs exist).
+    let out = execute_kb_read(&ctx, &json!({ "document_id": doc, "unit_type": "page" })).unwrap();
+    assert_eq!(out["units"].as_array().unwrap().len(), 0);
+
+    // limit / offset paging.
+    let out = execute_kb_read(
+        &ctx,
+        &json!({ "document_id": doc, "limit": 2, "offset": 1 }),
+    )
+    .unwrap();
+    let units = out["units"].as_array().unwrap();
+    assert_eq!(units.len(), 2);
+    assert_eq!(units[0]["text"], "second");
+    assert_eq!(units[1]["text"], "third");
+    assert_eq!(out["total"], 3, "total must ignore limit/offset");
+}
+
 /// 5. Deleting a document cascades its rows and removes cross-document
-/// relations referencing its endpoints.
+///    relations referencing its endpoints.
 #[test]
 fn delete_cascades_and_cleans_cross_doc_relations() {
     let ctx = mem_ctx();
@@ -453,7 +942,7 @@ fn run_rollback_keeps_other_runs_references() {
 }
 
 /// 7. units_fts trigram search: >=3 chars MATCH, 1-2 chars LIKE fallback,
-/// obsolete rows excluded by join.
+///    obsolete rows excluded by join.
 #[test]
 fn fts_trigram_and_like_fallback() {
     let ctx = mem_ctx();
@@ -528,15 +1017,19 @@ fn insert_quota_and_fingerprint() {
     let err = execute_kb_insert(&ctx, &args).unwrap_err().to_string();
     assert!(err.contains("[KB_QUOTA_EXCEEDED]"), "{}", err);
 
-    // fingerprint: identical claims share it; different claims differ.
+    // fingerprint: distinct claims differ; length is sha256's first 16 hex
+    // chars. Identical claims now dedup (covered by insert_reuses_existing_claim).
     let res = execute_kb_insert(
         &ctx,
         &json!({
             "document_id": doc,
             "claims": [
                 { "ref": "a", "predicate": "売却", "subject_value": { "text": "甲社" }, "object_value": { "text": "製品A" } },
-                { "ref": "b", "predicate": "売却", "subject_value": { "text": "甲社" }, "object_value": { "text": "製品A" } },
                 { "ref": "c", "predicate": "売却", "subject_value": { "text": "甲社" }, "object_value": { "text": "製品B" } }
+            ],
+            "evidence": [
+                { "target_type": "claim", "target_ref": "a", "matched_text": "x" },
+                { "target_type": "claim", "target_ref": "c", "matched_text": "x" }
             ]
         }),
     )
@@ -545,11 +1038,7 @@ fn insert_quota_and_fingerprint() {
         .as_str()
         .unwrap()
         .to_string();
-    let cb = res["inserted"]["claims"][1]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let cc = res["inserted"]["claims"][2]["id"]
+    let cc = res["inserted"]["claims"][1]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -560,7 +1049,6 @@ fn insert_quota_and_fingerprint() {
         })
         .unwrap()
     };
-    assert_eq!(fp(&ca), fp(&cb), "duplicate claims share fingerprint");
     assert_ne!(fp(&ca), fp(&cc), "different object changes fingerprint");
     assert_eq!(fp(&ca).len(), 16, "fingerprint = sha256 first 16 hex chars");
 }

@@ -613,7 +613,7 @@ pub fn pretty_print_result(name: &str, result: &Value, args_json: Option<&Value>
         }
         "data_search" | "data_schema" => pretty_data::pretty_print_data_result(result),
         #[cfg(feature = "kb")]
-        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
+        "kb_search" | "kb_schema" | "kb_read" | "kb_insert" | "kb_update" => {
             pretty_kb::pretty_print_kb_result(result)
         }
         "mini_python_interpreter" => match obj.get("status").and_then(|v| v.as_str()) {
@@ -852,7 +852,7 @@ pub fn pretty_print_command(name: &str, args: &Value) {
         }
         "data_search" | "data_schema" => pretty_data::pretty_print_data_command(name, args),
         #[cfg(feature = "kb")]
-        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
+        "kb_search" | "kb_schema" | "kb_read" | "kb_insert" | "kb_update" => {
             pretty_kb::pretty_print_kb_command(name, args)
         }
         "calc" => {

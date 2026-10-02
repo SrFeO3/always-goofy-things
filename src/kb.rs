@@ -1,7 +1,7 @@
-//! Knowledge Base (KB) feature: the `data_kb_*` tools and the `/kb` command.
+//! Knowledge Base (KB) feature: the `kb_*` tools and the `/kb` command.
 //!
-//! Executes the four KB tools (read: `data_kb_search` / `data_kb_schema`,
-//! write: `data_kb_insert` / `data_kb_update`) and the `/kb` command
+//! Executes the five KB tools (read: `kb_search` / `kb_schema` /
+//! `kb_read`, write: `kb_insert` / `kb_update`) and the `/kb` command
 //! (add / list / delete / sync / backup) against the single SQLite file
 //! `<kb>/db/library.sqlite`. KB tools are KB-dedicated, with an approval
 //! gate independent of `reflex` (`tools::confirm_execute_tool`).
@@ -22,11 +22,11 @@ use uuid::Uuid;
 use crate::kb_schema;
 use crate::startup;
 
-/// Max items per `data_kb_insert` call (spec: quota).
+/// Max items per `kb_insert` call (spec: quota).
 const KB_INSERT_MAX_ITEMS: usize = 500;
-/// Max JSON body bytes per `data_kb_insert` call (spec: quota).
+/// Max JSON body bytes per `kb_insert` call (spec: quota).
 const KB_INSERT_MAX_BYTES: usize = 1_000_000;
-/// Default `data_kb_search` result truncation (overridden by --kb-max-bytes).
+/// Default `kb_search` result truncation (overridden by --kb-max-bytes).
 const KB_DEFAULT_MAX_BYTES: usize = 65536;
 /// Stale `running` threshold: runs older than this are marked failed.
 const STALE_RUN_HOURS: i64 = 24;
@@ -94,7 +94,7 @@ fn lock_conn(ctx: &KbContext) -> Result<ConnGuard<'_>> {
 // ---------------------------------------------------------------------------
 
 /// KB run context: the KB directory, the shared SQLite connection, the byte
-/// cap for `data_kb_search` results, and the `analysis_runs` id for this
+/// cap for `kb_search` results, and the `analysis_runs` id for this
 /// process (run granularity = one process start, per spec).
 pub(crate) struct KbContext {
     pub kb_dir: String,
@@ -314,7 +314,7 @@ fn resolve_id_ref(
             let found = refs.get(r).ok_or_else(|| {
                 anyhow!(
                     "[KB_REF_NOT_FOUND] Reference not found: '{}'. Insert the referenced item \
-                     first or fix the id (query data_kb_search to find existing ids).",
+                     first or fix the id (query kb_search to find existing ids).",
                     r
                 )
             })?;
@@ -325,22 +325,22 @@ fn resolve_id_ref(
 }
 
 // ---------------------------------------------------------------------------
-// data_kb_search
+// kb_search
 // ---------------------------------------------------------------------------
 
-/// Build the `data_kb_search` tool definition (KB-dedicated, read-only).
+/// Build the `kb_search` tool definition (KB-dedicated, read-only).
 pub(crate) fn build_kb_search_def() -> Value {
     json!({
         "type": "function",
         "function": {
-            "name": "data_kb_search",
-            "description": "Execute read-only SQL queries against the Knowledge Base (entities, claims, relations, conditions, events, and evidence with provenance). Use data_kb_schema first if you need to discover table structures. Only the single <kb>/db/library.sqlite file is reachable. Always include LIMIT to control the result size. Results are returned as CSV with a header row.",
+            "name": "kb_search",
+            "description": "Execute read-only SQL queries against the Knowledge Base (entities, claims, relations, conditions, events, and evidence with provenance). Use kb_schema first if you need to discover table structures. Only the single <kb>/db/library.sqlite file is reachable. Always include LIMIT to control the result size. Results are returned as CSV with a header row. Base answers about KB content on these results, not on memory, and cite the source unit(s). Prefer the v_*_current views so superseded document versions do not leak into answers.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The SQL query to execute. Only SELECT / WITH / EXPLAIN statements are allowed. Always include LIMIT to prevent excessive data retrieval."
+                        "description": "The SQL query to execute. Only read-only SELECT / WITH / EXPLAIN statements are allowed; any statement that may write is rejected. Always include LIMIT to prevent excessive data retrieval."
                     }
                 },
                 "required": ["query"]
@@ -399,14 +399,22 @@ pub(crate) fn execute_kb_search(ctx: &KbContext, query: &str) -> Result<Value> {
     let mut stmt = conn.prepare(query).map_err(|e| {
         anyhow!(
             "[KB_SYNTAX_ERROR] Query syntax error: {}. Check your SQL syntax and try again \
-             (use data_kb_schema to confirm table/column names).",
+             (use kb_schema to confirm table/column names).",
             e
         )
     })?;
+    // Defense in depth: `readonly()` rejects any write; the keyword sanitizer
+    // alone would let `WITH ... DELETE/UPDATE/INSERT ... RETURNING` through.
+    if !stmt.readonly() {
+        bail!(
+            "[KB_READONLY_VIOLATION] Write operations are not allowed. \
+             Only read-only SELECT/WITH/EXPLAIN statements are permitted."
+        );
+    }
     let csv = rows_to_csv(&mut stmt).map_err(|e| {
         anyhow!(
             "[KB_EXEC_ERROR] Execution error: {}. Verify table/column names exist \
-             (use data_kb_schema to check) and that you are not writing (INSERT/UPDATE/DELETE).",
+             (use kb_schema to check) and that you are not writing (INSERT/UPDATE/DELETE).",
             e
         )
     })?;
@@ -455,8 +463,8 @@ fn csv_join(fields: &[String]) -> String {
         .join(",")
 }
 
-/// Truncate the CSV at `max_bytes` on a UTF-8 boundary, appending the
-/// `[KB_TRUNCATED]` notice when truncation occurs.
+/// Truncate the CSV at `max_bytes`, cutting at a line boundary (falling back
+/// to a UTF-8 boundary) and appending `[KB_TRUNCATED]` when it truncates.
 fn truncate_body(body: &str, max_bytes: usize) -> String {
     if body.len() <= max_bytes {
         return body.to_string();
@@ -464,6 +472,10 @@ fn truncate_body(body: &str, max_bytes: usize) -> String {
     let mut boundary = max_bytes;
     while boundary > 0 && !body.is_char_boundary(boundary) {
         boundary -= 1;
+    }
+    // Cut at the last complete line (a quoted field may still span lines).
+    if let Some(last_nl) = body[..boundary].rfind('\n') {
+        boundary = last_nl;
     }
     format!(
         "{}\n[KB_TRUNCATED] Result truncated at {} bytes. Use tighter WHERE filters, \
@@ -474,16 +486,136 @@ fn truncate_body(body: &str, max_bytes: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// data_kb_schema
+// kb_read
 // ---------------------------------------------------------------------------
 
-/// Build the `data_kb_schema` tool definition.
+/// Build the `kb_read` tool definition (KB-dedicated, read-only).
+pub(crate) fn build_kb_read_def() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "kb_read",
+            "description": "Read the text of document units (paragraphs/pages) from the Knowledge Base so you can analyze a document's content. Returns units in position order with their id, unit_type, position, parent_id, and text, plus a total count of matching units. Prefer this over kb_search for reading a document's body. For a PDF, pass unit_type=\"page\" to read full page text in page order.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": "UUID of the document (documents.id). Get it from /kb list or by querying documents via kb_search. Required."
+                    },
+                    "unit_type": {
+                        "type": "string",
+                        "description": "Optional filter: \"paragraph\" or \"page\". Omit to return all unit types."
+                    },
+                    "start_position": {
+                        "type": "integer",
+                        "description": "Optional inclusive start position (0-based)."
+                    },
+                    "end_position": {
+                        "type": "integer",
+                        "description": "Optional inclusive end position (0-based)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional maximum units to return (default 50, max 500)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Optional number of units to skip, for paging."
+                    }
+                },
+                "required": ["document_id"]
+            }
+        }
+    })
+}
+
+/// Read document units (paragraphs/pages) in position order, bounded by
+/// `max_bytes` (trailing units are trimmed to keep the JSON valid).
+pub(crate) fn execute_kb_read(ctx: &KbContext, args: &Value) -> Result<Value> {
+    let doc_id = args
+        .get("document_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("[KB_MISSING_FIELDS] Missing required 'document_id'."))?;
+    let unit_type = args.get("unit_type").and_then(|v| v.as_str());
+    let start = args.get("start_position").and_then(|v| v.as_i64());
+    let end = args.get("end_position").and_then(|v| v.as_i64());
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .clamp(1, 500);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .max(0);
+
+    let conn = lock_conn(ctx)?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM document_units \
+             WHERE document_id = ?1 AND obsolete = 0 \
+               AND (?2 IS NULL OR unit_type = ?2) \
+               AND (?3 IS NULL OR position >= ?3) \
+               AND (?4 IS NULL OR position <= ?4)",
+            params![doc_id, unit_type, start, end],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, unit_type, position, parent_id, text \
+             FROM document_units \
+             WHERE document_id = ?1 AND obsolete = 0 \
+               AND (?2 IS NULL OR unit_type = ?2) \
+               AND (?3 IS NULL OR position >= ?3) \
+               AND (?4 IS NULL OR position <= ?4) \
+             ORDER BY position, unit_type, rowid \
+             LIMIT ?5 OFFSET ?6",
+        )
+        .map_err(|e| anyhow!("[KB_EXEC_ERROR] Read failed: {}", e))?;
+
+    let mut units: Vec<Value> = Vec::new();
+    {
+        let rows = stmt.query_map(params![doc_id, unit_type, start, end, limit, offset], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?,
+                "unit_type": r.get::<_, String>(1)?,
+                "position": r.get::<_, i64>(2)?,
+                "parent_id": r.get::<_, Option<String>>(3)?,
+                "text": r.get::<_, String>(4)?,
+            }))
+        })?;
+        for row in rows.flatten() {
+            units.push(row);
+        }
+    }
+
+    let mut truncated = false;
+    loop {
+        let body = json!({ "status": "ok", "units": units.clone(), "total": total, "truncated": truncated });
+        if units.is_empty()
+            || serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0) <= ctx.max_bytes
+        {
+            return Ok(body);
+        }
+        units.pop();
+        truncated = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// kb_schema
+// ---------------------------------------------------------------------------
+
+/// Build the `kb_schema` tool definition.
 pub(crate) fn build_kb_schema_def() -> Value {
     json!({
         "type": "function",
         "function": {
-            "name": "data_kb_schema",
-            "description": "Discover the schema of the Knowledge Base. List all tables, or describe a specific table's columns, types, purpose, sample values, and related tables. Call this BEFORE writing data_kb_search queries to understand the data structure. Also lists the provided views (e.g. v_claims_with_evidence) and the FTS table units_fts with the Japanese search rules (>=3 chars: MATCH phrase, 1-2 chars: LIKE).",
+            "name": "kb_schema",
+            "description": "Discover the schema of the Knowledge Base. List all tables, or describe a specific table's columns, types, purpose, sample values, and related tables. Call this BEFORE writing kb_search queries to understand the data structure. Also lists the provided views (e.g. v_claims_with_evidence) and the FTS table units_fts with the Japanese search rules (>=3 chars: MATCH phrase, 1-2 chars: LIKE). Prefer the v_*_current views to query only the current document versions (superseded versions are excluded).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -567,7 +699,7 @@ pub(crate) fn execute_kb_schema(ctx: &KbContext, table: Option<&str>) -> Result<
         .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
     if !exists {
         bail!(
-            "[KB_EXEC_ERROR] Table or view not found: '{}'. Verify the name (use data_kb_schema with no table to list all).",
+            "[KB_EXEC_ERROR] Table or view not found: '{}'. Verify the name (use kb_schema with no table to list all).",
             name
         );
     }
@@ -639,26 +771,26 @@ pub(crate) fn execute_kb_schema(ctx: &KbContext, table: Option<&str>) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// data_kb_insert
+// kb_insert
 // ---------------------------------------------------------------------------
 
-/// Build the `data_kb_insert` tool definition.
+/// Build the `kb_insert` tool definition.
 pub(crate) fn build_kb_insert_def() -> Value {
     json!({
         "type": "function",
         "function": {
-            "name": "data_kb_insert",
-            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via data_kb_update.",
+            "name": "kb_insert",
+            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Every claim, relation, and event must be accompanied by an evidence item with verbatim matched_text from its source unit. Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via kb_update. Entities are deduplicated: re-inserting an entity with the same name (normalized) and entity_type reuses the existing row (reported with reused=true).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "document_id": {
                         "type": "string",
-                        "description": "UUID of the registered document (documents.id). Get it from the /kb add result or by querying documents via data_kb_search. Required. For cross-document relations pass \"null\"."
+                        "description": "UUID of the registered document (documents.id). Get it from the /kb add result or by querying documents via kb_search. Required. For cross-document relations pass \"null\"."
                     },
                     "entities": {
                         "type": "array",
-                        "description": "Entities to insert. Item fields: name (required), entity_type (optional, e.g. organization/person/product/regulation), attributes (optional object), ref (optional local reference, e.g. \"e1\").",
+                        "description": "Entities to insert. Item fields: name (required), entity_type (optional, e.g. organization/person/product/regulation), attributes (optional object), ref (optional local reference, e.g. \"e1\"). Re-inserting the same name + entity_type reuses the existing entity instead of creating a duplicate.",
                         "items": { "type": "object" }
                     },
                     "claims": {
@@ -683,7 +815,17 @@ pub(crate) fn build_kb_insert_def() -> Value {
                     },
                     "evidence": {
                         "type": "array",
-                        "description": "Provenance: which source passage supports a target item. Item fields: target_type (required: entity/claim/relation/event/condition) + target_id (or target_ref), source_unit_id (or source_unit_ref, optional - the document_units.id backing this item), start_offset/end_offset (optional character offsets into the unit text), matched_text (optional excerpt snapshot), evidence_type (optional).",
+                        "description": "Provenance: which source passage supports a target item. Item fields: target_type (required: entity/claim/relation/event/condition) + target_id (or target_ref), source_unit_id (or source_unit_ref, optional - the document_units.id backing this item; omit only for inferred items), start_offset/end_offset (optional character offsets into the unit text), matched_text (required verbatim excerpt copied from the source unit; never paraphrase or invent), evidence_type (optional).",
+                        "items": { "type": "object" }
+                    },
+                    "canonical_entities": {
+                        "type": "array",
+                        "description": "Canonical entities for cross-document identity resolution. Item fields: name (required), entity_type (optional), aliases (optional array of strings), attributes (optional object), ref (optional). Re-inserting the same name + entity_type reuses the existing canonical entity.",
+                        "items": { "type": "object" }
+                    },
+                    "entity_links": {
+                        "type": "array",
+                        "description": "Links from a document entity to a canonical entity. Item fields: entity_id (or entity_ref) and canonical_id (or canonical_ref) are required, confidence (optional 0..1), ref (optional).",
                         "items": { "type": "object" }
                     }
                 },
@@ -719,6 +861,8 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
         "relations",
         "conditions",
         "events",
+        "canonical_entities",
+        "entity_links",
         "evidence",
     ]
     .iter()
@@ -739,12 +883,14 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
     // Pass 1: assign ids and collect local refs (duplicate ref -> conflict).
     let mut refs: HashMap<String, (String, String)> = HashMap::new();
     let mut assigned: HashMap<String, Vec<(String, Value)>> = HashMap::new();
-    const KINDS: [&str; 6] = [
+    const KINDS: [&str; 8] = [
         "entities",
         "claims",
         "relations",
         "conditions",
         "events",
+        "canonical_entities",
+        "entity_links",
         "evidence",
     ];
     for kind in KINDS {
@@ -768,6 +914,44 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
         assigned.insert(kind.to_string(), out);
     }
 
+    // Evidence enforcement: ref'd claims/relations/events need evidence in-call.
+    let evidenced: Vec<(String, String)> = args
+        .get("evidence")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let tt = e.get("target_type").and_then(|v| v.as_str())?.to_string();
+                    let tr = e.get("target_ref").and_then(|v| v.as_str())?.to_string();
+                    Some((tt, tr))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for (kind, target_type) in [
+        ("claims", "claim"),
+        ("relations", "relation"),
+        ("events", "event"),
+    ] {
+        if let Some(items) = args.get(kind).and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(r) = item.get("ref").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !evidenced.contains(&(target_type.to_string(), r.to_string())) {
+                    bail!(
+                        "[KB_EVIDENCE_REQUIRED] {} with ref '{}' has no evidence in this call. \
+                         Add an evidence item with target_type=\"{}\" and target_ref=\"{}\".",
+                        kind,
+                        r,
+                        target_type,
+                        r
+                    );
+                }
+            }
+        }
+    }
+
     let mut conn = lock_conn(ctx)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -780,7 +964,7 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
         let items = assigned.remove(kind).unwrap_or_default();
         let mut ids: Vec<Value> = Vec::with_capacity(items.len());
         for (id, item) in items {
-            insert_item(
+            let final_id = insert_item(
                 &tx,
                 kind,
                 &id,
@@ -790,10 +974,15 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
                 &ctx.run_id,
                 &refs,
             )?;
+            let reused = final_id != id;
+            if reused && let Some(r) = item.get("ref").and_then(|v| v.as_str()) {
+                refs.insert(r.to_string(), (kind.to_string(), final_id.clone()));
+            }
             let ref_name = item.get("ref").and_then(|v| v.as_str()).unwrap_or("");
             ids.push(json!({
                 "ref": if ref_name.is_empty() { Value::Null } else { Value::String(ref_name.to_string()) },
-                "id": id
+                "id": final_id,
+                "reused": reused
             }));
             total += 1;
         }
@@ -819,7 +1008,7 @@ fn insert_item(
     is_cross_doc: bool,
     run_id: &Uuid,
     refs: &HashMap<String, (String, String)>,
-) -> Result<()> {
+) -> Result<String> {
     let run = run_id.to_string();
     match kind {
         "entities" => {
@@ -829,10 +1018,24 @@ fn insert_item(
                 .ok_or_else(|| anyhow!("[KB_MISSING_FIELDS] entity.name is required."))?;
             let entity_type = item.get("entity_type").and_then(|v| v.as_str());
             let attributes = json_to_text(item.get("attributes")).unwrap_or_else(|| "{}".into());
+            let norm = nfkc(name);
+            // Dedup: reuse an existing non-obsolete entity (document, name_norm, entity_type).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM entities \
+                     WHERE document_id = ?1 AND name_norm = ?2 AND entity_type IS ?3 AND obsolete = 0 \
+                     LIMIT 1",
+                    params![doc_id, norm, entity_type],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
             tx.execute(
                 "INSERT INTO entities (id, document_id, entity_type, name, name_norm, attributes, annotations, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7, 0)",
-                params![id, doc_id, entity_type, name, nfkc(name), attributes, run],
+                params![id, doc_id, entity_type, name, norm, attributes, run],
             )
             .map_err(sql_insert_err)?;
         }
@@ -876,6 +1079,19 @@ fn insert_item(
                 object_value.as_deref().unwrap_or(""),
                 modality,
             );
+            // Dedup: reuse an existing non-obsolete claim (document, fingerprint).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM claims \
+                     WHERE document_id = ?1 AND fingerprint = ?2 AND obsolete = 0 \
+                     LIMIT 1",
+                    params![doc_id, fingerprint],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
             tx.execute(
                 "INSERT INTO claims (id, document_id, subject_id, subject_value, predicate, object_id, object_value, modality, polarity, fingerprint, confidence, attributes, annotations, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '{}', ?13, 0)",
@@ -982,6 +1198,62 @@ fn insert_item(
             )
             .map_err(sql_insert_err)?;
         }
+        "canonical_entities" => {
+            let name = item.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                anyhow!("[KB_MISSING_FIELDS] canonical_entities.name is required.")
+            })?;
+            let entity_type = item.get("entity_type").and_then(|v| v.as_str());
+            let aliases = json_to_text(item.get("aliases")).unwrap_or_else(|| "[]".into());
+            let attributes = json_to_text(item.get("attributes")).unwrap_or_else(|| "{}".into());
+            // Dedup: reuse an existing non-obsolete canonical entity (name, entity_type).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM canonical_entities \
+                     WHERE name = ?1 AND entity_type IS ?2 AND obsolete = 0 LIMIT 1",
+                    params![name, entity_type],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
+            tx.execute(
+                "INSERT INTO canonical_entities (id, name, entity_type, aliases, attributes, annotations, analysis_run_id, obsolete) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, '{}', ?6, 0)",
+                params![id, name, entity_type, aliases, attributes, run],
+            )
+            .map_err(sql_insert_err)?;
+        }
+        "entity_links" => {
+            let entity_id =
+                resolve_id_ref(item, "entity_id", "entity_ref", refs)?.ok_or_else(|| {
+                    anyhow!("[KB_MISSING_FIELDS] entity_links.entity_id / entity_ref is required.")
+                })?;
+            let canonical_id = resolve_id_ref(item, "canonical_id", "canonical_ref", refs)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "[KB_MISSING_FIELDS] entity_links.canonical_id / canonical_ref is required."
+                    )
+                })?;
+            let confidence = item.get("confidence").and_then(|v| v.as_f64());
+            // Dedup: reuse an existing link (entity_id, canonical_id).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM entity_links WHERE entity_id = ?1 AND canonical_id = ?2 LIMIT 1",
+                    params![entity_id, canonical_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
+            tx.execute(
+                "INSERT INTO entity_links (id, entity_id, canonical_id, confidence, annotations, analysis_run_id) \
+                 VALUES (?1, ?2, ?3, ?4, '{}', ?5)",
+                params![id, entity_id, canonical_id, confidence, run],
+            )
+            .map_err(sql_insert_err)?;
+        }
         "evidence" => {
             let target_type = item
                 .get("target_type")
@@ -1008,7 +1280,7 @@ fn insert_item(
         }
         _ => unreachable!("validated item kind"),
     }
-    Ok(())
+    Ok(id.to_string())
 }
 
 fn sql_insert_err(e: rusqlite::Error) -> anyhow::Error {
@@ -1016,7 +1288,7 @@ fn sql_insert_err(e: rusqlite::Error) -> anyhow::Error {
     if msg.contains("FOREIGN KEY constraint failed") || msg.contains("constraint failed") {
         anyhow!(
             "[KB_REF_NOT_FOUND] Insert failed (constraint): {}. Verify referenced ids exist \
-             (query data_kb_search to find existing ids).",
+             (query kb_search to find existing ids).",
             msg
         )
     } else {
@@ -1055,15 +1327,15 @@ fn build_claim_fingerprint(
 }
 
 // ---------------------------------------------------------------------------
-// data_kb_update
+// kb_update
 // ---------------------------------------------------------------------------
 
-/// Build the `data_kb_update` tool definition.
+/// Build the `kb_update` tool definition.
 pub(crate) fn build_kb_update_def() -> Value {
     json!({
         "type": "function",
         "function": {
-            "name": "data_kb_update",
+            "name": "kb_update",
             "description": "Update existing Knowledge Base rows: merge attributes, or append annotations (versioned history is recorded automatically). Use this for analysis results: evaluations, classifications, uncertainty, missing-information findings. Never erase a row; correct by updating annotations (or adding a new row and marking the old one obsolete).",
             "parameters": {
                 "type": "object",
@@ -1173,7 +1445,7 @@ pub(crate) fn execute_kb_update(ctx: &KbContext, args: &Value) -> Result<Value> 
             ))
             .map_err(|_| {
                 anyhow!(
-                    "[KB_NOT_FOUND] Target not found: {} '{}'. Verify the id via data_kb_search.",
+                    "[KB_NOT_FOUND] Target not found: {} '{}'. Verify the id via kb_search.",
                     target_type,
                     target_id
                 )
@@ -1186,7 +1458,7 @@ pub(crate) fn execute_kb_update(ctx: &KbContext, args: &Value) -> Result<Value> 
             .map_err(|_| anyhow!("[KB_INTERNAL_ERROR] query failed"))?;
         let row = rows.next()?.ok_or_else(|| {
             anyhow!(
-                "[KB_NOT_FOUND] Target not found: {} '{}'. Verify the id via data_kb_search.",
+                "[KB_NOT_FOUND] Target not found: {} '{}'. Verify the id via kb_search.",
                 target_type,
                 target_id
             )
@@ -1242,7 +1514,7 @@ pub(crate) fn execute_kb_update(ctx: &KbContext, args: &Value) -> Result<Value> 
             version,
             new_annos,
             ctx.run_id.to_string(),
-            "data_kb_update",
+            "kb_update",
             reason
         ],
     )
@@ -1477,7 +1749,7 @@ pub(crate) fn kb_list(ctx: &KbContext) -> Result<String> {
     if !pending.is_empty() {
         lines.push(format!(
             "Hint: {} document(s) are pending analysis. Ask the AI to analyze them, then to set \
-             analysis_status to analyzed via data_kb_update (a write tool; it asks y/N). /kb add / \
+             analysis_status to analyzed via kb_update (a write tool; it asks y/N). /kb add / \
              /kb sync only extract paragraphs - they never run the LLM, so the status stays \
              pending until the AI writes the transition.",
             pending.len()
@@ -1825,7 +2097,73 @@ pub(crate) fn kb_backup(ctx: &KbContext, path_arg: Option<&str>) -> Result<Strin
         escape_sql_string(&dest.to_string_lossy())
     ))
     .map_err(|e| anyhow!("[KB_FILE_ERROR] Backup failed (VACUUM INTO): {}", e))?;
-    Ok(format!("Backup written to {}.", dest.display()))
+    Ok(format!("Backup written to {}", dest.display()))
+}
+
+/// `/kb restore <snapshot>`: replace the live `library.sqlite` with a backup
+/// snapshot and reopen the connection (pragmas + migrate + a fresh run), so
+/// the app continues on the restored data.
+pub(crate) fn kb_restore(ctx: &KbContext, path_arg: &str) -> Result<String> {
+    let snapshot = PathBuf::from(path_arg);
+    if !snapshot.is_file() {
+        bail!(
+            "[KB_FILE_ERROR] Snapshot not found: '{}'.",
+            snapshot.display()
+        );
+    }
+
+    let db_dir = Path::new(&ctx.kb_dir).join("db");
+    let db_path = db_dir.join("library.sqlite");
+    fs::create_dir_all(&db_dir)
+        .map_err(|e| anyhow!("[KB_FILE_ERROR] Failed to create db dir: {}", e))?;
+
+    // Close the live connection (swap in a throwaway in-memory connection).
+    {
+        let mut guard = ctx
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+        *guard = Connection::open_in_memory().map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+    }
+
+    // Remove stale WAL/SHM sidecars, then copy the snapshot over the live DB.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", db_path.to_string_lossy(), suffix));
+        if sidecar.exists() {
+            fs::remove_file(&sidecar).ok();
+        }
+    }
+    fs::copy(&snapshot, &db_path)
+        .map_err(|e| anyhow!("[KB_FILE_ERROR] Restore failed to copy snapshot: {}", e))?;
+
+    // Reopen the restored DB and bring it to a consistent state.
+    {
+        let mut guard = ctx
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+        let conn = Connection::open(&db_path)
+            .map_err(|e| anyhow!("[KB_CONFIG_ERROR] Failed to reopen restored DB: {}", e))?;
+        kb_schema::apply_pragmas(&conn)?;
+        kb_schema::migrate(&conn)?;
+        mark_stale_runs(&conn)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO analysis_runs (id, label, status, config) VALUES (?1, ?2, 'running', ?3)",
+            params![
+                ctx.run_id.to_string(),
+                format!("restore {} {}", env!("CARGO_PKG_VERSION"), now_iso()),
+                "{}"
+            ],
+        )
+        .map_err(|e| anyhow!("[KB_CONFIG_ERROR] Failed to record restore run: {}", e))?;
+        *guard = conn;
+    }
+
+    Ok(format!(
+        "Restored {} from {}.",
+        db_path.to_string_lossy(),
+        snapshot.to_string_lossy()
+    ))
 }
 
 /// Register a file: hash check -> insert / version-update -> machine

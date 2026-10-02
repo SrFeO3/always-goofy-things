@@ -3,8 +3,8 @@
 **Local KB** is an optional feature that builds a knowledge base from documents you add; the AI
 can search and analyze it. The application splits each file into units (paragraphs / pages); the
 AI extracts structured knowledge - entities, claims, relations, conditions, events, with evidence
-back to the source - into the knowledge database. The AI accesses the database with four
-`data_kb_*` tools, following your investigation instructions.
+back to the source - into the knowledge database. The AI accesses the database with five
+`kb_*` tools, following your investigation instructions.
 
 The feature is optional: build with `--features kb`. It creates a KB folder in the app's data
 directory - app-managed, like session/cache data, and **it can grow large**. The location can
@@ -18,18 +18,21 @@ be changed: `--kb-dir <dir>` (or `KB_DIR`).
   working directory).
 - **`<kb>/data/`** - your source documents.
 - **`<kb>/db/library.sqlite`** - the knowledge database the AI builds (one SQLite file).
-- **`data_kb_*` tools** - the AI's interface: `data_kb_search` / `data_kb_schema` (read),
-  `data_kb_insert` / `data_kb_update` (write). KB-dedicated: they reach only that one
+- **`kb_*` tools** - the AI's interface: `kb_search` / `kb_schema` / `kb_read` (read),
+  `kb_insert` / `kb_update` (write). KB-dedicated: they reach only that one
   `library.sqlite`, never workspace files.
 - **`/kb` command** - manage documents: add / list / delete / sync / backup.
 
 ### What you need to know
 
 - **Build**: `--features kb`. Without it, none of the above exists.
-- **Formats**: text (`.md` / `.txt`, ...) and PDF. Other files are registered, but machine
-  extraction fails (`analysis_status = failed`).
+- **Formats**: PDF and UTF-8 text (`.md` / `.txt`, ...). Non-PDF files are read as plain UTF-8
+  text (HTML etc. are not stripped); binary files fail extraction (`analysis_status = failed`).
 - **Size**: the library grows with use (large corpora can reach several GB); keep the app data
-  directory on a disk with room to spare.
+  directory on a disk with room to spare. Corrections never delete rows (they set `obsolete = 1`),
+  so the DB also grows over time - compact it with `/kb backup` (see Backup & restore).
+- **Cost**: analyzing a document re-reads its text and emits structured rows, so large corpora
+  consume a lot of tokens. Watch `--max-reasoning-turns` and your API budget.
 - **Moving the project orphans the library**: the default folder is keyed by the working
   directory's absolute path, so moving or renaming the project starts a fresh empty library and
   leaves the old one on disk (point `--kb-dir` at it to reuse).
@@ -43,22 +46,22 @@ All optional - the KB works with none of them:
 | Option | Env var | What it does |
 |---|---|---|
 | `--kb-dir <dir>` | `KB_DIR` | Custom KB folder; unset -> `<app data>/kb/kb-<workdir>-<hash>/`. |
-| `--kb-auto-confirm <ro\|rw>` | `KB_AUTO_CONFIRM` | Auto-approve the KB tools: `ro` = reads (`data_kb_search` / `data_kb_schema`), `rw` = all four. Independent of `--unsafe-reflex`. |
-| `--kb-max-bytes <num>` | `KB_MAX_BYTES` | Maximum bytes of a `data_kb_search` result before truncation (default: 65536 = 64KB). |
+| `--kb-auto-confirm <ro\|rw>` | `KB_AUTO_CONFIRM` | Auto-approve the KB tools: `ro` = reads (`kb_search` / `kb_schema` / `kb_read`), `rw` = all five. Independent of `--unsafe-reflex`. |
+| `--kb-max-bytes <num>` | `KB_MAX_BYTES` | Maximum bytes of a `kb_search` / `kb_read` result before truncation (default: 65536 = 64KB). |
 
 ### `--kb-dir` vs `-w, --working-dir`
 
 - `-w <dir>` (env `WORKING_DIR`, default `.`) = the **workspace**: where the ordinary tools
   (`read_file`, ...) operate.
-- `--kb-dir <dir>` = the **library folder**: only `data_kb_*` / `/kb` touch it, and only
+- `--kb-dir <dir>` = the **library folder**: only `kb_*` / `/kb` touch it, and only
   `<dir>/db/library.sqlite` - never workspace files.
 - Independent: the KB may live inside or outside the workspace
   (`--kb-dir /path/to/my-doc-library`).
 
-### Tool confirmation (`data_kb_*`)
+### Tool confirmation (`kb_*`)
 
-- Reads (`data_kb_search` / `data_kb_schema`) ask `y/N`; auto-approve with `--kb-auto-confirm ro`.
-- Writes (`data_kb_insert` / `data_kb_update`) too, with `--kb-auto-confirm rw` (needed in
+- Reads (`kb_search` / `kb_schema` / `kb_read`) ask `y/N`; auto-approve with `--kb-auto-confirm ro`.
+- Writes (`kb_insert` / `kb_update`) too, with `--kb-auto-confirm rw` (needed in
   batch / todo modes, where stdin is unavailable).
 - The KB gate is independent: the global `--unsafe-reflex` never applies to the KB tools.
 - `--only-tools` treats them like any other tool: omitted names are hidden from the LLM and
@@ -73,6 +76,21 @@ All optional - the KB works with none of them:
 /kb sync                           Rescan data/ for added / changed / missing files (also reports broken references)
 /kb backup [path]                  Snapshot the knowledge database (VACUUM INTO)
 ```
+
+### Backup & restore
+
+`/kb backup [path]` writes a compact snapshot of the knowledge DB via `VACUUM INTO` (default
+`<kb>/db/backup/library-<timestamp>.sqlite`). The snapshot is the DB only - it does **not** include
+the `data/` source files.
+
+To restore a snapshot:
+
+1. Stop the app.
+2. Replace `<kb>/db/library.sqlite` with the snapshot (delete any `-wal` / `-shm` files first).
+3. Restart with the same `--kb-dir`; re-run `/kb sync` if the `data/` files changed.
+
+The app never `VACUUM`s the live DB, so `/kb backup` is also how you compact a bloated library (the
+snapshot is smaller than the live DB, which still holds all the `obsolete` rows).
 
 ## Quick Start
 
@@ -90,7 +108,7 @@ cargo run --features kb -- --kb-dir my-doc-library
 
 You should see the `kb-feature : enabled (run_id: ...)` row in the configuration block, with
 `kb-dir` showing the KB folder - `<app data>/kb/kb-<workdir>-<hash>/` unless `--kb-dir` (or
-`KB_DIR`) overrides it. Without the feature, the `data_kb_*` tools and `/kb` are unavailable.
+`KB_DIR`) overrides it. Without the feature, the `kb_*` tools and `/kb` are unavailable.
 
 > Tip: write tools ask `y/N` before running - press `y`.
 
@@ -99,12 +117,26 @@ You should see the `kb-feature : enabled (run_id: ...)` row in the configuration
 `/kb add` and `/kb sync` only do **machine extraction** (files -> units, status `pending`); they
 never run the LLM, and questions don't change the status either. Only the AI writes it:
 
-- `pending` -> `analyzing` -> `analyzed`: via `data_kb_update` (`target_type` = `documents`, key
+- `pending` -> `analyzing` -> `analyzed`: via `kb_update` (`target_type` = `documents`, key
   `analysis_status`) - a write tool, so it asks `y/N`.
 - `failed`: by the application, when extraction fails.
 
 So: to analyze, ask the AI to extract the knowledge, then ask it to set `analysis_status` to
 `analyzed`. No `/kb` command does this.
+
+> The AI's instructions include a built-in **analysis playbook** (inspect the schema with
+> `kb_schema`, read the document's units, register knowledge with `kb_insert`, re-check
+> coverage, then set `analysis_status` to `analyzed`). A short "analyze rfc9110.txt" is enough - the
+> step-by-step prompts in Pattern 1 are illustrative.
+>
+> **Evidence is mandatory**: every claim / relation / event must be backed by an `evidence` row whose
+> `matched_text` is a verbatim excerpt from the source unit. The AI is instructed not to insert a
+> statement it cannot back with a source unit.
+>
+> **Large documents**: the AI reads a document's units with `kb_read`, which returns a `total` count
+> and supports `limit`/`offset`. For a document too large for one context, page through it in
+> batches (e.g. `limit 50` at a time, tracking `offset` against `total`), analyzing each batch before
+> moving on. Re-analysis is safe: entities, claims, and links are deduplicated.
 
 ### Pattern 1 - One document
 
@@ -134,20 +166,20 @@ pending`, and split into paragraph units. Check:
 
 #### 1-3. Analyze it
 
-Ask the AI to extract the document's knowledge:
+Ask the AI to analyze the document. The playbook is built in, so a short prompt is enough - the AI
+inspects the schema (`kb_schema`), reads the document's units with `kb_read`, registers
+the knowledge with evidence, and closes the document:
 
 ```text
-Look at the knowledge database schema first, then read rfc9110.txt and register its main terms and
-concepts as entities and claims, with evidence pointing back to the source text. Distinguish
-modality (fact vs assertion).
+Analyze rfc9110.txt.
 ```
 
-Approve the writes with `y` (`data_kb_insert` is a write tool). When it is done, close the
-document:
+(The longer form still works: "Look at the schema first, read rfc9110.txt's units with
+`kb_read`, and register its terms and concepts as entities and claims with evidence.
+Distinguish modality.")
 
-```text
-The analysis of rfc9110.txt is complete. Set analysis_status to analyzed for that document.
-```
+Approve the writes with `y` (`kb_insert` is a write tool). The AI then sets `analysis_status`
+to `analyzed` itself.
 
 `/kb list` now shows `analyzed`.
 
@@ -164,8 +196,10 @@ Search the knowledge database and summarize briefly with sources (which unit eac
 List the claims in rfc9110.txt that have conditions attached, and show each condition's expression.
 ```
 
-> Vague answer? Tell the AI: "Call `data_kb_schema` first, then search with `data_kb_search`"
-> (it may answer from memory). If the database itself is sparse, the analysis (1-3) was incomplete.
+> Vague answer? The AI is instructed to base KB answers on `kb_search` / `kb_schema`
+> results and cite the source unit(s) - never memory. If it still drifts, tell it: "Call
+> `kb_schema` first, then search with `kb_search`, and cite the source units." If the
+> database itself is sparse, the analysis (1-3) was incomplete.
 
 ### Pattern 2 - A second document (cross-document)
 
@@ -192,7 +226,8 @@ then set `analysis_status` to `analyzed`.
 #### 2-3. Connect the two documents
 
 The AI can add **cross-document relations** (a relation whose `document_id` is `"null"`). Ask
-explicitly for the links you want:
+explicitly for the links you want. Note: `"null"` is the value you pass to `kb_insert`; in the
+database (and in SQL via `kb_search`) the column is `NULL`, so use `document_id IS NULL`.
 
 ```text
 Across rfc9110.txt and rfc9111.txt, connect what 9111 depends on from 9110 using relations
@@ -224,16 +259,32 @@ in each document and the kind of conflict (contradiction / different condition /
 
 Notes:
 
-- Cross-document identity resolution is **lazy**: it runs when first needed, and the result is
-  saved and reused.
+- Cross-document identity is recorded explicitly: create a `canonical_entities` row and link
+  document entities to it with `entity_links` (via `kb_insert`). Re-inserting the same canonical
+  entity or link reuses the existing row (dedup).
 - Uncertain links are not forced; they are recorded in `annotations` (nothing is lost, history is
   kept).
+
+### Correcting mistakes (obsolete model)
+
+The KB never overwrites or deletes a row on correction. To fix a wrong claim:
+
+1. Find the row id with `kb_search`, e.g.
+   `SELECT id, predicate, object_value FROM claims WHERE predicate = '...' AND obsolete = 0`.
+2. Insert the corrected claim with `kb_insert` (a fresh row, with evidence).
+3. Mark the old row obsolete with `kb_update`
+   (`target_type = "claims"`, `target_id = <old id>`, `obsolete = true`).
+
+You can just ask the AI: "The claim that <what it says> is wrong. Insert the corrected claim and
+mark the old one obsolete." Re-analysis is also safe: entities are deduplicated (re-inserting the
+same name + type reuses the existing entity), and claims carry a fingerprint you can use to spot
+near-duplicates.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `/kb` or `data_kb_*` are missing | Build with `--features kb` (the KB then lives in the app data dir by default; `--kb-dir <dir>` / `KB_DIR` to choose a location) |
+| `/kb` or `kb_*` are missing | Build with `--features kb` (the KB then lives in the app data dir by default; `--kb-dir <dir>` / `KB_DIR` to choose a location) |
 | `/kb list` still shows `pending` | Expected: ask the AI to extract the knowledge, then to set `analysis_status` to `analyzed` (How analysis works). No `/kb` command does this |
 | Writes keep pausing | Press `y` in interactive mode. In batch/automation, approve the KB calls with `--kb-auto-confirm ro` (reads) or `rw` (reads + writes); the global `--unsafe-reflex` does not apply to KB tools |
 | You changed a document | Replace the file and run `/kb sync` (same content -> skipped; changes -> a new version, old ones kept as history) |
@@ -277,11 +328,13 @@ sqlite3 -readonly my-doc-library/db/library.sqlite
 | `analysis_runs` | one row per analysis session |
 | `v_documents_current` | view: current versions only |
 | `v_claims_with_evidence` | view: claims joined to their evidence + source text |
+| `v_*_current` | views: current-version knowledge only (`document_units` / `entities` / `claims` / `relations` / `conditions` / `events` / `evidence`); cross-document relations/conditions always included |
 | `units_fts` | full-text index over `document_units.text` (trigram) |
 
 `attributes` / `annotations` / `metadata` are JSON text - read them with `json_extract(...)`.
 Rows are never overwritten: corrections mark the old row `obsolete = 1`, so add `WHERE obsolete = 0`
-(the two views already do this).
+(the views already do this). To ignore superseded document versions, query the `v_*_current` views
+instead of the base tables.
 
 ### A short tour
 
@@ -297,6 +350,10 @@ UNION ALL SELECT 'relations', count(*) FROM relations WHERE obsolete = 0;
 -- Claims of one kind, with where each came from (provenance)
 SELECT predicate, modality, polarity, substr(matched_text, 1, 60) AS source
 FROM v_claims_with_evidence ORDER BY claim_id LIMIT 20;
+
+-- Current-version claims only (superseded document versions are excluded)
+SELECT predicate, modality, substr(object_value, 1, 60) AS object
+FROM v_claims_current ORDER BY predicate LIMIT 20;
 
 -- Cross-document links only
 SELECT relation_type, source_type, target_type
@@ -317,5 +374,51 @@ FROM units_fts f JOIN document_units u ON u.rowid = f.rowid
 WHERE f.text MATCH '"cache"' AND u.obsolete = 0 LIMIT 5;
 ```
 
+### Error codes
+
+The KB tools return structured error tags the AI can use to self-correct:
+
+| Tag | Meaning |
+|---|---|
+| `[KB_MISSING_FIELDS]` | A required argument / item field is missing. |
+| `[KB_REF_NOT_FOUND]` | A referenced id does not exist (insert the referenced item first, or fix the id). |
+| `[KB_CONFLICT]` | Conflicting inputs (e.g. both `id` and `ref`, or a duplicate local `ref`). |
+| `[KB_READONLY_VIOLATION]` | A write was attempted through a read tool (rejected). |
+| `[KB_SYNTAX_ERROR]` | The SQL query is malformed. |
+| `[KB_EXEC_ERROR]` | The query / update failed (bad table/column, invalid value, ...). |
+| `[KB_NOT_FOUND]` | The update target row does not exist. |
+| `[KB_QUOTA_EXCEEDED]` | Too many items / bytes in one `kb_insert` call (split it). |
+| `[KB_EVIDENCE_REQUIRED]` | A claim / relation / event with a local `ref` has no evidence in the same `kb_insert` call. |
+| `[KB_FILE_ERROR]` | A `/kb` file operation failed (missing file, collision, ...). |
+| `[KB_CONFIG_ERROR]` | KB init / config failed (missing dir, corrupted DB, ...). |
+| `[KB_INTERNAL_ERROR]` | Internal invariant violated. |
+| `[KB_TRUNCATED]` | Notice (not an error): a result was capped; narrow the query. |
+
+### Tool reference
+
+| Tool | Role | Key arguments |
+|---|---|---|
+| `kb_search` | read-only SQL | `query` (SELECT/WITH/EXPLAIN only) |
+| `kb_schema` | schema discovery | `table` (optional) |
+| `kb_read` | read document units | `document_id`, `unit_type` / `start_position` / `end_position` / `limit` / `offset` |
+| `kb_insert` | insert knowledge | `document_id`, `entities` / `claims` / `relations` / `conditions` / `events` / `canonical_entities` / `entity_links` / `evidence` |
+| `kb_update` | update / obsolete / annotate | `target_type`, `target_id`, `attributes` / `annotations` / `obsolete` / `reason` |
+
+### Expressive schema
+
+Beyond plain facts, the schema records nuance:
+
+- `claims.modality` - fact / assertion / hypothesis / prediction / possibility / requirement /
+  recommendation / opinion; separates hard facts from interpretation.
+- `claims.polarity` - `positive` / `negative`, for negated statements.
+- `conditions` - thresholds / exceptions / temporal / scope attached to a claim or event, with a
+  structured `expression`.
+- `events` - dated things with `precision` (year / month / day) and a `sort_key` for ordering.
+- `confidence` (claims / relations / entity_links) - 0..1. Use it to mark extraction uncertainty
+  (1.0 = verbatim fact, lower for paraphrase or inference); when answering, prefer higher
+  confidence and flag low-confidence items.
+- `annotations` (versioned) - record uncertainty / ambiguity instead of forcing a link; nothing is
+  lost.
+
 This is the app's database: explore it read-only, and manage it with `/kb` (the AI writes through
-`data_kb_*` tools). Don't edit rows by hand - that would break the provenance and version history.
+`kb_*` tools). Don't edit rows by hand - that would break the provenance and version history.

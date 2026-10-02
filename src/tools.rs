@@ -173,10 +173,11 @@ pub enum ToolName {
     DataSearch,
     DataSchema,
     Calc,
-    DataKbSearch,
-    DataKbSchema,
-    DataKbInsert,
-    DataKbUpdate,
+    KbSearch,
+    KbSchema,
+    KbRead,
+    KbInsert,
+    KbUpdate,
     MiniPythonInterpreter,
 }
 
@@ -194,10 +195,11 @@ impl ToolName {
             ToolName::DataSearch => "data_search",
             ToolName::DataSchema => "data_schema",
             ToolName::Calc => "calc",
-            ToolName::DataKbSearch => "data_kb_search",
-            ToolName::DataKbSchema => "data_kb_schema",
-            ToolName::DataKbInsert => "data_kb_insert",
-            ToolName::DataKbUpdate => "data_kb_update",
+            ToolName::KbSearch => "kb_search",
+            ToolName::KbSchema => "kb_schema",
+            ToolName::KbRead => "kb_read",
+            ToolName::KbInsert => "kb_insert",
+            ToolName::KbUpdate => "kb_update",
             ToolName::MiniPythonInterpreter => "mini_python_interpreter",
         }
     }
@@ -408,6 +410,7 @@ pub fn get_tool_definitions(
     if kb_dir.is_some() {
         tools.push(kb::build_kb_search_def());
         tools.push(kb::build_kb_schema_def());
+        tools.push(kb::build_kb_read_def());
         tools.push(kb::build_kb_insert_def());
         tools.push(kb::build_kb_update_def());
     }
@@ -492,7 +495,7 @@ where
             tools_data::execute_data_schema(ctx, table).await
         }
         #[cfg(feature = "kb")]
-        "data_kb_search" => {
+        "kb_search" => {
             let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
@@ -503,7 +506,7 @@ where
             kb::execute_kb_search(ctx, query)
         }
         #[cfg(feature = "kb")]
-        "data_kb_schema" => {
+        "kb_schema" => {
             let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
@@ -511,25 +514,30 @@ where
             kb::execute_kb_schema(ctx, table)
         }
         #[cfg(feature = "kb")]
-        "data_kb_insert" => {
+        "kb_read" => {
+            let ctx = context.kb_ctx.ok_or_else(|| {
+                anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
+            })?;
+            kb::execute_kb_read(ctx, args)
+        }
+        #[cfg(feature = "kb")]
+        "kb_insert" => {
             let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_insert(ctx, args)
         }
         #[cfg(feature = "kb")]
-        "data_kb_update" => {
+        "kb_update" => {
             let ctx = context.kb_ctx.ok_or_else(|| {
                 anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
             kb::execute_kb_update(ctx, args)
         }
         #[cfg(not(feature = "kb"))]
-        "data_kb_search" | "data_kb_schema" | "data_kb_insert" | "data_kb_update" => {
-            Err(anyhow::anyhow!(
-                "[KB_CONFIG_ERROR] This binary was built without the 'kb' feature. Rebuild with --features kb to use data_kb_* tools."
-            ))
-        }
+        "kb_search" | "kb_schema" | "kb_read" | "kb_insert" | "kb_update" => Err(anyhow::anyhow!(
+            "[KB_CONFIG_ERROR] This binary was built without the 'kb' feature. Rebuild with --features kb to use kb_* tools."
+        )),
         "calc" => Ok(tools_calc::execute_calc(args, context.calc_ledger)),
         "mini_python_interpreter" => {
             // Mount mode comes from the per-call approval decision, never the
@@ -633,8 +641,8 @@ pub async fn confirm_execute_tool(
     // --unsafe-reflex does not apply and they never reach auto_confirm.
     #[cfg(feature = "kb")]
     let is_kb_tool = {
-        let is_kb_read = matches!(name, "data_kb_search" | "data_kb_schema");
-        let is_kb_tool = is_kb_read || matches!(name, "data_kb_insert" | "data_kb_update");
+        let is_kb_read = matches!(name, "kb_search" | "kb_schema" | "kb_read");
+        let is_kb_tool = is_kb_read || matches!(name, "kb_insert" | "kb_update");
         let confirmed = is_kb_tool
             && match kb_auto_confirm {
                 crate::startup::KbAutoConfirm::Rw => true,

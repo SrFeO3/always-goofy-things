@@ -183,13 +183,19 @@ fn handle_kb(arg: Option<&str>, kb_ctx: crate::tools::KbCtxOpt<'_>) -> Result<()
                     crate::kb::kb_backup(ctx, if rest.is_empty() { None } else { Some(rest) })?
                 );
             }
+            "restore" => {
+                if rest.is_empty() {
+                    bail!("Usage: /kb restore <snapshot>");
+                }
+                println!("{}", crate::kb::kb_restore(ctx, rest)?);
+            }
             "" => {
                 println!(
-                    "Usage: /kb add <path> | list | delete <path> [--all-versions] | sync | backup [path]"
+                    "Usage: /kb add <path> | list | delete <path> [--all-versions] | sync | backup [path] | restore <snapshot>"
                 );
             }
             other => bail!(
-                "Unknown /kb subcommand '{}'. Use add / list / delete / sync / backup.",
+                "Unknown /kb subcommand '{}'. Use add / list / delete / sync / backup / restore.",
                 other
             ),
         }
@@ -390,7 +396,7 @@ fn print_help() {
    /config [k] [v]  Show or change app configuration (no arg: list all, -s for aliases)
    /restore [label] Restore the previous session (optionally specifying a label to switch to)
    /stats           Show LLM resource usage (per-model and session totals)
-   /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] (requires --features kb)
+   /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m

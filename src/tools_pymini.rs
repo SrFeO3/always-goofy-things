@@ -274,10 +274,10 @@ pub(crate) async fn execute(args: &serde_json::Value, write: bool) -> MiniPython
 /// Validate the request against the host policy. Returns the error
 /// envelope to send on failure.
 fn validate(request: &MiniPythonRequest) -> Option<MiniPythonError> {
-    if request.code.as_bytes().len() > MAX_CODE_BYTES {
+    if request.code.len() > MAX_CODE_BYTES {
         return Some(MiniPythonError::invalid_input(format!(
             "The program is {} bytes; the limit is {MAX_CODE_BYTES} bytes.",
-            request.code.as_bytes().len()
+            request.code.len()
         )));
     }
     if request.code.contains('\0') {
@@ -352,7 +352,6 @@ pub(crate) fn run(code: &str, root: &Path, write: bool, policy: &MiniPolicy) -> 
         // first suspension); classify it the same way.
         Err(e) => classify_exception(e),
     };
-    drop(print);
 
     // 5. Normalize: completed runs and sandbox exceptions share the
     //    `code_output` envelope; host-side failures use `error`.

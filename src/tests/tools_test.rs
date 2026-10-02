@@ -1013,26 +1013,26 @@ fn test_get_tool_definitions_kb_tools_with_kb_dir() {
         MiniPythonAutoConfirm::Ask,
         |_| true,
     );
-    let defs = get_tool_definitions(None, None, MiniPythonAutoConfirm::Ask, |_| true);
     let names: Vec<&str> = defs
         .iter()
         .map(|d| d["function"]["name"].as_str().unwrap())
         .collect();
     for n in [
-        "data_kb_search",
-        "data_kb_schema",
-        "data_kb_insert",
-        "data_kb_update",
+        "kb_search",
+        "kb_schema",
+        "kb_read",
+        "kb_insert",
+        "kb_update",
     ] {
         assert!(names.contains(&n), "{} must be registered with a KB dir", n);
     }
-    let defs = get_tool_definitions(None, None, |_| true);
+    let defs = get_tool_definitions(None, None, MiniPythonAutoConfirm::Ask, |_| true);
     let names: Vec<&str> = defs
         .iter()
         .map(|d| d["function"]["name"].as_str().unwrap())
         .collect();
     assert!(
-        !names.iter().any(|n| n.starts_with("data_kb_")),
+        !names.iter().any(|n| n.starts_with("kb_")),
         "KB tools must not be registered without a KB dir"
     );
 }
@@ -1230,7 +1230,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
 async fn kb_approval_gate_is_independent_of_global_reflex() {
     // ro: read tools auto-approve, write tools do not.
     let read_ro = confirm_execute_tool(
-        "data_kb_search",
+        "kb_search",
         &json!({ "query": "SELECT 1" }),
         false,
         false,
@@ -1244,7 +1244,7 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
     assert_eq!(read_ro.kind, ToolRunDecisionKind::AutoConfirm);
 
     let write_ro = confirm_execute_tool(
-        "data_kb_insert",
+        "kb_insert",
         &json!({ "document_id": "null" }),
         false,
         false,
@@ -1261,7 +1261,7 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
 
     // rw: writes auto-approve too.
     let write_rw = confirm_execute_tool(
-        "data_kb_update",
+        "kb_update",
         &json!({ "target_type": "documents", "target_id": "x" }),
         false,
         false,
@@ -1276,9 +1276,9 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
 
     // The global --unsafe-reflex must NOT leak into the KB gate at all.
     for (name, args) in [
-        ("data_kb_search", &json!({ "query": "SELECT 1" })),
-        ("data_kb_insert", &json!({ "document_id": "null" })),
-        ("data_kb_update", &json!({ "target_type": "documents" })),
+        ("kb_search", &json!({ "query": "SELECT 1" })),
+        ("kb_insert", &json!({ "document_id": "null" })),
+        ("kb_update", &json!({ "target_type": "documents" })),
     ] {
         let d = confirm_execute_tool(
             name,

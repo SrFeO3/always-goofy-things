@@ -1,7 +1,7 @@
 //! Pretty UI rendering for Knowledge Base tools.
 //!
-//! Provides a human-readable CLI display of the four KB tools (`data_kb_search` /
-//! `data_kb_schema` / `data_kb_insert` / `data_kb_update`) and the `/kb`
+//! Provides a human-readable CLI display of the five KB tools (`kb_search` /
+//! `kb_schema` / `kb_read` / `kb_insert` / `kb_update`) and the `/kb`
 //! command output. Mirrors the `pretty_data.rs` pattern: `pretty.rs` only
 //! dispatches, this module owns the rendering.
 
@@ -16,18 +16,29 @@ use crate::startup::{C_GRAY, C_GREEN, C_YELLOW, RESET};
 /// - update: target_type + target_id
 pub(crate) fn pretty_print_kb_command(name: &str, args: &Value) {
     match name {
-        "data_kb_search" => {
+        "kb_search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             println!("-- KB Query: {}{}{}", C_YELLOW, query, RESET);
         }
-        "data_kb_schema" => {
+        "kb_schema" => {
             let table = args
                 .get("table")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(all tables)");
             println!("-- KB Schema: {}{}{}", C_YELLOW, table, RESET);
         }
-        "data_kb_insert" => {
+        "kb_read" => {
+            let doc = args
+                .get("document_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let unit_type = args
+                .get("unit_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("all");
+            println!("-- KB Read: document {} (units: {})", doc, unit_type);
+        }
+        "kb_insert" => {
             let doc = args
                 .get("document_id")
                 .and_then(|v| v.as_str())
@@ -57,7 +68,7 @@ pub(crate) fn pretty_print_kb_command(name: &str, args: &Value) {
                 if count == 1 { "" } else { "s" }
             );
         }
-        "data_kb_update" => {
+        "kb_update" => {
             let tt = args
                 .get("target_type")
                 .and_then(|v| v.as_str())
@@ -74,7 +85,7 @@ pub(crate) fn pretty_print_kb_command(name: &str, args: &Value) {
 
 /// Compact result rendering.
 pub(crate) fn pretty_print_kb_result(result: &Value) {
-    // data_kb_search: CSV content
+    // kb_search: CSV content
     if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
         let lines: Vec<&str> = content.lines().collect();
         let shown: Vec<&str> = lines.iter().take(5).copied().collect();
@@ -120,6 +131,25 @@ pub(crate) fn pretty_print_kb_result(result: &Value) {
             && let Some(samples) = result.get("samples").and_then(|v| v.as_array())
         {
             println!("  {} sample row(s)", samples.len());
+        }
+        if let Some(units) = result.get("units").and_then(|v| v.as_array()) {
+            let truncated = result
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            println!(
+                "  {} unit(s){}",
+                units.len(),
+                if truncated { " (truncated)" } else { "" }
+            );
+            for u in units.iter().take(3) {
+                let ut = u.get("unit_type").and_then(|v| v.as_str()).unwrap_or("?");
+                let pos = u.get("position").and_then(|v| v.as_i64()).unwrap_or(0);
+                let text = u.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let preview: String = text.chars().take(60).collect();
+                let suffix = if text.chars().count() > 60 { "..." } else { "" };
+                println!("  - [{} #{}] {}{}", ut, pos, preview, suffix);
+            }
         }
         return;
     }
