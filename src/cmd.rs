@@ -64,6 +64,26 @@ pub fn try_handle_slash_command(
         return None;
     }
 
+    // Multi-line input (e.g. pasting several slash commands at once): run each
+    // `/`-prefixed line as its own command so a paste is not treated as one
+    // command with a multi-line argument.
+    if trimmed.contains('\n') {
+        let mut result = SlashCmdResult::NoAdvance;
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if !line.starts_with('/') {
+                continue;
+            }
+            match try_handle_slash_command(line, session, settings, metrics, kb_ctx) {
+                Some(SlashCmdResult::Exit) => return Some(SlashCmdResult::Exit),
+                Some(SlashCmdResult::NoAdvance) => {}
+                Some(r) => result = r,
+                None => {}
+            }
+        }
+        return Some(result);
+    }
+
     let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
     let cmd = parts[0].to_lowercase();
     let arg = parts.get(1).map(|s| s.trim());

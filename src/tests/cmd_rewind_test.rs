@@ -292,6 +292,35 @@ fn slash_dispatch_maps_rewind_to_rewoundto_and_truncates_session() {
     spawn_child("helper_slash_dispatch_rewind_truncates_session", b"y\n");
 }
 
+/// Multi-line slash input (a paste of several commands) is dispatched line by
+/// line, not treated as one command with a multi-line argument.
+#[test]
+fn slash_dispatch_multiline_runs_each_line() {
+    use clap::Parser;
+
+    let config = crate::startup::Config::try_parse_from(["agt"]).unwrap();
+    let mut session = Session {
+        id: "ml-session".to_string(),
+        label: "ml".to_string(),
+        messages: history(1),
+        turn: 2,
+    };
+    let mut settings = Settings::from_config(&config);
+
+    let result = try_handle_slash_command(
+        "/model foo\n/config v 3",
+        &mut session,
+        &mut settings,
+        &Metrics::default(),
+        None,
+    )
+    .expect("multi-line slash input must dispatch");
+
+    assert_eq!(result, SlashCmdResult::NoAdvance);
+    assert_eq!(settings.llm_model, "foo", "first line must run");
+    assert_eq!(settings.verbose_level, 3, "second line must run");
+}
+
 // ---------------------------------------------------------------------------
 // Subprocess-driven flows (confirmation reads real stdin)
 // ---------------------------------------------------------------------------
