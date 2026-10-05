@@ -318,13 +318,135 @@ fn insert_reuses_existing_claim() {
     assert_eq!(count, 1);
 }
 
-/// A claim / relation / event that declares a local ref must be backed by an
-/// evidence item in the same call.
+/// Re-analysis must not create duplicate relation / condition / event rows:
+/// re-inserting the same dedup key reuses the existing row.
 #[test]
-fn insert_requires_evidence_for_refd_items() {
+fn insert_reuses_existing_relation_condition_event() {
     let ctx = mem_ctx();
     let doc = add_doc(&ctx, "doc", "data/doc.md");
 
+    let r = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [
+                { "ref": "e1", "name": "甲社" },
+                { "ref": "e2", "name": "乙社" }
+            ]
+        }),
+    )
+    .unwrap();
+    let e1 = r["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let e2 = r["inserted"]["entities"][1]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A claim to serve as the condition target.
+    let rc = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }],
+            "evidence": [{ "target_type": "claim", "target_ref": "c1", "matched_text": "A is B" }]
+        }),
+    )
+    .unwrap();
+    let c1 = rc["inserted"]["claims"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let insert = || {
+        execute_kb_insert(
+            &ctx,
+            &json!({
+                "document_id": doc,
+                "relations": [{
+                    "ref": "r1", "relation_type": "causes",
+                    "source_type": "entity", "source_id": e1,
+                    "target_type": "entity", "target_id": e2
+                }],
+                "conditions": [{
+                    "target_type": "claim", "target_id": c1,
+                    "condition_type": "exception",
+                    "expression": { "op": "raw", "text": "unless X" }
+                }],
+                "events": [{
+                    "ref": "ev1", "event_type": "publication",
+                    "subject_id": e1, "sort_key": "2024-00-00"
+                }],
+                "evidence": [
+                    { "target_type": "relation", "target_ref": "r1", "matched_text": "x" },
+                    { "target_type": "event", "target_ref": "ev1", "matched_text": "x" }
+                ]
+            }),
+        )
+        .unwrap()
+    };
+
+    let first = insert();
+    let rel_id = first["inserted"]["relations"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ev_id = first["inserted"]["events"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cond_id = first["inserted"]["conditions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let second = insert();
+    assert_eq!(
+        second["inserted"]["relations"][0]["reused"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        second["inserted"]["relations"][0]["id"].as_str().unwrap(),
+        rel_id
+    );
+    assert_eq!(
+        second["inserted"]["events"][0]["reused"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        second["inserted"]["events"][0]["id"].as_str().unwrap(),
+        ev_id
+    );
+    assert_eq!(
+        second["inserted"]["conditions"][0]["reused"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        second["inserted"]["conditions"][0]["id"].as_str().unwrap(),
+        cond_id
+    );
+
+    let conn = ctx.conn.lock().unwrap();
+    let count = |table: &str| -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count("relations"), 1);
+    assert_eq!(count("events"), 1);
+    assert_eq!(count("conditions"), 1);
+}
+
+/// Every inserted claim / relation / event must be backed by an evidence row
+/// in the same call (new rows) or already exist (reused rows). A missing ref
+/// means a new row cannot be evidenced and is rejected.
+#[test]
+fn insert_requires_evidence() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    // Claim with ref but no evidence.
     let err = execute_kb_insert(
         &ctx,
         &json!({
@@ -336,6 +458,32 @@ fn insert_requires_evidence_for_refd_items() {
     .to_string();
     assert!(err.contains("[KB_EVIDENCE_REQUIRED]"), "{}", err);
 
+    // Claim without ref and without evidence is rejected too (nothing to evidence).
+    let err = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "subject_value": "A", "predicate": "is", "object_value": "B" }]
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("[KB_EVIDENCE_REQUIRED]"), "{}", err);
+
+    // Relation with ref but no evidence.
+    let err = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "entities": [{ "ref": "e1", "name": "甲社" }, { "ref": "e2", "name": "乙社" }],
+            "relations": [{ "ref": "r1", "relation_type": "causes", "source_type": "entity", "source_ref": "e1", "target_type": "entity", "target_ref": "e2" }]
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("[KB_EVIDENCE_REQUIRED]"), "{}", err);
+
+    // Claim with ref + evidence succeeds.
     let res = execute_kb_insert(
         &ctx,
         &json!({
@@ -346,6 +494,123 @@ fn insert_requires_evidence_for_refd_items() {
     )
     .unwrap();
     assert_eq!(res["total"].as_u64(), Some(2));
+}
+
+/// Evidence can be attached to an existing row by target_id in a later call
+/// (remediation); the row then satisfies the evidence requirement.
+#[test]
+fn evidence_by_target_id_attaches_to_existing_row() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let res = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }],
+            "evidence": [{ "target_type": "claim", "target_ref": "c1", "matched_text": "A is B" }]
+        }),
+    )
+    .unwrap();
+    let c1 = res["inserted"]["claims"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A second, evidence-only call targeting the existing claim by id.
+    execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "evidence": [{ "target_type": "claim", "target_id": c1, "matched_text": "A is B again" }]
+        }),
+    )
+    .unwrap();
+
+    let n: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM evidence WHERE target_type = 'claim' AND target_id = ?1",
+            [&c1],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+/// A cross-document relation's evidence derives its document_id from the
+/// source unit, so cross-doc relations can carry evidence too.
+#[test]
+fn cross_doc_relation_evidence_derives_document_id() {
+    let ctx = mem_ctx();
+    let a = add_doc(&ctx, "a", "data/a.md");
+    let b = add_doc(&ctx, "b", "data/b.md");
+
+    let ra = execute_kb_insert(
+        &ctx,
+        &json!({ "document_id": a, "entities": [{ "ref": "e1", "name": "甲社" }] }),
+    )
+    .unwrap();
+    let e1 = ra["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rb = execute_kb_insert(
+        &ctx,
+        &json!({ "document_id": b, "entities": [{ "ref": "e2", "name": "乙社" }] }),
+    )
+    .unwrap();
+    let e2 = rb["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let unit = Uuid::new_v4().to_string();
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document_units (id, document_id, unit_type, text, position) \
+             VALUES (?1, ?2, 'paragraph', '甲社が乙社を買収', 0)",
+            params![unit, a],
+        )
+        .unwrap();
+    }
+
+    execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": "null",
+            "relations": [{
+                "ref": "r1",
+                "relation_type": "causes",
+                "source_type": "entity", "source_id": e1,
+                "target_type": "entity", "target_id": e2
+            }],
+            "evidence": [{
+                "target_type": "relation", "target_ref": "r1",
+                "source_unit_id": unit, "matched_text": "甲社が乙社を買収"
+            }]
+        }),
+    )
+    .unwrap();
+
+    let conn = ctx.conn.lock().unwrap();
+    let (ev_doc, rel_doc): (String, Option<String>) = conn
+        .query_row(
+            "SELECT e.document_id, r.document_id FROM evidence e \
+             JOIN relations r ON r.id = e.target_id \
+             WHERE e.target_type = 'relation' LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        ev_doc, a,
+        "evidence.document_id must derive from the source unit"
+    );
+    assert_eq!(rel_doc, None, "cross-doc relation document_id is NULL");
 }
 
 /// kb_insert can create canonical entities and link document entities to them
@@ -554,6 +819,170 @@ fn current_views_exclude_superseded_documents() {
         relations, 1,
         "cross-document relation must stay; superseded-tied relation must go"
     );
+}
+
+/// The provenance view `v_claims_with_evidence` must also be current-version
+/// only: superseded document claims must not leak into it (v3 migration).
+#[test]
+fn v_claims_with_evidence_excludes_superseded_documents() {
+    let ctx = mem_ctx();
+    let old = add_doc(&ctx, "old", "data/old.md");
+    let cur = add_doc(&ctx, "cur", "data/cur.md");
+
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO claims (id, document_id, subject_value, predicate, object_value) \
+             VALUES (?1, ?2, 's', 'old-pred', 'o')",
+            params![Uuid::new_v4().to_string(), old],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claims (id, document_id, subject_value, predicate, object_value) \
+             VALUES (?1, ?2, 's', 'cur-pred', 'o')",
+            params![Uuid::new_v4().to_string(), cur],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE documents SET superseded_by = ?1 WHERE id = ?2",
+            params![cur, old],
+        )
+        .unwrap();
+    }
+
+    let conn = ctx.conn.lock().unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM v_claims_with_evidence", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 1, "superseded document's claims must be excluded");
+
+    let pred: String = conn
+        .query_row("SELECT predicate FROM v_claims_with_evidence", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        pred, "cur-pred",
+        "only the current document's claim must remain"
+    );
+}
+
+/// kb_read resolves a source/title key to the CURRENT version (never a
+/// superseded one), for exact source paths, bare filenames, and titles.
+#[test]
+fn kb_read_resolves_current_version_by_source() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "rfc9110", "data/rfc9110.txt");
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document_units (id, document_id, unit_type, text, position) \
+             VALUES (?1, ?2, 'paragraph', 'The current body', 0)",
+            params![Uuid::new_v4().to_string(), doc],
+        )
+        .unwrap();
+    }
+
+    // Exact source path.
+    let r = execute_kb_read(&ctx, &json!({ "source": "data/rfc9110.txt" })).unwrap();
+    assert_eq!(r["units"][0]["text"].as_str(), Some("The current body"));
+
+    // Bare filename (source suffix).
+    let r = execute_kb_read(&ctx, &json!({ "source": "rfc9110.txt" })).unwrap();
+    assert_eq!(r["units"][0]["text"].as_str(), Some("The current body"));
+
+    // Title (stem without extension).
+    let r = execute_kb_read(&ctx, &json!({ "source": "rfc9110" })).unwrap();
+    assert_eq!(r["units"][0]["text"].as_str(), Some("The current body"));
+
+    // A superseded version must never be resolved.
+    let v2 = add_doc(&ctx, "rfc9110", "data/rfc9110.txt");
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document_units (id, document_id, unit_type, text, position) \
+             VALUES (?1, ?2, 'paragraph', 'The new body', 0)",
+            params![Uuid::new_v4().to_string(), v2],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE documents SET superseded_by = ?1 WHERE id = ?2",
+            params![v2, doc],
+        )
+        .unwrap();
+    }
+    let r = execute_kb_read(&ctx, &json!({ "source": "data/rfc9110.txt" })).unwrap();
+    assert_eq!(
+        r["units"][0]["text"].as_str(),
+        Some("The new body"),
+        "must resolve to the current (non-superseded) version"
+    );
+}
+
+/// Ambiguous or invalid source keys return a structured note (candidate list)
+/// or a clear error (never a silent guess).
+#[test]
+fn kb_read_source_reports_ambiguity_and_errors() {
+    let ctx = mem_ctx();
+    let x = add_doc(&ctx, "notes", "data/x/notes.md");
+    let _y = add_doc(&ctx, "notes", "data/y/notes.md");
+
+    // Ambiguous bare filename -> candidate list.
+    let err = execute_kb_read(&ctx, &json!({ "source": "notes.md" }))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("[KB_AMBIGUOUS]"), "{}", err);
+    assert!(
+        err.contains("data/x/notes.md") && err.contains("data/y/notes.md"),
+        "{}",
+        err
+    );
+
+    // Unknown key -> structured not-found.
+    let err = execute_kb_read(&ctx, &json!({ "source": "missing.md" }))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("[KB_NOT_FOUND]"), "{}", err);
+
+    // Both document_id and source -> conflict.
+    let err = execute_kb_read(
+        &ctx,
+        &json!({ "document_id": x, "source": "data/x/notes.md" }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("[KB_CONFLICT]"), "{}", err);
+
+    // Neither -> missing fields.
+    let err = execute_kb_read(&ctx, &json!({})).unwrap_err().to_string();
+    assert!(err.contains("[KB_MISSING_FIELDS]"), "{}", err);
+}
+
+/// v4 migration adds composite indexes for the hot dedup lookups.
+#[test]
+fn migrate_v4_adds_dedup_indexes() {
+    let ctx = mem_ctx();
+    let conn = ctx.conn.lock().unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 4);
+    for name in [
+        "idx_entities_doc_norm_type",
+        "idx_claims_doc_fingerprint",
+        "idx_canonical_entities_name_type",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "index {} must exist", name);
+    }
 }
 
 /// 3. kb_update: annotations versioned; current value = latest version.
@@ -854,15 +1283,33 @@ fn delete_cascades_and_cleans_cross_doc_relations() {
         .unwrap()
         .to_string();
 
-    // Cross-document relation (document_id = "null").
+    // A unit in doc a to back the cross-doc relation's evidence.
+    let unit = Uuid::new_v4().to_string();
+    {
+        let conn = ctx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document_units (id, document_id, unit_type, text, position) \
+             VALUES (?1, ?2, 'paragraph', '甲社が乙社を買収', 0)",
+            params![unit, a],
+        )
+        .unwrap();
+    }
+
+    // Cross-document relation (document_id = "null"); evidence derives its
+    // document_id from the source unit.
     execute_kb_insert(
         &ctx,
         &json!({
             "document_id": "null",
             "relations": [{
+                "ref": "r1",
                 "relation_type": "causes",
                 "source_type": "entity", "source_id": e1,
                 "target_type": "entity", "target_id": e2
+            }],
+            "evidence": [{
+                "target_type": "relation", "target_ref": "r1",
+                "source_unit_id": unit, "matched_text": "甲社が乙社を買収"
             }]
         }),
     )

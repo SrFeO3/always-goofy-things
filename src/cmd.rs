@@ -12,7 +12,7 @@
 //! - `/config [k] [v]`: Show or change app configuration (no arg: list all, -s/--short for aliases)
 //! - `/restore [label]`: Restore the previous session, optionally for a specific label.
 //! - `/stats`: Show LLM resource usage (per-model and session totals).
-//! - `/kb add|list|delete|sync|backup`: Knowledge Base commands (kb feature).
+//! - `/kb add|list|delete|sync|backup|restore`: Knowledge Base commands (kb feature).
 //! - `/exit`, `/quit`, `exit`, `quit`: Exit the application.
 
 use std::io::{self, Write};
@@ -151,7 +151,7 @@ pub fn try_handle_slash_command(
 // /kb
 // ---------------------------------------------------------------------------
 
-/// Handle `/kb <subcommand>`: add / list / delete / sync / backup.
+/// Handle `/kb <subcommand>`: add / list / delete / sync / backup / restore.
 /// With the `kb` feature on, a KB directory is always resolved (explicit
 /// `--kb-dir` / `KB_DIR`, or the app-data default), so the guidance branches
 /// below are defensive only. All DB/file work is delegated to `kb.rs`.

@@ -34,3 +34,6 @@ Adding OpenAI Responses API compatibility and OpenCode Go via --provider-extras;
 
 ## v0.7.0 (2026-09 early) - Local KB
 Local KB (--features kb): builds a searchable knowledge base from your documents; AI extracts structured knowledge (entities / claims / relations, with evidence to source) into SQLite and answers via kb_* tools. Details: docs/kb.md
+
+## v0.8.0 (2026-09 end) - rework GUI
+GUI reworked as a CLI process shell; multi-line input via Ctrl+O in CLI and GUI.

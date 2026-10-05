@@ -113,7 +113,7 @@ pub(crate) fn table_meta() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "v_claims_with_evidence",
-            "View: claims + evidence + source-unit excerpt in one query (prevents JOIN mistakes)",
+            "View: current-version claims + evidence + source-unit excerpt in one query (prevents JOIN mistakes)",
         ),
         (
             "v_document_units_current",
@@ -462,6 +462,49 @@ WHERE obsolete = 0
   AND document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
 "#;
 
+/// Schema v3: make `v_claims_with_evidence` current-version only. v2 added the
+/// `v_*_current` views but left this provenance view filtering only `obsolete`,
+/// so superseded document versions could still leak into it. Recreate it with
+/// the same current-document filter as `v_claims_current`.
+const DDL_V3: &str = r#"
+DROP VIEW IF EXISTS v_claims_with_evidence;
+CREATE VIEW v_claims_with_evidence AS
+SELECT c.id            AS claim_id,
+       c.document_id,
+       c.subject_id,
+       c.subject_value,
+       c.object_id,
+       c.object_value,
+       c.predicate,
+       c.modality,
+       c.polarity,
+       c.confidence,
+       c.annotations,
+       e.id            AS evidence_id,
+       e.start_offset,
+       e.end_offset,
+       e.matched_text,
+       u.id            AS source_unit_id,
+       u.unit_type,
+       u.position,
+       u.text          AS unit_text
+FROM claims c
+LEFT JOIN evidence e  ON e.target_type = 'claim' AND e.target_id = c.id AND e.obsolete = 0
+LEFT JOIN document_units u ON u.id = e.source_unit_id AND u.obsolete = 0
+WHERE c.obsolete = 0
+  AND c.document_id IN (SELECT id FROM documents WHERE superseded_by IS NULL);
+"#;
+
+/// Schema v4: composite indexes for the hot dedup lookups. These columns were
+/// previously indexed only individually, so each re-analysis dedup probe could
+/// scan within a document. `CREATE INDEX IF NOT EXISTS` keeps this idempotent
+/// for existing databases.
+const DDL_V4: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_entities_doc_norm_type ON entities(document_id, name_norm, entity_type);
+CREATE INDEX IF NOT EXISTS idx_claims_doc_fingerprint ON claims(document_id, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_canonical_entities_name_type ON canonical_entities(name, entity_type);
+"#;
+
 /// Run pending schema migrations (idempotent; starts at user_version = 0).
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
@@ -481,6 +524,18 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             .context("[KB_CONFIG_ERROR] Failed to apply KB schema v2")?;
         conn.execute_batch("PRAGMA user_version = 2;")
             .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 2")?;
+    }
+    if version < 3 {
+        conn.execute_batch(DDL_V3)
+            .context("[KB_CONFIG_ERROR] Failed to apply KB schema v3")?;
+        conn.execute_batch("PRAGMA user_version = 3;")
+            .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 3")?;
+    }
+    if version < 4 {
+        conn.execute_batch(DDL_V4)
+            .context("[KB_CONFIG_ERROR] Failed to apply KB schema v4")?;
+        conn.execute_batch("PRAGMA user_version = 4;")
+            .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 4")?;
     }
     Ok(())
 }

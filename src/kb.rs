@@ -2,7 +2,7 @@
 //!
 //! Executes the five KB tools (read: `kb_search` / `kb_schema` /
 //! `kb_read`, write: `kb_insert` / `kb_update`) and the `/kb` command
-//! (add / list / delete / sync / backup) against the single SQLite file
+//! (add / list / delete / sync / backup / restore) against the single SQLite file
 //! `<kb>/db/library.sqlite`. KB tools are KB-dedicated, with an approval
 //! gate independent of `reflex` (`tools::confirm_execute_tool`).
 
@@ -495,13 +495,17 @@ pub(crate) fn build_kb_read_def() -> Value {
         "type": "function",
         "function": {
             "name": "kb_read",
-            "description": "Read the text of document units (paragraphs/pages) from the Knowledge Base so you can analyze a document's content. Returns units in position order with their id, unit_type, position, parent_id, and text, plus a total count of matching units. Prefer this over kb_search for reading a document's body. For a PDF, pass unit_type=\"page\" to read full page text in page order.",
+            "description": "Read the text of document units (paragraphs/pages) from the Knowledge Base so you can analyze a document's content. Returns units in position order with their id, unit_type, position, parent_id, and text, plus a total count of matching units. Prefer this over kb_search for reading a document's body. For a PDF, pass unit_type=\"page\" to read full page text in page order. Identify the document by EITHER its exact document_id (UUID) or a source/title key: pass 'source' and it is resolved to the CURRENT version automatically; if it matches several current documents the tool returns the candidate list for you to pick the right document_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "document_id": {
                         "type": "string",
-                        "description": "UUID of the document (documents.id). Get it from /kb list or by querying documents via kb_search. Required."
+                        "description": "UUID of the document (documents.id). Get it from /kb list or by querying documents via kb_search. Provide EITHER document_id OR source (not both)."
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Registered source path or filename to resolve to the current version (superseded_by IS NULL). Accepts the exact source (e.g. 'data/rfc9110.txt'), a bare filename ('rfc9110.txt'), or a title ('rfc9110'). Resolves automatically when exactly one current document matches; otherwise returns a structured note listing the candidates."
                     },
                     "unit_type": {
                         "type": "string",
@@ -524,7 +528,7 @@ pub(crate) fn build_kb_read_def() -> Value {
                         "description": "Optional number of units to skip, for paging."
                     }
                 },
-                "required": ["document_id"]
+                "required": []
             }
         }
     })
@@ -533,10 +537,29 @@ pub(crate) fn build_kb_read_def() -> Value {
 /// Read document units (paragraphs/pages) in position order, bounded by
 /// `max_bytes` (trailing units are trimmed to keep the JSON valid).
 pub(crate) fn execute_kb_read(ctx: &KbContext, args: &Value) -> Result<Value> {
-    let doc_id = args
+    let doc_id_arg = args
         .get("document_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("[KB_MISSING_FIELDS] Missing required 'document_id'."))?;
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let doc_id = match (doc_id_arg, source) {
+        (Some(_), Some(_)) => {
+            bail!("[KB_CONFLICT] Provide exactly one of 'document_id' or 'source', not both.")
+        }
+        (Some(id), None) => id.to_string(),
+        (None, Some(key)) => {
+            let conn = lock_conn(ctx)?;
+            resolve_document_id(&conn, key)?
+        }
+        (None, None) => bail!(
+            "[KB_MISSING_FIELDS] Provide 'document_id' (UUID) or 'source' (path/filename) to select the document."
+        ),
+    };
     let unit_type = args.get("unit_type").and_then(|v| v.as_str());
     let start = args.get("start_position").and_then(|v| v.as_i64());
     let end = args.get("end_position").and_then(|v| v.as_i64());
@@ -602,6 +625,75 @@ pub(crate) fn execute_kb_read(ctx: &KbContext, args: &Value) -> Result<Value> {
         }
         units.pop();
         truncated = true;
+    }
+}
+
+/// Resolve a `source`/`title` key to the id of its CURRENT document version.
+/// A deterministic single match is resolved automatically; zero or several
+/// matches return a structured note so the LLM can disambiguate (never a
+/// silent guess, and never a superseded version).
+fn resolve_document_id(conn: &Connection, key: &str) -> Result<String> {
+    let has_sep = key.contains('/') || key.contains('\\');
+    let rows: Vec<(String, String, String, String, String)> = if has_sep {
+        // Path form: exact `source` (what /kb list shows).
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source, title, version, analysis_status FROM documents \
+                 WHERE superseded_by IS NULL AND source = ?1 ORDER BY source",
+            )
+            .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+        stmt.query_map(params![key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        // Bare filename / title: exact source, exact title, title-without-
+        // extension, or a `*/<name>` source suffix.
+        let stem = Path::new(key)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(key);
+        let suffix = format!("%/{}", key);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source, title, version, analysis_status FROM documents \
+                 WHERE superseded_by IS NULL \
+                   AND (source = ?1 OR title = ?1 OR title = ?2 OR source LIKE ?3) \
+                 ORDER BY source",
+            )
+            .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+        stmt.query_map(params![key, stem, suffix], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    match rows.as_slice() {
+        [] => bail!(
+            "[KB_NOT_FOUND] No current document matches '{}'. Find the exact id with /kb list or \
+             kb_search (SELECT id, source, title, version FROM documents WHERE superseded_by IS NULL), \
+             then pass document_id.",
+            key
+        ),
+        [(id, _, _, _, _)] => Ok(id.clone()),
+        many => {
+            let mut list = String::new();
+            for (id, source, title, version, status) in many {
+                list.push_str(&format!(
+                    "\n  - source='{}' title='{}' version='{}' status='{}' id={}",
+                    source, title, version, status, id
+                ));
+            }
+            bail!(
+                "[KB_AMBIGUOUS] '{}' matches {} current documents; pass the exact document_id of the \
+                 intended one:{}",
+                key,
+                many.len(),
+                list
+            );
+        }
     }
 }
 
@@ -780,7 +872,7 @@ pub(crate) fn build_kb_insert_def() -> Value {
         "type": "function",
         "function": {
             "name": "kb_insert",
-            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Every claim, relation, and event must be accompanied by an evidence item with verbatim matched_text from its source unit. Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via kb_update. Entities are deduplicated: re-inserting an entity with the same name (normalized) and entity_type reuses the existing row (reported with reused=true).",
+            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Every claim, relation, and event must be accompanied by an evidence item with verbatim matched_text from its source unit: give the item a ref and add a matching evidence item (target_type + target_ref) in the same call. In a cross-document call, evidence needs source_unit_id so its document_id can be derived. Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via kb_update. Entities are deduplicated: re-inserting an entity with the same name (normalized) and entity_type reuses the existing row (reported with reused=true). Relations, conditions, and events are also deduplicated by their key (relation: source+type+target, condition: target+type, event: subject+event_type+sort_key) and reported with reused=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -795,12 +887,12 @@ pub(crate) fn build_kb_insert_def() -> Value {
                     },
                     "claims": {
                         "type": "array",
-                        "description": "Claims/facts to insert. Item fields: predicate (required), subject (required: subject_id UUID, subject_ref local ref, or subject_value object for unextracted subjects), object (optional, same three forms), modality (optional, default assertion: fact/assertion/hypothesis/prediction/possibility/requirement/recommendation/opinion), confidence (optional 0..1), attributes (optional object), ref (optional).",
+                        "description": "Claims/facts to insert. Item fields: predicate (required), subject (required: subject_id UUID, subject_ref local ref, or subject_value object for unextracted subjects), object (optional, same three forms), modality (optional, default assertion: fact/assertion/hypothesis/prediction/possibility/requirement/recommendation/opinion), confidence (optional 0..1), attributes (optional object), ref (required so evidence can target this item).",
                         "items": { "type": "object" }
                     },
                     "relations": {
                         "type": "array",
-                        "description": "Relations between knowledge items. Item fields: relation_type (required, e.g. causes/depends_on/contradicts/supports/precedes/qualifies), source_type + source_id (or source_ref), target_type + target_id (or target_ref), confidence (optional), attributes (optional). source_type/target_type: entity/claim/event/document_unit.",
+                        "description": "Relations between knowledge items. Item fields: relation_type (required, e.g. causes/depends_on/contradicts/supports/precedes/qualifies), source_type + source_id (or source_ref), target_type + target_id (or target_ref), confidence (optional), attributes (optional). source_type/target_type: entity/claim/event/document_unit. ref (required so evidence can target this item).",
                         "items": { "type": "object" }
                     },
                     "conditions": {
@@ -810,12 +902,12 @@ pub(crate) fn build_kb_insert_def() -> Value {
                     },
                     "events": {
                         "type": "array",
-                        "description": "Events/timeline items. Item fields: event_type (optional), subject_id (or subject_ref, optional), start_time (optional text, ambiguous allowed e.g. \"around 2026\"), end_time (optional), sort_key (optional normalized key for sorting, e.g. \"2026-00-00\"), precision (optional: year/month/day).",
+                        "description": "Events/timeline items. Item fields: event_type (optional), subject_id (or subject_ref, optional), start_time (optional text, ambiguous allowed e.g. \"around 2026\"), end_time (optional), sort_key (optional normalized key for sorting, e.g. \"2026-00-00\"), precision (optional: year/month/day). ref (required so evidence can target this item).",
                         "items": { "type": "object" }
                     },
                     "evidence": {
                         "type": "array",
-                        "description": "Provenance: which source passage supports a target item. Item fields: target_type (required: entity/claim/relation/event/condition) + target_id (or target_ref), source_unit_id (or source_unit_ref, optional - the document_units.id backing this item; omit only for inferred items), start_offset/end_offset (optional character offsets into the unit text), matched_text (required verbatim excerpt copied from the source unit; never paraphrase or invent), evidence_type (optional).",
+                        "description": "Provenance: which source passage supports a target item. Item fields: target_type (required: entity/claim/relation/event/condition) + target_id (or target_ref), source_unit_id (or source_unit_ref, required in cross-document calls so evidence's document_id can be derived; otherwise optional and omitted only for inferred items), start_offset/end_offset (optional character offsets into the unit text), matched_text (required verbatim excerpt copied from the source unit; never paraphrase or invent), evidence_type (optional).",
                         "items": { "type": "object" }
                     },
                     "canonical_entities": {
@@ -914,44 +1006,6 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
         assigned.insert(kind.to_string(), out);
     }
 
-    // Evidence enforcement: ref'd claims/relations/events need evidence in-call.
-    let evidenced: Vec<(String, String)> = args
-        .get("evidence")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| {
-                    let tt = e.get("target_type").and_then(|v| v.as_str())?.to_string();
-                    let tr = e.get("target_ref").and_then(|v| v.as_str())?.to_string();
-                    Some((tt, tr))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    for (kind, target_type) in [
-        ("claims", "claim"),
-        ("relations", "relation"),
-        ("events", "event"),
-    ] {
-        if let Some(items) = args.get(kind).and_then(|v| v.as_array()) {
-            for item in items {
-                let Some(r) = item.get("ref").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if !evidenced.contains(&(target_type.to_string(), r.to_string())) {
-                    bail!(
-                        "[KB_EVIDENCE_REQUIRED] {} with ref '{}' has no evidence in this call. \
-                         Add an evidence item with target_type=\"{}\" and target_ref=\"{}\".",
-                        kind,
-                        r,
-                        target_type,
-                        r
-                    );
-                }
-            }
-        }
-    }
-
     let mut conn = lock_conn(ctx)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -959,6 +1013,8 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
 
     let mut inserted: Map<String, Value> = Map::new();
     let mut total = 0usize;
+    // (target_type, final_id, ref_name) of inserted items that must be evidenced.
+    let mut to_verify: Vec<(String, String, String)> = Vec::new();
 
     for kind in KINDS {
         let items = assigned.remove(kind).unwrap_or_default();
@@ -979,6 +1035,13 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
                 refs.insert(r.to_string(), (kind.to_string(), final_id.clone()));
             }
             let ref_name = item.get("ref").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(target_type) = evidence_target_type(kind) {
+                to_verify.push((
+                    target_type.to_string(),
+                    final_id.clone(),
+                    ref_name.to_string(),
+                ));
+            }
             ids.push(json!({
                 "ref": if ref_name.is_empty() { Value::Null } else { Value::String(ref_name.to_string()) },
                 "id": final_id,
@@ -991,10 +1054,48 @@ pub(crate) fn execute_kb_insert(ctx: &KbContext, args: &Value) -> Result<Value> 
         }
     }
 
+    // Evidence enforcement: every inserted claim/relation/event must have at
+    // least one evidence row (from this call, or from an earlier call for a
+    // reused row). Cross-document evidence's document_id is derived at insert.
+    for (target_type, id, ref_name) in &to_verify {
+        let n: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM evidence \
+                 WHERE target_type = ?1 AND target_id = ?2 AND obsolete = 0",
+                params![target_type, id],
+                |r| r.get(0),
+            )
+            .map_err(|e| anyhow!("[KB_INTERNAL_ERROR] {}", e))?;
+        if n == 0 {
+            let label = if ref_name.is_empty() {
+                format!("{} id '{}'", target_type, id)
+            } else {
+                format!("{} with ref '{}'", target_type, ref_name)
+            };
+            bail!(
+                "[KB_EVIDENCE_REQUIRED] {} has no evidence in this call. Add an evidence item with \
+                 target_type=\"{}\" and target_ref/target_id pointing at it.",
+                label,
+                target_type
+            );
+        }
+    }
+
     tx.commit()
         .map_err(|e| anyhow!("[KB_EXEC_ERROR] Transaction commit failed: {}", e))?;
 
     Ok(json!({ "status": "ok", "inserted": inserted, "total": total }))
+}
+
+/// Map an insert kind to the evidence `target_type` it must carry. Returns
+/// `None` for kinds that are not subject to evidence enforcement.
+fn evidence_target_type(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claims" => Some("claim"),
+        "relations" => Some("relation"),
+        "events" => Some("event"),
+        _ => None,
+    }
 }
 
 /// Insert a single knowledge item (dispatch by kind).
@@ -1128,6 +1229,21 @@ fn insert_item(
             let confidence = item.get("confidence").and_then(|v| v.as_f64());
             let attributes = json_to_text(item.get("attributes")).unwrap_or_else(|| "{}".into());
             let document_col: Option<&str> = if is_cross_doc { None } else { Some(doc_id) };
+            // Dedup: reuse an existing non-obsolete relation (document_id, source,
+            // relation_type, target).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM relations \
+                     WHERE document_id IS ?1 AND source_type = ?2 AND source_id = ?3 \
+                       AND relation_type = ?4 AND target_type = ?5 AND target_id = ?6 AND obsolete = 0 \
+                     LIMIT 1",
+                    params![document_col, source_type, source_id, relation_type, target_type, target_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
             tx.execute(
                 "INSERT INTO relations (id, document_id, source_type, source_id, relation_type, target_type, target_id, confidence, attributes, annotations, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '{}', ?10, 0)",
@@ -1170,6 +1286,20 @@ fn insert_item(
                 )
                 .ok();
             let doc = doc.filter(|d| !d.is_empty());
+            // Dedup: reuse an existing non-obsolete condition (document_id, target, type).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM conditions \
+                     WHERE document_id IS ?1 AND target_type = ?2 AND target_id = ?3 \
+                       AND condition_type = ?4 AND obsolete = 0 \
+                     LIMIT 1",
+                    params![doc, target_type, target_id, condition_type],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
             tx.execute(
                 "INSERT INTO conditions (id, document_id, target_type, target_id, condition_type, expression, annotations, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7, 0)",
@@ -1188,6 +1318,21 @@ fn insert_item(
                 .and_then(|v| v.as_str())
                 .unwrap_or("day");
             let attributes = json_to_text(item.get("attributes")).unwrap_or_else(|| "{}".into());
+            // Dedup: reuse an existing non-obsolete event (document_id, subject,
+            // event_type, sort_key).
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM events \
+                     WHERE document_id = ?1 AND subject_id IS ?2 AND event_type IS ?3 \
+                       AND sort_key IS ?4 AND obsolete = 0 \
+                     LIMIT 1",
+                    params![doc_id, subject_id, event_type, sort_key],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(existing_id) = existing {
+                return Ok(existing_id);
+            }
             tx.execute(
                 "INSERT INTO events (id, document_id, event_type, subject_id, start_time, end_time, sort_key, precision, attributes, annotations, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '{}', ?10, 0)",
@@ -1268,11 +1413,32 @@ fn insert_item(
             let end_offset = item.get("end_offset").and_then(|v| v.as_i64());
             let matched_text = item.get("matched_text").and_then(|v| v.as_str());
             let evidence_type = item.get("evidence_type").and_then(|v| v.as_str());
+            // Evidence belongs to a document. A cross-document call has no single
+            // document, so derive it from the source unit (required in that case).
+            let ev_doc: Option<String> = if is_cross_doc {
+                match source_unit_id.as_deref() {
+                    Some(suid) => tx
+                        .query_row(
+                            "SELECT document_id FROM document_units WHERE id = ?1",
+                            [suid],
+                            |r| r.get(0),
+                        )
+                        .ok(),
+                    None => None,
+                }
+            } else {
+                Some(doc_id.to_string())
+            };
+            let ev_doc = ev_doc.ok_or_else(|| {
+                anyhow!(
+                    "[KB_MISSING_FIELDS] evidence in a cross-document call needs a source_unit_id to derive its document_id."
+                )
+            })?;
             tx.execute(
                 "INSERT INTO evidence (id, document_id, source_unit_id, target_type, target_id, start_offset, end_offset, matched_text, evidence_type, analysis_run_id, obsolete) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)",
                 params![
-                    id, doc_id, source_unit_id, target_type, target_id, start_offset, end_offset,
+                    id, ev_doc, source_unit_id, target_type, target_id, start_offset, end_offset,
                     matched_text, evidence_type, run
                 ],
             )

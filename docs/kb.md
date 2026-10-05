@@ -21,7 +21,7 @@ be changed: `--kb-dir <dir>` (or `KB_DIR`).
 - **`kb_*` tools** - the AI's interface: `kb_search` / `kb_schema` / `kb_read` (read),
   `kb_insert` / `kb_update` (write). KB-dedicated: they reach only that one
   `library.sqlite`, never workspace files.
-- **`/kb` command** - manage documents: add / list / delete / sync / backup.
+- **`/kb` command** - manage documents: add / list / delete / sync / backup / restore.
 
 ### What you need to know
 
@@ -75,6 +75,7 @@ All optional - the KB works with none of them:
 /kb delete <path> [--all-versions] Delete the current version, or all versions
 /kb sync                           Rescan data/ for added / changed / missing files (also reports broken references)
 /kb backup [path]                  Snapshot the knowledge database (VACUUM INTO)
+/kb restore <snapshot>             Replace the knowledge database with a snapshot and reopen
 ```
 
 ### Backup & restore
@@ -83,7 +84,18 @@ All optional - the KB works with none of them:
 `<kb>/db/backup/library-<timestamp>.sqlite`). The snapshot is the DB only - it does **not** include
 the `data/` source files.
 
-To restore a snapshot:
+To restore a snapshot while the app is running:
+
+```text
+/kb restore my-doc-library/db/backup/library-20260701-120000.sqlite
+```
+
+`/kb restore <snapshot>` replaces `<kb>/db/library.sqlite` with the snapshot (removing any `-wal` /
+`-shm` sidecars first), reopens the database, and re-applies migrations; the session keeps working on
+the restored data. It replaces the DB only - re-run `/kb sync` if the `data/` files changed since the
+snapshot.
+
+Manual restore (e.g. the app is not running):
 
 1. Stop the app.
 2. Replace `<kb>/db/library.sqlite` with the snapshot (delete any `-wal` / `-shm` files first).
@@ -130,13 +142,15 @@ So: to analyze, ask the AI to extract the knowledge, then ask it to set `analysi
 > step-by-step prompts in Pattern 1 are illustrative.
 >
 > **Evidence is mandatory**: every claim / relation / event must be backed by an `evidence` row whose
-> `matched_text` is a verbatim excerpt from the source unit. The AI is instructed not to insert a
-> statement it cannot back with a source unit.
+> `matched_text` is a verbatim excerpt from the source unit. `kb_insert` enforces this: give each
+> claim / relation / event a `ref` and a matching evidence item (`target_type` + `target_ref`) in the
+> same call. A cross-document relation's evidence needs `source_unit_id` (its `document_id` is derived
+> from that unit). The AI is instructed not to insert a statement it cannot back with a source unit.
 >
 > **Large documents**: the AI reads a document's units with `kb_read`, which returns a `total` count
 > and supports `limit`/`offset`. For a document too large for one context, page through it in
 > batches (e.g. `limit 50` at a time, tracking `offset` against `total`), analyzing each batch before
-> moving on. Re-analysis is safe: entities, claims, and links are deduplicated.
+> moving on. Re-analysis is safe: entities, claims, relations, conditions, events, and links are deduplicated.
 
 ### Pattern 1 - One document
 
@@ -277,7 +291,8 @@ The KB never overwrites or deletes a row on correction. To fix a wrong claim:
 
 You can just ask the AI: "The claim that <what it says> is wrong. Insert the corrected claim and
 mark the old one obsolete." Re-analysis is also safe: entities are deduplicated (re-inserting the
-same name + type reuses the existing entity), and claims carry a fingerprint you can use to spot
+same name + type reuses the existing entity), relations / conditions / events reuse the existing
+row when their dedup key matches, and claims carry a fingerprint you can use to spot
 near-duplicates.
 
 ## Troubleshooting
@@ -327,7 +342,7 @@ sqlite3 -readonly my-doc-library/db/library.sqlite
 | `annotation_versions` | history of analysis notes (`annotations`) |
 | `analysis_runs` | one row per analysis session |
 | `v_documents_current` | view: current versions only |
-| `v_claims_with_evidence` | view: claims joined to their evidence + source text |
+| `v_claims_with_evidence` | view: current-version claims joined to their evidence + source text |
 | `v_*_current` | views: current-version knowledge only (`document_units` / `entities` / `claims` / `relations` / `conditions` / `events` / `evidence`); cross-document relations/conditions always included |
 | `units_fts` | full-text index over `document_units.text` (trigram) |
 
@@ -386,7 +401,8 @@ The KB tools return structured error tags the AI can use to self-correct:
 | `[KB_READONLY_VIOLATION]` | A write was attempted through a read tool (rejected). |
 | `[KB_SYNTAX_ERROR]` | The SQL query is malformed. |
 | `[KB_EXEC_ERROR]` | The query / update failed (bad table/column, invalid value, ...). |
-| `[KB_NOT_FOUND]` | The update target row does not exist. |
+| `[KB_NOT_FOUND]` | The update target row, or the document resolved from a `source`/title key, does not exist. |
+| `[KB_AMBIGUOUS]` | A `source`/title key matches several current documents; the note lists the candidates. |
 | `[KB_QUOTA_EXCEEDED]` | Too many items / bytes in one `kb_insert` call (split it). |
 | `[KB_EVIDENCE_REQUIRED]` | A claim / relation / event with a local `ref` has no evidence in the same `kb_insert` call. |
 | `[KB_FILE_ERROR]` | A `/kb` file operation failed (missing file, collision, ...). |
@@ -400,7 +416,7 @@ The KB tools return structured error tags the AI can use to self-correct:
 |---|---|---|
 | `kb_search` | read-only SQL | `query` (SELECT/WITH/EXPLAIN only) |
 | `kb_schema` | schema discovery | `table` (optional) |
-| `kb_read` | read document units | `document_id`, `unit_type` / `start_position` / `end_position` / `limit` / `offset` |
+| `kb_read` | read document units | `document_id` (or `source` to auto-resolve the current version), `unit_type` / `start_position` / `end_position` / `limit` / `offset` |
 | `kb_insert` | insert knowledge | `document_id`, `entities` / `claims` / `relations` / `conditions` / `events` / `canonical_entities` / `entity_links` / `evidence` |
 | `kb_update` | update / obsolete / annotate | `target_type`, `target_id`, `attributes` / `annotations` / `obsolete` / `reason` |
 
