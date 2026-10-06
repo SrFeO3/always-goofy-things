@@ -438,6 +438,116 @@ fn insert_reuses_existing_relation_condition_event() {
     assert_eq!(count("conditions"), 1);
 }
 
+/// Conditions with the same target+type but different expressions must not be
+/// merged into one row (expression is part of the dedup key).
+#[test]
+fn condition_dedup_distinguishes_expression() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let rc = execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [{ "ref": "c1", "subject_value": "A", "predicate": "is", "object_value": "B" }],
+            "evidence": [{ "target_type": "claim", "target_ref": "c1", "matched_text": "A is B" }]
+        }),
+    )
+    .unwrap();
+    let c1 = rc["inserted"]["claims"][0]["id"].as_str().unwrap().to_string();
+
+    execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "conditions": [
+                { "target_type": "claim", "target_id": c1, "condition_type": "exception", "expression": { "text": "unless X" } },
+                { "target_type": "claim", "target_id": c1, "condition_type": "exception", "expression": { "text": "unless Y" } }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let n: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM conditions WHERE obsolete = 0", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 2, "different expressions must not be merged");
+}
+
+/// Claims with the same subject/predicate/object/modality but different
+/// polarity must not be deduplicated (polarity is part of the fingerprint).
+#[test]
+fn claim_dedup_distinguishes_polarity() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "claims": [
+                { "ref": "c1", "subject_value": "method", "predicate": "is idempotent", "object_value": "GET", "modality": "assertion", "polarity": "positive" },
+                { "ref": "c2", "subject_value": "method", "predicate": "is idempotent", "object_value": "GET", "modality": "assertion", "polarity": "negative" }
+            ],
+            "evidence": [
+                { "target_type": "claim", "target_ref": "c1", "matched_text": "GET is idempotent" },
+                { "target_type": "claim", "target_ref": "c2", "matched_text": "GET is not idempotent" }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let n: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM claims WHERE obsolete = 0", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 2, "positive and negative claims must both persist");
+}
+
+/// Events with the same subject+type+sort_key but different start_time must
+/// not be merged (start/end time is part of the dedup key).
+#[test]
+fn event_dedup_distinguishes_time() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "doc", "data/doc.md");
+
+    let re = execute_kb_insert(
+        &ctx,
+        &json!({ "document_id": doc, "entities": [{ "ref": "e1", "name": "RFC 9110" }] }),
+    )
+    .unwrap();
+    let e1 = re["inserted"]["entities"][0]["id"].as_str().unwrap().to_string();
+
+    execute_kb_insert(
+        &ctx,
+        &json!({
+            "document_id": doc,
+            "events": [
+                { "ref": "ev1", "event_type": "publication", "subject_id": e1, "start_time": "2026-06-01", "sort_key": "2026-00-00" },
+                { "ref": "ev2", "event_type": "publication", "subject_id": e1, "start_time": "2026-07-01", "sort_key": "2026-00-00" }
+            ],
+            "evidence": [
+                { "target_type": "event", "target_ref": "ev1", "matched_text": "June" },
+                { "target_type": "event", "target_ref": "ev2", "matched_text": "July" }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let n: i64 = ctx
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM events WHERE obsolete = 0", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 2, "events with different start_time must not be merged");
+}
+
 /// Every inserted claim / relation / event must be backed by an evidence row
 /// in the same call (new rows) or already exist (reused rows). A missing ref
 /// means a new row cannot be evidenced and is rejected.

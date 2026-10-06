@@ -872,7 +872,7 @@ pub(crate) fn build_kb_insert_def() -> Value {
         "type": "function",
         "function": {
             "name": "kb_insert",
-            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Every claim, relation, and event must be accompanied by an evidence item with verbatim matched_text from its source unit: give the item a ref and add a matching evidence item (target_type + target_ref) in the same call. In a cross-document call, evidence needs source_unit_id so its document_id can be derived. Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via kb_update. Entities are deduplicated: re-inserting an entity with the same name (normalized) and entity_type reuses the existing row (reported with reused=true). Relations, conditions, and events are also deduplicated by their key (relation: source+type+target, condition: target+type, event: subject+event_type+sort_key) and reported with reused=true.",
+            "description": "Insert extracted knowledge into the Knowledge Base. All items in one call are inserted atomically in a single transaction. Each item needs no id: new UUIDs are generated and returned. Use \"ref\"/\"*_ref\" local references to link items created in the same call. Every item belongs to the document given by document_id (for cross-document relations, pass \"null\" as document_id). Every claim, relation, and event must be accompanied by an evidence item with verbatim matched_text from its source unit: give the item a ref and add a matching evidence item (target_type + target_ref) in the same call. In a cross-document call, evidence needs source_unit_id so its document_id can be derived. Corrections follow the obsolete model: insert the replacement row, then mark the old row obsolete via kb_update. Entities are deduplicated: re-inserting an entity with the same name (normalized) and entity_type reuses the existing row (reported with reused=true). Relations, conditions, and events are also deduplicated by their full content key (relation: source+type+target, condition: target+type+expression, event: subject+event_type+start+end+sort_key) and reported with reused=true. Keep batches small (e.g. 10-25 items per call): the insert is all-or-nothing, so a single invalid reference rolls back the whole call.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -887,7 +887,7 @@ pub(crate) fn build_kb_insert_def() -> Value {
                     },
                     "claims": {
                         "type": "array",
-                        "description": "Claims/facts to insert. Item fields: predicate (required), subject (required: subject_id UUID, subject_ref local ref, or subject_value object for unextracted subjects), object (optional, same three forms), modality (optional, default assertion: fact/assertion/hypothesis/prediction/possibility/requirement/recommendation/opinion), confidence (optional 0..1), attributes (optional object), ref (required so evidence can target this item).",
+                        "description": "Claims/facts to insert. Item fields: predicate (required), subject (required: subject_id UUID, subject_ref local ref, or subject_value JSON object for unextracted subjects), object (optional: object_id UUID, object_ref local ref, or object_value JSON object for unextracted objects), modality (optional, default assertion: fact/assertion/hypothesis/prediction/possibility/requirement/recommendation/opinion), confidence (optional 0..1), attributes (optional object), ref (required so evidence can target this item).",
                         "items": { "type": "object" }
                     },
                     "relations": {
@@ -1179,6 +1179,7 @@ fn insert_item(
                 object_id.as_deref().unwrap_or(""),
                 object_value.as_deref().unwrap_or(""),
                 modality,
+                polarity,
             );
             // Dedup: reuse an existing non-obsolete claim (document, fingerprint).
             let existing: Option<String> = tx
@@ -1291,9 +1292,9 @@ fn insert_item(
                 .query_row(
                     "SELECT id FROM conditions \
                      WHERE document_id IS ?1 AND target_type = ?2 AND target_id = ?3 \
-                       AND condition_type = ?4 AND obsolete = 0 \
+                       AND condition_type = ?4 AND expression = ?5 AND obsolete = 0 \
                      LIMIT 1",
-                    params![doc, target_type, target_id, condition_type],
+                    params![doc, target_type, target_id, condition_type, expression],
                     |r| r.get(0),
                 )
                 .ok();
@@ -1324,9 +1325,9 @@ fn insert_item(
                 .query_row(
                     "SELECT id FROM events \
                      WHERE document_id = ?1 AND subject_id IS ?2 AND event_type IS ?3 \
-                       AND sort_key IS ?4 AND obsolete = 0 \
+                       AND start_time IS ?4 AND end_time IS ?5 AND sort_key IS ?6 AND obsolete = 0 \
                      LIMIT 1",
-                    params![doc_id, subject_id, event_type, sort_key],
+                    params![doc_id, subject_id, event_type, start_time, end_time, sort_key],
                     |r| r.get(0),
                 )
                 .ok();
@@ -1471,6 +1472,7 @@ fn build_claim_fingerprint(
     object_id: &str,
     object_value: &str,
     modality: &str,
+    polarity: &str,
 ) -> String {
     let subject = if subject_id.is_empty() {
         subject_value
@@ -1483,11 +1485,12 @@ fn build_claim_fingerprint(
         object_id
     };
     let norm = format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         normalize_ws(&nfkc(subject)),
         normalize_ws(&nfkc(predicate)),
         normalize_ws(&nfkc(object)),
-        normalize_ws(&nfkc(modality))
+        normalize_ws(&nfkc(modality)),
+        normalize_ws(&nfkc(polarity))
     );
     sha256_hex(&norm)[..16].to_string()
 }
