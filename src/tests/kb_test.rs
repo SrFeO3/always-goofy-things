@@ -454,7 +454,10 @@ fn condition_dedup_distinguishes_expression() {
         }),
     )
     .unwrap();
-    let c1 = rc["inserted"]["claims"][0]["id"].as_str().unwrap().to_string();
+    let c1 = rc["inserted"]["claims"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     execute_kb_insert(
         &ctx,
@@ -472,7 +475,11 @@ fn condition_dedup_distinguishes_expression() {
         .conn
         .lock()
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM conditions WHERE obsolete = 0", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM conditions WHERE obsolete = 0",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(n, 2, "different expressions must not be merged");
 }
@@ -504,7 +511,9 @@ fn claim_dedup_distinguishes_polarity() {
         .conn
         .lock()
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM claims WHERE obsolete = 0", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM claims WHERE obsolete = 0", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 2, "positive and negative claims must both persist");
 }
@@ -521,7 +530,10 @@ fn event_dedup_distinguishes_time() {
         &json!({ "document_id": doc, "entities": [{ "ref": "e1", "name": "RFC 9110" }] }),
     )
     .unwrap();
-    let e1 = re["inserted"]["entities"][0]["id"].as_str().unwrap().to_string();
+    let e1 = re["inserted"]["entities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     execute_kb_insert(
         &ctx,
@@ -543,7 +555,9 @@ fn event_dedup_distinguishes_time() {
         .conn
         .lock()
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM events WHERE obsolete = 0", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM events WHERE obsolete = 0", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 2, "events with different start_time must not be merged");
 }

@@ -1327,7 +1327,9 @@ fn insert_item(
                      WHERE document_id = ?1 AND subject_id IS ?2 AND event_type IS ?3 \
                        AND start_time IS ?4 AND end_time IS ?5 AND sort_key IS ?6 AND obsolete = 0 \
                      LIMIT 1",
-                    params![doc_id, subject_id, event_type, start_time, end_time, sort_key],
+                    params![
+                        doc_id, subject_id, event_type, start_time, end_time, sort_key
+                    ],
                     |r| r.get(0),
                 )
                 .ok();
