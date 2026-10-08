@@ -1,5 +1,13 @@
 # Local KB Feature
 
+> Extraction is now app-driven: `/kb extract` processes documents chunk by chunk (the old
+> ask-the-AI-to-analyze flow is gone). Questions, corrections, and `/kb` management are unchanged.
+
+| | Extract | Analyze | Ask |
+|---|---|---|---|
+| Command | `/kb extract` | `/kb analyze "<goal>"` | dialogue |
+| Writes | knowledge rows | relations / links | nothing |
+
 **Local KB** is an optional feature that builds a knowledge base from documents you add; the AI
 can search and analyze it. The application splits each file into units (paragraphs / pages); the
 AI extracts structured knowledge - entities, claims, relations, conditions, events, with evidence
@@ -76,6 +84,10 @@ All optional - the KB works with none of them:
 /kb sync                           Rescan data/ for added / changed / missing files (also reports broken references)
 /kb backup [path]                  Snapshot the knowledge database (VACUUM INTO)
 /kb restore <snapshot>             Replace the knowledge database with a snapshot and reopen
+/kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
+                                    Extract knowledge app-driven, chunk by chunk (see How analysis works)
+/kb analyze "<goal>" [--sources ...] [--max-retries N] [--note "..."]
+                                    Investigate across documents (dependencies, contradictions, identity)
 ```
 
 ### Backup & restore
@@ -127,30 +139,33 @@ You should see the `kb-feature : enabled (run_id: ...)` row in the configuration
 ### How analysis works
 
 `/kb add` and `/kb sync` only do **machine extraction** (files -> units, status `pending`); they
-never run the LLM, and questions don't change the status either. Only the AI writes it:
+never run the LLM. `/kb extract` does the rest as an app-driven job: it splits each pending
+document into byte-budget chunks, runs one fresh LLM session per chunk to register knowledge
+with evidence, and marks the document `analyzed` once every unit is covered (verified
+mechanically, not self-declared). Re-running skips finished chunks; re-registration is
+safe: entities, claims, relations, conditions, events, and links are deduplicated.
 
-- `pending` -> `analyzing` -> `analyzed`: via `kb_update` (`target_type` = `documents`, key
-  `analysis_status`) - a write tool, so it asks `y/N`.
-- `failed`: by the application, when extraction fails.
+```text
+/kb extract --dry-run      # preview: chunks, sizes, rough token cost (runs nothing)
+/kb extract rfc9110.txt    # extract one document
+/kb extract                # extract all pending documents
+/kb list                   # analyzed when covered
+```
 
-So: to analyze, ask the AI to extract the knowledge, then ask it to set `analysis_status` to
-`analyzed`. No `/kb` command does this.
+Extraction costs time and tokens in proportion to chunk count - check `--dry-run` first.
+To lower per-call load, shrink `--chunk-bytes` (more chunks, more calls); to cap cost,
+lower `--max-retries`. `--redo` re-runs finished chunks (otherwise they are skipped), and
+`--handover auto` carries the previous chunk's summary forward (default `off`: independent).
+A document larger than one LLM context still completes: chunks keep each session small,
+and the knowledge stays queryable across the whole document afterwards.
 
-> The AI's instructions include a built-in **analysis playbook** (inspect the schema with
-> `kb_schema`, read the document's units, register knowledge with `kb_insert`, re-check
-> coverage, then set `analysis_status` to `analyzed`). A short "analyze rfc9110.txt" is enough - the
-> step-by-step prompts in Pattern 1 are illustrative.
->
+Done means every unit backs at least one evidence row (short heading-only units are
+accepted with a warning); anything else stays pending.
+
 > **Evidence is mandatory**: every claim / relation / event must be backed by an `evidence` row whose
-> `matched_text` is a verbatim excerpt from the source unit. `kb_insert` enforces this: give each
-> claim / relation / event a `ref` and a matching evidence item (`target_type` + `target_ref`) in the
-> same call. A cross-document relation's evidence needs `source_unit_id` (its `document_id` is derived
-> from that unit). The AI is instructed not to insert a statement it cannot back with a source unit.
->
-> **Large documents**: the AI reads a document's units with `kb_read`, which returns a `total` count
-> and supports `limit`/`offset`. For a document too large for one context, page through it in
-> batches (e.g. `limit 50` at a time, tracking `offset` against `total`), analyzing each batch before
-> moving on. Re-analysis is safe: entities, claims, relations, conditions, events, and links are deduplicated.
+> `matched_text` is a verbatim excerpt from the source unit. The extract job rejects invented
+excerpts and re-reads gaps until each unit is backed. A cross-document relation's evidence needs
+> `source_unit_id` (its `document_id` is derived from that unit).
 
 ### Pattern 1 - One document
 
@@ -180,20 +195,12 @@ pending`, and split into paragraph units. Check:
 
 #### 1-3. Analyze it
 
-Ask the AI to analyze the document. The playbook is built in, so a short prompt is enough - the AI
-inspects the schema (`kb_schema`), reads the document's units with `kb_read`, registers
-the knowledge with evidence, and closes the document:
+Extract the document with the job. Approve the writes with `y` (`kb_insert` is a write
+tool; batch runs need `--kb-auto-confirm rw`):
 
 ```text
-Analyze rfc9110.txt.
+/kb extract rfc9110.txt
 ```
-
-(The longer form still works: "Look at the schema first, read rfc9110.txt's units with
-`kb_read`, and register its terms and concepts as entities and claims with evidence.
-Distinguish modality.")
-
-Approve the writes with `y` (`kb_insert` is a write tool). The AI then sets `analysis_status`
-to `analyzed` itself.
 
 `/kb list` now shows `analyzed`.
 
@@ -234,30 +241,25 @@ curl -L -o rfc9111.txt https://www.rfc-editor.org/rfc/rfc9111.txt
 
 #### 2-2. Analyze it
 
-As in Pattern 1: ask the AI to register 9111's concepts as entities and claims with evidence,
-then set `analysis_status` to `analyzed`.
+As in Pattern 1:
+
+```text
+/kb extract rfc9111.txt
+```
 
 #### 2-3. Connect the two documents
 
-The AI can add **cross-document relations** (a relation whose `document_id` is `"null"`). Ask
-explicitly for the links you want. Note: `"null"` is the value you pass to `kb_insert`; in the
-database (and in SQL via `kb_search`) the column is `NULL`, so use `document_id IS NULL`.
+Cross-document work (dependencies, contradictions, shared identity) is its own job:
 
 ```text
-Across rfc9110.txt and rfc9111.txt, connect what 9111 depends on from 9110 using relations
-(depends_on, document_id="null"), with evidence for each link.
+/kb analyze "connect what 9111 depends on from 9110 (depends_on), flag contradictions, and resolve shared methods and headers"
 ```
 
-```text
-If the two documents contradict each other, add relations (contradicts). If not, report
-"no contradictions" with your reasoning.
-```
-
-```text
-Resolve the same things that appear in both documents (e.g. methods and headers) using
-canonical_entities / entity_links. If something is ambiguous, don't link it - record it in
-annotations instead.
-```
+The job plans the investigation, then runs it in fresh sessions: **cross-document relations**
+(a relation whose `document_id` is `"null"`; in SQL the column is `NULL`, so use
+`document_id IS NULL`), `contradicts` links with per-side evidence, and `canonical_entities` /
+`entity_links` identity (ambiguous links go to `annotations`, never forced). Small follow-ups
+stay in dialogue.
 
 #### 2-4. Ask across both
 
@@ -300,7 +302,7 @@ near-duplicates.
 | Symptom | Fix |
 |---|---|
 | `/kb` or `kb_*` are missing | Build with `--features kb` (the KB then lives in the app data dir by default; `--kb-dir <dir>` / `KB_DIR` to choose a location) |
-| `/kb list` still shows `pending` | Expected: ask the AI to extract the knowledge, then to set `analysis_status` to `analyzed` (How analysis works). No `/kb` command does this |
+| `/kb list` still shows `pending` | Expected: run `/kb extract` (How analysis works). Questions don't change the status |
 | Writes keep pausing | Press `y` in interactive mode. In batch/automation, approve the KB calls with `--kb-auto-confirm ro` (reads) or `rw` (reads + writes); the global `--unsafe-reflex` does not apply to KB tools |
 | You changed a document | Replace the file and run `/kb sync` (same content -> skipped; changes -> a new version, old ones kept as history) |
 | Remove a document | `/kb delete rfc9110.txt` (current version) or `/kb delete rfc9110.txt --all-versions` |
@@ -340,6 +342,7 @@ sqlite3 -readonly my-doc-library/db/library.sqlite
 | `evidence` | provenance: which unit and character offsets back each item |
 | `canonical_entities` / `entity_links` | cross-document identity ("the same thing in two documents") |
 | `annotation_versions` | history of analysis notes (`annotations`) |
+| `analysis_chunks` | extract-job progress (one row per chunk; app-managed, not LLM content) |
 | `analysis_runs` | one row per analysis session |
 | `v_documents_current` | view: current versions only |
 | `v_claims_with_evidence` | view: current-version claims joined to their evidence + source text |

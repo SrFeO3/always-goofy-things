@@ -24,7 +24,7 @@ Adding an Anthropic-compatible dialect as the 3rd provider (bloated the code), p
 Experimental GUI via eframe. Also I/O cleanup: loop refactor (run_reasoning_loop + Session/Settings/Metrics).
 
 ## v0.6.5 (2026-08 early) - todo mode: beyond one LLM context
-A long job is split into tasks; each task runs in a fresh LLM context; planner replans between tasks, with handover & output-verification guards. Details: docs/todo-mode.md
+A long job is split into tasks; each task runs in a fresh LLM context; planner replans between tasks, with handover & output-verification guards.
 
 ## v0.6.30 (2026-08 mid) - tool expansion
 data_search / data_schema, --only-tools, child-process isolation (bash / grep), deterministic calc, LLM usage stats, THIRD_PARTY_LICENSES display.
@@ -37,3 +37,6 @@ Local KB (--features kb): builds a searchable knowledge base from your documents
 
 ## v0.8.0 (2026-09 end) - rework GUI
 GUI reworked as a CLI process shell; multi-line input via Ctrl+O in CLI and GUI.
+
+## v0.9.0 (2026-10 early) - rework todo into jobs, app-driven Local KB (BREAKING)
+Todo mode (`-t`, `todo.md`) replaced by todo job runs (`/job run <todo.json> [--mode static|replan]`, details: docs/todo-job.md) and app-driven KB extraction (`/kb extract`, `/kb analyze`). BREAKING: `-t` is removed; plans are structured JSON with mechanical verification; job state is temporary (`.todo/`, auto-deleted on success).

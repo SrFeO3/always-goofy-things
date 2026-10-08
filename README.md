@@ -40,7 +40,7 @@ Then type a query at the prompt:
 - "Translate this Rust project into Shakespearean English without breaking the code."
 - "@spec.md Build a CLI puzzle game in Rust based on this spec."
 
-Batch mode (`-q`) runs a single query non-interactively, and todo mode (`-t N`) works through long job lists while resetting the LLM context between tasks. See [Usage](#usage) below for input keys, these modes, and more examples.
+Batch mode (`-q`) runs a single query non-interactively (including `/job ...` requests, which run unattended). See [Usage](#usage) below for input keys and more examples.
 
 ## Options and Settings
 
@@ -66,11 +66,10 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
 | (none) | `SESSION_DATA_DIR` | Root directory where session, todo-archive and resource-statistics JSONL files are stored; overrides the platform app-data directory. | (platform default) |
-| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. In todo mode (`-t`), the query is appended to every replan and task session's user message as additional instructions. | (interactive) |
+| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
-| `-t, --todo <MODE>` | `TODO_MODE` | Todo-based Plan-and-Execute mode. `0`=ReAct (default), `1`=Static Plan, `2`=Dynamic Replan (AI-driven). | `0` |
-| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for todo modes (`-t`): they run in batch, where non-auto-confirmed tool calls are denied. Never applies to `mini_python_interpreter` (it runs arbitrary code). | false |
-| `--mini-python-auto-confirm <MODE>` | `MINI_PYTHON_AUTO_CONFIRM` | Auto-approve `mini_python_interpreter` without confirmation: `ro` = read-only workspace mount (writes fail inside the sandbox), `rw` = read-write workspace mount. `ask` (default) prompts `y/N`; batch / todo modes deny. Independent of `--unsafe-reflex`. | `ask` |
+| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for unattended job runs (`-q "/job ..."`), where non-auto-confirmed tool calls are denied. Never applies to `mini_python_interpreter` (it runs arbitrary code). | false |
+| `--mini-python-auto-confirm <MODE>` | `MINI_PYTHON_AUTO_CONFIRM` | Auto-approve `mini_python_interpreter` without confirmation: `ro` = read-only workspace mount (writes fail inside the sandbox), `rw` = read-write workspace mount. `ask` (default) prompts `y/N`; batch runs deny. Independent of `--unsafe-reflex`. | `ask` |
 | `license` | (none) | Subcommand: print the third-party license notices bundled into this binary and exit. | (none) |
 
 ### LLM Provider (`LLM_PROVIDER`)
@@ -106,7 +105,7 @@ cargo run -- --only-tools read_file,list_directory,grep_search
 
 - `data_search` / `data_schema` additionally require `--db-type`.
 - `kb_*` tools require a binary built with `--features kb`.
-- Todo modes require `read_file` (and `write_file` in mode 2) to read and update `./todo.md`; disabling them breaks the todo workflow.
+- Job runs need the workspace tools they use; disabling a used tool breaks the run.
 
 ### Verbosity Levels (`VERBOSE_LEVEL`)
 
@@ -123,17 +122,11 @@ Controls the visual styling and decorations applied to the terminal output.
 - `0`: Plain - no colors or visual decorations
 - `1`: Standard - colored text with structured sections and separators
 
-### Todo Mode (`TODO_MODE`)
+### Todo Jobs (`/job`)
 
-Plan-and-Execute execution for long jobs, split into tasks. Reads `./todo.md`, resets the LLM context between tasks, and carries state forward via the file.
+Plan-and-Execute execution for long jobs, split into tasks. Write a `todo.json` plan and run `/job run <todo.json> [--mode static|replan]`; each task runs in a fresh LLM context, verified mechanically. Batch: `-q "/job run ..."`.
 
-- `0` (default): Standard ReAct loop. Single-turn tasks.
-- `1`: Static Plan - sequential execution from a user-prepared plan. Known step-by-step workflows.
-- `2`: Dynamic Replan (AI-driven) - the AI rewrites `./todo.md` before each task, adding / removing / reordering / splitting tasks as it learns. Exploratory / research jobs.
-
-Todo modes run in batch mode: tool calls are never interactively confirmed, so pass `--unsafe-reflex` (tool calls are auto-confirmed only on ASCII-only relative paths such as `./todo.md` and `artifacts/<name>`; other calls are denied).
-
-See [docs/todo-mode.md](docs/todo-mode.md) for sample `./todo.md` files and quick-start guides.
+See [docs/todo-job.md](docs/todo-job.md) for the plan format and quick-start guides.
 
 ## Usage
 
@@ -175,11 +168,11 @@ cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
 > [!WARNING]
 > In batch mode, large files are attached without confirmation and tools that usually prompt `y/N` are automatically denied.
 
-### Todo Mode  (`-t N`)
+### Todo Jobs (`/job`)
 
-Use todo mode for tasks too large for a single LLM context.
+Use `/job run <todo.json>` for tasks too large for a single LLM context.
 
-See [docs/todo-mode.md](docs/todo-mode.md) for detailed usage instructions.
+See [docs/todo-job.md](docs/todo-job.md) for detailed usage instructions.
 
 ## Special Syntax in CLI Queries
 
