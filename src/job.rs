@@ -127,7 +127,10 @@ impl Check {
 pub(crate) enum VerifyResult {
     Pass,
     Fail { reason: String },
-    Warn { reason: String }, // Proceed with a warning
+    /// Proceed with a warning. Constructed only under `--features kb`
+    /// (extract heading rule); allowed dead elsewhere.
+    #[cfg_attr(not(feature = "kb"), allow(dead_code))]
+    Warn { reason: String },
 }
 
 /// Whole-job status.

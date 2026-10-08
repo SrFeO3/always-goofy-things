@@ -317,6 +317,7 @@ fn outcome(end: crate::reasoning::EndReason, report: Option<&str>) -> SessionOut
         end_reason: end,
         report: report.map(str::to_string),
         raw_report: None,
+        label: "test-session".to_string(),
     }
 }
 

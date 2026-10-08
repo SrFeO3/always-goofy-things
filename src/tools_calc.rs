@@ -1401,14 +1401,13 @@ pub(crate) struct CalcLedger {
 }
 
 impl CalcLedger {
-    /// Ledger destination: todo modes append under `<workspace>/artifacts/`
-    /// (spec), other modes append to the session data dir next to the
-    /// session JSONL files.
-    pub(crate) fn new(session_label: &str, todo_mode: u8) -> Self {
+    /// Ledger destination: job sessions append under `<workspace>/artifacts/`
+    /// (citable `[C-XXXX]`); dialogue sessions append to the session data dir.
+    pub(crate) fn new(session_label: &str, job_scoped: bool) -> Self {
         Self {
             path: resolve_ledger_path(
                 session_label,
-                todo_mode,
+                job_scoped,
                 tools::workspace_root(),
                 persistence::data_dir().as_deref(),
             ),
@@ -1448,11 +1447,11 @@ impl CalcLedger {
 /// length is capped, keeping every ledger write inside the data dir.
 fn resolve_ledger_path(
     session_label: &str,
-    todo_mode: u8,
+    job_scoped: bool,
     workspace: &Path,
     data: Option<&Path>,
 ) -> Option<PathBuf> {
-    if todo_mode > 0 {
+    if job_scoped {
         Some(workspace.join("artifacts").join("calc_ledger.jsonl"))
     } else {
         data.map(|d| {

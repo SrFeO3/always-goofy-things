@@ -179,7 +179,6 @@ impl Store for NoopStore {
 fn test_config() -> Config {
     Config {
         working_dir: ".".to_string(),
-        todo_mode: 0,
         llm_url: "http://localhost:11434/api/chat".to_string(),
         llm_model: "test-model".to_string(),
         llm_api_key: None,
@@ -224,7 +223,7 @@ async fn empty_plan_completes_without_sessions() {
         provider: LlmProvider::Ollama,
         settings: &mut settings,
         metrics: &mut metrics,
-        plan_guard: None,
+        job_session: false,
         kb_ctx: None,
         tool_policy: ToolPolicy::Inherit,
     };

@@ -616,7 +616,11 @@ impl Store for ExtractStore<'_> {
         outcome: &SessionOutcome,
         verdict: &VerifyResult,
     ) -> Result<()> {
-        record_chunk(self.kb, task, outcome, verdict)
+        record_chunk(self.kb, task, outcome, verdict)?;
+        // Retire the chunk's session file like todo tasks do: large
+        // documents would otherwise pile up one JSONL per chunk.
+        let _ = crate::persistence::archive_todo_session(&outcome.label, 0);
+        Ok(())
     }
 }
 
@@ -969,7 +973,7 @@ pub(crate) async fn run_kb_analyze(
         &TodoOptions {
             mode: TodoMode::Replan,
             max_retries: options.max_retries,
-            max_stalls: 3,
+            max_stalls: ctx.config.max_replan_attempts,
             note,
             executor_policy: ToolPolicy::AllowList(ANALYZE_EXEC_TOOLS),
         },

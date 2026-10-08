@@ -101,12 +101,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if config.todo_mode > 0 {
-        anyhow::bail!(
-            "-t/--todo was removed; use /job run <todo.json> [--mode static|replan] instead (batch: -q \"/job run ...\")"
-        );
-    }
-
     let is_batch = config.query.is_some();
     let start_time = std::time::Instant::now();
 
@@ -408,8 +402,8 @@ async fn main() -> Result<()> {
                 provider,
                 settings: &mut settings,
                 metrics: &mut metrics,
-                plan_guard: None,
                 kb_ctx: kb_ctx.as_ref(),
+                job_session: false,
                 tool_policy: crate::session::ToolPolicy::Inherit,
             };
             let end_reason =
@@ -490,8 +484,8 @@ async fn execute_job_request(
                 provider,
                 settings,
                 metrics,
-                plan_guard: None,
                 kb_ctx,
+                job_session: false,
                 tool_policy: crate::session::ToolPolicy::Inherit,
             };
             todo_job::run_todo(
@@ -500,7 +494,7 @@ async fn execute_job_request(
                 &todo_job::TodoOptions {
                     mode,
                     max_retries,
-                    max_stalls: 3,
+                    max_stalls: config.max_replan_attempts,
                     note,
                     executor_policy: crate::session::ToolPolicy::Inherit,
                 },
@@ -540,8 +534,8 @@ async fn execute_job_request(
                 provider,
                 settings,
                 metrics,
-                plan_guard: None,
                 kb_ctx,
+                job_session: false,
                 tool_policy: crate::session::ToolPolicy::Inherit,
             };
             kb_analyze::run_extract(
@@ -585,8 +579,8 @@ async fn execute_job_request(
                 provider,
                 settings,
                 metrics,
-                plan_guard: None,
                 kb_ctx,
+                job_session: false,
                 tool_policy: crate::session::ToolPolicy::Inherit,
             };
             kb_analyze::run_kb_analyze(

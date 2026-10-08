@@ -44,7 +44,7 @@ async fn test_tool_smoke_read_file_and_grep() {
     assert!(names.contains(&"grep_search"));
 
     // read_file reads a text file.
-    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, |_| true);
     let res = crate::tools::execute_tool(
         "read_file",
         &serde_json::json!({ "path": probe }),
@@ -70,7 +70,7 @@ async fn test_tool_smoke_read_file_and_grep() {
 #[tokio::test]
 async fn test_tool_smoke_disabled_tool_refused() {
     // Defense in depth: disabled tools must be refused even if called.
-    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| false);
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, |_| false);
     let res = crate::tools::execute_tool(
         "read_file",
         &serde_json::json!({ "path": "._smtool_disabled_probe.txt" }),

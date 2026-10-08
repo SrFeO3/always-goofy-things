@@ -460,18 +460,18 @@ fn ledger_path_label_sanitized() {
     let ws = Path::new("/ws");
     let data = Path::new("/data");
     // Traversal attempts must stay inside the data dir.
-    let p = resolve_ledger_path("../../../etc/cron.d/malicious", 0, ws, Some(data)).unwrap();
+    let p = resolve_ledger_path("../../../etc/cron.d/malicious", false, ws, Some(data)).unwrap();
     assert!(p.starts_with(data), "{}", p.display());
     let name = p.file_name().unwrap().to_str().unwrap();
     assert!(!name.contains('/') && !name.contains(".."), "{}", name);
 
     // Empty label falls back to a fixed name.
-    let p = resolve_ledger_path("", 0, ws, Some(data)).unwrap();
+    let p = resolve_ledger_path("", false, ws, Some(data)).unwrap();
     assert_eq!(p.file_name().unwrap(), "calc_ledger_unnamed.jsonl");
 
     // Overlong labels are capped so the path stays short.
     let long = "x".repeat(200);
-    let p = resolve_ledger_path(&long, 0, ws, Some(data)).unwrap();
+    let p = resolve_ledger_path(&long, false, ws, Some(data)).unwrap();
     assert!(p.file_name().unwrap().to_str().unwrap().len() < 100);
 }
 
@@ -564,11 +564,11 @@ fn calc_id_format_and_batch_order() {
 fn ledger_path_resolution() {
     let ws = Path::new("/ws");
     let data = Path::new("/data");
-    let p = resolve_ledger_path("mylabel", 0, ws, Some(data)).unwrap();
+    let p = resolve_ledger_path("mylabel", false, ws, Some(data)).unwrap();
     assert_eq!(p, Path::new("/data/calc_ledger_mylabel.jsonl"));
-    let p = resolve_ledger_path("mylabel", 1, ws, Some(data)).unwrap();
+    let p = resolve_ledger_path("mylabel", true, ws, Some(data)).unwrap();
     assert_eq!(p, Path::new("/ws/artifacts/calc_ledger.jsonl"));
-    assert!(resolve_ledger_path("mylabel", 0, ws, None).is_none());
+    assert!(resolve_ledger_path("mylabel", false, ws, None).is_none());
 }
 
 #[test]
@@ -646,7 +646,7 @@ async fn tool_definition_and_dispatch() {
     );
 
     // Dispatch through execute_tool, no ledger attached.
-    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, |_| true);
     let res = crate::tools::execute_tool(
         "calc",
         &json!({ "expressions": ["1425 * 32"] }),
@@ -658,7 +658,7 @@ async fn tool_definition_and_dispatch() {
     assert_eq!(res[0]["result"].as_i64(), Some(45600));
 
     // Disabled tools are refused even if called (defense in depth).
-    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| false);
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, |_| false);
     let res =
         crate::tools::execute_tool("calc", &json!({ "expressions": ["1 + 1"] }), &context, None)
             .await;

@@ -203,16 +203,15 @@ pub(crate) struct LoopCtx<'a> {
     pub provider: LlmProvider,
     pub settings: &'a mut Settings,
     pub metrics: &'a mut Metrics,
-    /// Plan-write guard (legacy Mode-2 executor protection, still enforced
-    /// in `execute_tool`). New job runners never set it: planners propose
-    /// in-report and the application applies, so this stays `None`.
-    pub plan_guard: Option<crate::todo_guard::PlanWriteGuard>,
-    /// Knowledge Base context (single library.sqlite connection + run id);
-    /// `None` when the `kb` feature is compiled out.
-    pub kb_ctx: crate::tools::KbCtxOpt<'a>,
+    /// Job-session marker: fresh sessions (`session::run_session`) run with
+    /// this set so calc ledgers land under `artifacts/` (citable).
+    pub job_session: bool,
     /// Per-session tool narrowing for fresh sessions (`session::run_session`
     /// carries it on a short-lived inner context; `Inherit` = prior behavior).
     pub tool_policy: ToolPolicy,
+    /// Knowledge Base context (single library.sqlite connection + run id);
+    /// `None` when the `kb` feature is compiled out.
+    pub kb_ctx: crate::tools::KbCtxOpt<'a>,
 }
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
@@ -232,7 +231,6 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let provider = ctx.provider;
     let settings = &mut *ctx.settings;
     let metrics = &mut *ctx.metrics;
-    let plan_guard = ctx.plan_guard.as_ref();
     let kb_ctx = ctx.kb_ctx;
     let tool_policy = ctx.tool_policy;
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
@@ -271,16 +269,12 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let mut end_reason = EndReason::Completed;
     // Number ledger for calc results (spec: number ledger): todo modes append
     // under <workspace>/artifacts/, other modes to the session data dir.
-    let calc_ledger = tools_calc::CalcLedger::new(&session.label, config.todo_mode);
+    let calc_ledger = tools_calc::CalcLedger::new(&session.label, ctx.job_session);
     let db_ctx = tools_data::db_context_from_config(config);
-    let tool_context = tools::ToolExecutionContext::new(
-        db_ctx.as_ref(),
-        kb_ctx,
-        Some(&calc_ledger),
-        config.todo_mode,
-        plan_guard,
-        |name| crate::session::tool_enabled(config, tool_policy, name),
-    );
+    let tool_context =
+        tools::ToolExecutionContext::new(db_ctx.as_ref(), kb_ctx, Some(&calc_ledger), |name| {
+            crate::session::tool_enabled(config, tool_policy, name)
+        });
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {

@@ -676,7 +676,7 @@ async fn mini_python_uses_its_own_gate_only() {
 fn dispatch_reports_missing_decision_as_internal_error() {
     // Executing mini python without an approval decision is an internal bug,
     // reported as such (never executed, never a guess at the mode).
-    let context = crate::tools::ToolExecutionContext::new(None, None, None, 0, None, |_| true);
+    let context = crate::tools::ToolExecutionContext::new(None, None, None, |_| true);
     let res = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(crate::tools::execute_tool(

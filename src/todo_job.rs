@@ -547,8 +547,6 @@ struct TodoStore {
     state_path: PathBuf,
     job_id: String,
     plan_path: PathBuf,
-    session_label: String,
-    order: Vec<String>,
 }
 
 impl TodoStore {
@@ -594,11 +592,7 @@ impl Store for TodoStore {
         verdict: &VerifyResult,
     ) -> Result<()> {
         self.record_state(task, outcome, verdict)?;
-        let pos = self.order.iter().position(|id| id == &task.id).unwrap_or(0);
-        let _ = persistence::archive_todo_session(
-            &task_session_label(&self.session_label, pos, &task.id),
-            pos,
-        );
+        let _ = persistence::archive_todo_session(&outcome.label, 0);
         Ok(())
     }
 }
@@ -656,14 +650,12 @@ pub(crate) async fn run_todo(
                 plan: plan.clone(),
                 state_path: state_path.clone(),
             };
-            let goal = plan.goal.clone();
             let store = TodoStore {
                 state_path: state_path.clone(),
                 job_id: job_id.clone(),
                 plan_path: plan_path.to_path_buf(),
-                session_label: session_label.clone(),
-                order: order.clone(),
             };
+            let goal = plan.goal.clone();
             let outcome = run_job(
                 ctx,
                 &mut enumerator,
@@ -712,8 +704,6 @@ pub(crate) async fn run_todo(
                 state_path: state_path.clone(),
                 job_id: job_id.clone(),
                 plan_path: plan_path.to_path_buf(),
-                session_label: session_label.clone(),
-                order: order.clone(),
             };
             let goal = plan.goal.clone();
             let outcome = run_job(
@@ -824,6 +814,8 @@ pub(crate) fn todo_status_in(workspace: &Path, plan_path: &Path) -> Result<Strin
 /// Validates through the same gate as replan, then re-validates the file.
 /// Missing deliverables fall back to `default_deliverable` so finalize
 /// keeps its teeth. Overwrites: generated plans live in managed space.
+/// Called only from the kb analyze path (`--features kb`).
+#[cfg_attr(not(feature = "kb"), allow(dead_code))]
 pub(crate) fn write_generated_plan(
     goal: &str,
     fence_block: &str,
@@ -888,7 +880,13 @@ pub(crate) fn clean_states(workspace: &Path, all: bool) -> Result<Vec<PathBuf>> 
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        // State files only (`<16hex>.state.json`); generated analyze plans
+        // (`kb-analyze-*.json`) live here too and must survive clean.
+        let is_state = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".state.json"));
+        if !is_state {
             continue;
         }
         let orphan = std::fs::read_to_string(&path)

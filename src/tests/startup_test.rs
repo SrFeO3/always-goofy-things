@@ -5,7 +5,6 @@ use clap::Parser;
 fn cfg(only_tools: Vec<ToolName>) -> Config {
     Config {
         working_dir: ".".to_string(),
-        todo_mode: 0,
         llm_url: "http://localhost:11434/api/chat".to_string(),
         llm_model: "test-model".to_string(),
         llm_api_key: None,

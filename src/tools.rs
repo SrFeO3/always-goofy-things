@@ -71,8 +71,6 @@ where
     db_ctx: Option<&'a tools_data::DbContext>,
     kb_ctx: KbCtxOpt<'a>,
     calc_ledger: Option<&'a tools_calc::CalcLedger>,
-    todo_mode: u8,
-    plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
     is_enabled: F,
 }
 
@@ -84,16 +82,12 @@ where
         db_ctx: Option<&'a tools_data::DbContext>,
         kb_ctx: KbCtxOpt<'a>,
         calc_ledger: Option<&'a tools_calc::CalcLedger>,
-        todo_mode: u8,
-        plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
         is_enabled: F,
     ) -> Self {
         Self {
             db_ctx,
             kb_ctx,
             calc_ledger,
-            todo_mode,
-            plan_guard,
             is_enabled,
         }
     }
@@ -446,29 +440,15 @@ where
         ));
     }
 
-    // Path security check for tools that take 'path'; in todo mode 2 the
-    // todo_guard additionally rejects LLM writes to guard-managed state
-    // files (artifacts/handover.md, artifacts/calc_ledger.jsonl).
+    // Path security check for tools that take 'path'.
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
         validate_path(path)?;
-        if let Some(msg) =
-            crate::todo_guard::llm_guard_state_file_write(name, path, context.todo_mode)
-        {
-            return Err(anyhow!("{}", msg));
-        }
-        // Executor sessions: validate plan-file writes against the session
-        // snapshot before they land (`./next-task.md` is denied too).
-        if let Some(guard) = context.plan_guard
-            && let Some(msg) = crate::todo_guard::llm_guard_plan_file_write(name, path, args, guard)
-        {
-            return Err(anyhow!("{}", msg));
-        }
     }
 
     match name {
         "read_file" => execute_read_file(args),
         "write_file" => execute_write_file(args),
-        "str_replace_editor" => execute_str_replace_guarded(args, context.plan_guard),
+        "str_replace_editor" => execute_str_replace(args),
         "grep_search" => execute_grep_search(args).await,
         "list_directory" => execute_list_directory(args),
         "execute_bash" => execute_bash(args).await,
@@ -1070,27 +1050,8 @@ fn build_fuzzy_mismatch_report(provided: &str, actual: &str) -> serde_json::Valu
     })
 }
 
-/// Guard check for computed `./todo.md` content before it lands; no-op
-/// when no guard is active or the path is not the plan file.
-fn guard_plan_write(
-    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
-    path: &str,
-    content: &str,
-) -> Result<()> {
-    if let Some(guard) = plan_guard
-        && let Some(msg) = crate::todo_guard::llm_guard_plan_write_validate(path, content, guard)
-    {
-        return Err(anyhow!("{}", msg));
-    }
-    Ok(())
-}
-
-/// str_replace_editor execution; the computed result is validated against
-/// the plan snapshot before the write lands.
-fn execute_str_replace_guarded(
-    args: &serde_json::Value,
-    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
-) -> Result<serde_json::Value> {
+/// str_replace_editor execution.
+fn execute_str_replace(args: &serde_json::Value) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -1115,7 +1076,6 @@ fn execute_str_replace_guarded(
     // --- Step 1: Try exact match first (single occurrence) ---
     if content.matches(old_str).count() == 1 {
         let new_content = content.replace(old_str, new_str);
-        guard_plan_write(plan_guard, path, &new_content)?;
         atomic_write_with_dir(path, &new_content)
             .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
         return Ok(json!({
@@ -1128,15 +1088,7 @@ fn execute_str_replace_guarded(
     // --- Step 2: Space-fuzzy match (horizontal whitespace only, no tabs/newlines) ---
     let space_fuzzy_pattern = build_space_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&space_fuzzy_pattern) {
-        match try_fuzzy_replace(
-            &content,
-            &re,
-            old_str,
-            new_str,
-            path,
-            "space_fuzzy_match",
-            plan_guard,
-        ) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "space_fuzzy_match") {
             Ok(res) => return Ok(res),
             Err(e)
                 if e.to_string().contains("AMBIGUOUS_MATCH")
@@ -1151,15 +1103,7 @@ fn execute_str_replace_guarded(
     // --- Step 3: Tab-fuzzy match (horizontal whitespace: spaces + tabs) ---
     let tab_fuzzy_pattern = build_tab_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&tab_fuzzy_pattern) {
-        match try_fuzzy_replace(
-            &content,
-            &re,
-            old_str,
-            new_str,
-            path,
-            "tab_fuzzy_match",
-            plan_guard,
-        ) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "tab_fuzzy_match") {
             Ok(res) => return Ok(res),
             Err(e)
                 if e.to_string().contains("AMBIGUOUS_MATCH")
@@ -1183,7 +1127,6 @@ fn execute_str_replace_guarded(
             new_str,
             path,
             "tab_skip_blank_match",
-            plan_guard,
         ) {
             Ok(res) => return Ok(res),
             Err(e)
@@ -1199,15 +1142,7 @@ fn execute_str_replace_guarded(
     // --- Step 4: Full fuzzy match (all whitespace incl. line breaks + \r\n / \n differences) ---
     let full_pattern = build_full_fuzzy_pattern(old_str);
     if let Ok(re) = Regex::new(&full_pattern) {
-        match try_fuzzy_replace(
-            &content,
-            &re,
-            old_str,
-            new_str,
-            path,
-            "full_fuzzy_match",
-            plan_guard,
-        ) {
+        match try_fuzzy_replace(&content, &re, old_str, new_str, path, "full_fuzzy_match") {
             Ok(res) => return Ok(res),
             Err(e)
                 if e.to_string().contains("AMBIGUOUS_MATCH")
@@ -1231,7 +1166,6 @@ fn execute_str_replace_guarded(
             new_str,
             path,
             "full_skip_blank_match",
-            plan_guard,
         ) {
             Ok(res) => return Ok(res),
             Err(e)
@@ -1264,7 +1198,6 @@ fn try_fuzzy_replace(
     new_str: &str,
     path: &str,
     match_type: &str,
-    plan_guard: Option<&crate::todo_guard::PlanWriteGuard>,
 ) -> Result<serde_json::Value> {
     let matches: Vec<_> = re.find_iter(content).collect();
 
@@ -1281,7 +1214,6 @@ fn try_fuzzy_replace(
     let new_content = re
         .replace(content, |_caps: &regex::Captures| new_str.to_string())
         .to_string();
-    guard_plan_write(plan_guard, path, &new_content)?;
     atomic_write_with_dir(path, &new_content)
         .map_err(|e| anyhow!("[FILE_WRITE_FAILED] '{}': {}", path, e))?;
 

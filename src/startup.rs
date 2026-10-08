@@ -135,10 +135,6 @@ pub struct Config {
     #[arg(short = 'w', long, env = "WORKING_DIR", default_value = ".")]
     pub working_dir: String,
 
-    /// Todo execution mode
-    #[arg(short = 't', long = "todo", env = "TODO_MODE", default_value_t = 0)]
-    pub todo_mode: u8,
-
     /// Endpoint for the Chat API
     #[arg(
         short = 'u',
@@ -566,16 +562,6 @@ pub fn system_message_todo_planner(config: &Config) -> crate::model::Message {
     build_system_message(sections)
 }
 
-/// User-facing name of the `-t`/`--todo` mode (`0` = ReAct). Public names
-/// follow docs/todo-mode.md ("Static Plan" / "Dynamic Replan").
-pub(crate) fn todo_mode_name(todo_mode: u8) -> &'static str {
-    match todo_mode {
-        1 => "Static Plan",
-        2 => "Dynamic Replan",
-        _ => "ReAct",
-    }
-}
-
 /// Print the startup banner and configuration summary.
 /// Returns the canonical working directory.
 pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std::path::PathBuf> {
@@ -598,17 +584,8 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     );
     println!("CONFIGURATION:");
     println!(
-        "  mode               : {}{}",
-        todo_mode_name(config.todo_mode),
-        if config.todo_mode > 0 {
-            format!(" (todo {})", config.todo_mode)
-        } else {
-            String::new()
-        }
-    );
-    println!(
         "  run                : {}",
-        if config.query.is_some() || config.todo_mode > 0 {
+        if config.query.is_some() {
             "batch"
         } else {
             "interactive"

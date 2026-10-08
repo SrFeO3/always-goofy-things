@@ -51,7 +51,8 @@ pub(crate) struct SessionSpec {
     pub max_turns: Option<u32>,
 }
 
-/// One fresh session's result.
+/// One fresh session's result. `label` echoes the session (stores archive
+/// by it instead of reconstructing names, which would drift).
 #[derive(Debug, Clone)]
 pub(crate) struct SessionOutcome {
     pub end_reason: EndReason,
@@ -59,12 +60,14 @@ pub(crate) struct SessionOutcome {
     /// Pre-condense text when condensing rewrote the message (the planner
     /// parses structured blocks from here).
     pub raw_report: Option<String>,
+    /// Session label (persistence key). Stores archive by this.
+    pub label: String,
 }
 
 /// Run one fresh session: new `Session` (history 0), narrowed tools,
 /// condense-on-completion. The caller's `ctx` policy is untouched; the
-/// narrowing travels on a short-lived inner `LoopCtx`, as does the
-/// per-session turn cap (via a cloned config, only when `Some`).
+/// narrowing travels on a short-lived inner `LoopCtx` (cloned config
+/// carries the per-session turn cap and the batch-task marker).
 pub(crate) async fn run_session(
     ctx: &mut LoopCtx<'_>,
     spec: SessionSpec,
@@ -74,6 +77,8 @@ pub(crate) async fn run_session(
     // Move a leftover file from an earlier interrupted run aside.
     persistence::init_session(&sess.label)?;
 
+    // Job-scoped inner context: narrowed tools plus the batch-task marker.
+    // The config clones only to carry a per-session turn cap.
     let overridden: Option<startup::Config> = spec.max_turns.map(|n| {
         let mut c = (*ctx.config).clone();
         c.max_reasoning_turns = n;
@@ -85,7 +90,7 @@ pub(crate) async fn run_session(
         provider: ctx.provider,
         settings: &mut *ctx.settings,
         metrics: &mut *ctx.metrics,
-        plan_guard: ctx.plan_guard.take(),
+        job_session: true,
         kb_ctx: ctx.kb_ctx,
         tool_policy: spec.allow_tools,
     };
@@ -98,10 +103,7 @@ pub(crate) async fn run_session(
     )
     .await;
     match res {
-        Err(e) => {
-            ctx.plan_guard = inner.plan_guard.take();
-            Err(e)
-        }
+        Err(e) => Err(e),
         Ok(end_reason) => {
             // Condense runs only on completion; anything else keeps no report.
             let (report, raw_report) = if end_reason.is_completed() {
@@ -123,11 +125,11 @@ pub(crate) async fn run_session(
             } else {
                 (None, None)
             };
-            ctx.plan_guard = inner.plan_guard.take();
             Ok(SessionOutcome {
                 end_reason,
                 report,
                 raw_report,
+                label: sess.label.clone(),
             })
         }
     }

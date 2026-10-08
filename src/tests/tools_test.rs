@@ -4,134 +4,19 @@ use std::fs;
 use crate::startup::{KbAutoConfirm, MiniPythonAutoConfirm};
 
 fn execute_str_replace(args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    super::execute_str_replace_guarded(args, None)
+    super::execute_str_replace(args)
 }
 
-fn tool_context<'a, F>(
-    todo_mode: u8,
-    plan_guard: Option<&'a crate::todo_guard::PlanWriteGuard>,
-    is_enabled: F,
-) -> ToolExecutionContext<'a, F>
+fn tool_context<F>(is_enabled: F) -> ToolExecutionContext<'static, F>
 where
     F: Fn(&str) -> bool,
 {
-    ToolExecutionContext::new(None, None, None, todo_mode, plan_guard, is_enabled)
-}
-
-#[tokio::test]
-async fn test_execute_tool_mode2_denies_state_file_writes() {
-    // Todo mode 2: LLM writes to guard-managed state files are rejected at
-    // the dispatch layer. The decision itself lives in todo_guard
-    // (llm_guard_state_file_write); here we prove execute_tool wires it.
-    let context = tool_context(2, None, |_| true);
-    let denied = execute_tool(
-        "write_file",
-        &json!({ "content": "x", "path": "artifacts/handover.md" }),
-        &context,
-        None,
-    )
-    .await;
-    let err = denied.unwrap_err().to_string();
-    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
-
-    // str_replace_editor on the ledger is denied the same way.
-    let denied = execute_tool(
-        "str_replace_editor",
-        &json!({
-            "path": "./artifacts/calc_ledger.jsonl",
-            "old_string": "a",
-            "new_string": "b"
-        }),
-        &context,
-        None,
-    )
-    .await;
-    assert!(denied.unwrap_err().to_string().contains("[TOOL_DENIED]"));
-
-    // The match is exact: the same file name outside artifacts/ is not a
-    // state file, so the write is allowed and succeeds at the dispatch
-    // layer (it lands in tmp).
-    let tmp = get_temp_path("mode2_ok");
-    let outside = tmp.join("artifacts/handover.md");
-    let ok = execute_tool(
-        "write_file",
-        &json!({ "content": "x", "path": outside.to_str().unwrap() }),
-        &context,
-        None,
-    )
-    .await;
-    assert!(
-        ok.is_ok(),
-        "mode 2 write outside artifacts/ must be allowed and succeed: {:?}",
-        ok.err()
-    );
-
-    // Mode 1 / non-todo: no denial at the dispatch layer either.
-    for mode in [0u8, 1u8] {
-        let context = tool_context(mode, None, |_| true);
-        let ok = execute_tool(
-            "write_file",
-            &json!({ "content": "x", "path": outside.to_str().unwrap() }),
-            &context,
-            None,
-        )
-        .await;
-        assert!(
-            ok.is_ok(),
-            "mode {} write must succeed: {:?}",
-            mode,
-            ok.err()
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_execute_tool_mode2_plan_write_guard() {
-    // The plan-write decision lives in todo_guard; here we prove
-    // execute_tool wires it (denied at dispatch, other files pass).
-    crate::tools::set_workspace_root(std::env::current_dir().unwrap_or_else(|_| ".".into()));
-    let plan = "# Plan\n\n## Tasks\n- [ ] a\n- [ ] b\n";
-    let guard = crate::todo_guard::PlanWriteGuard::capture(plan, 0);
-    let context = tool_context(2, Some(&guard), |_| true);
-
-    // Violation: the executor flips a task it was not assigned.
-    let violated = execute_tool(
-        "write_file",
-        &json!({
-            "content": "# Plan\n\n## Tasks\n- [x] a\n- [x] b\n",
-            "path": "./todo.md"
-        }),
-        &context,
-        None,
-    )
-    .await;
-    let err = violated.unwrap_err().to_string();
-    assert!(err.contains("[TOOL_DENIED]"), "{}", err);
-
-    // str_replace_editor on ./todo.md is guarded inside the tool, not at
-    // dispatch (end-to-end test in todo_test.rs).
-
-    // Non-plan files are not guarded: the write proceeds (lands in tmp).
-    let tmp = get_temp_path("plan_guard_ok");
-    let other = tmp.join("note.md");
-    let ok = execute_tool(
-        "write_file",
-        &json!({ "content": "x", "path": other.to_str().unwrap() }),
-        &context,
-        None,
-    )
-    .await;
-    assert!(
-        ok.is_ok(),
-        "non-plan writes must pass the guard: {:?}",
-        ok.err()
-    );
+    ToolExecutionContext::new(None, None, None, is_enabled)
 }
 
 // Helper to generate a unique temporary path for testing (relative path)
 fn get_temp_path(name: &str) -> std::path::PathBuf {
     // Tests run with CWD = package root; register it as the workspace root
-    // so path validation (validate_path) works (OnceLock: first call wins).
     crate::tools::set_workspace_root(
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
     );
@@ -846,7 +731,7 @@ fn test_validate_path_symlink_escape() {
     assert!(validate_path(ws.join("new_dir/file.txt").to_str().unwrap()).is_ok());
 
     // The same escape through the dispatch path (execute_tool).
-    let context = tool_context(0, None, |_| true);
+    let context = tool_context(|_| true);
     let blocked = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(execute_tool(
@@ -1039,7 +924,7 @@ fn test_get_tool_definitions_kb_tools_with_kb_dir() {
 
 #[tokio::test]
 async fn test_execute_tool_rejects_disabled() {
-    let context = tool_context(0, None, |_| false);
+    let context = tool_context(|_| false);
     let res = execute_tool("execute_bash", &json!({ "command": "ls" }), &context, None).await;
     let err = res.unwrap_err().to_string();
     assert!(
