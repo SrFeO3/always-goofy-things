@@ -46,7 +46,7 @@ thread_local! {
 }
 
 /// RAII guard over the shared connection that keeps `CONN_LOCK_HELD` in sync.
-struct ConnGuard<'a>(MutexGuard<'a, Connection>);
+pub(crate) struct ConnGuard<'a>(MutexGuard<'a, Connection>);
 
 impl Drop for ConnGuard<'_> {
     fn drop(&mut self) {
@@ -70,7 +70,7 @@ impl std::ops::DerefMut for ConnGuard<'_> {
 /// Acquire the shared connection lock. Re-entrant acquisition from the same
 /// thread (a KB helper called while the lock is held) fails loudly instead of
 /// deadlocking; a poisoned mutex maps to the usual `[KB_INTERNAL_ERROR]`.
-fn lock_conn(ctx: &KbContext) -> Result<ConnGuard<'_>> {
+pub(crate) fn lock_conn(ctx: &KbContext) -> Result<ConnGuard<'_>> {
     CONN_LOCK_HELD.with(|h| -> Result<()> {
         if h.get() {
             bail!(

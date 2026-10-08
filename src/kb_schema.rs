@@ -505,6 +505,32 @@ CREATE INDEX IF NOT EXISTS idx_claims_doc_fingerprint ON claims(document_id, fin
 CREATE INDEX IF NOT EXISTS idx_canonical_entities_name_type ON canonical_entities(name, entity_type);
 "#;
 
+/// Schema v5: extract-job progress (`analysis_chunks`). The rerun key is the
+/// stable range `(document_id, unit_type, pos_from, pos_to)`; `run_id` is a
+/// record-only column so restarts keep skipping `done` chunks (R1).
+const DDL_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS analysis_chunks (
+  id              TEXT PRIMARY KEY,
+  run_id          TEXT NOT NULL REFERENCES analysis_runs(id),
+  document_id     TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  unit_type       TEXT,
+  pos_from        INTEGER NOT NULL,
+  pos_to          INTEGER NOT NULL,
+  unit_count      INTEGER NOT NULL,
+  bytes_est       INTEGER,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  read_ranges     TEXT,
+  report          TEXT,
+  error           TEXT,
+  started_at      TEXT,
+  finished_at     TEXT,
+  UNIQUE (document_id, unit_type, pos_from, pos_to)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON analysis_chunks(document_id, status);
+"#;
+
 /// Run pending schema migrations (idempotent; starts at user_version = 0).
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
@@ -536,6 +562,12 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             .context("[KB_CONFIG_ERROR] Failed to apply KB schema v4")?;
         conn.execute_batch("PRAGMA user_version = 4;")
             .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 4")?;
+    }
+    if version < 5 {
+        conn.execute_batch(DDL_V5)
+            .context("[KB_CONFIG_ERROR] Failed to apply KB schema v5")?;
+        conn.execute_batch("PRAGMA user_version = 5;")
+            .context("[KB_CONFIG_ERROR] Failed to set PRAGMA user_version = 5")?;
     }
     Ok(())
 }

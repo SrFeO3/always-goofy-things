@@ -1086,13 +1086,13 @@ fn kb_read_source_reports_ambiguity_and_errors() {
 
 /// v4 migration adds composite indexes for the hot dedup lookups.
 #[test]
-fn migrate_v4_adds_dedup_indexes() {
+fn migrate_v5_keeps_v4_indexes_and_adds_chunks() {
     let ctx = mem_ctx();
     let conn = ctx.conn.lock().unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     for name in [
         "idx_entities_doc_norm_type",
         "idx_claims_doc_fingerprint",
@@ -1107,6 +1107,14 @@ fn migrate_v4_adds_dedup_indexes() {
             .unwrap();
         assert_eq!(n, 1, "index {} must exist", name);
     }
+    let chunks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='analysis_chunks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(chunks, 1, "analysis_chunks must exist");
 }
 
 /// 3. kb_update: annotations versioned; current value = latest version.

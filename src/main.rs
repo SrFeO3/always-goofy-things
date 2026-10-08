@@ -39,6 +39,8 @@ mod job;
 #[cfg(feature = "kb")]
 mod kb;
 #[cfg(feature = "kb")]
+mod kb_analyze;
+#[cfg(feature = "kb")]
 mod kb_schema;
 mod llm_stats;
 mod model;
