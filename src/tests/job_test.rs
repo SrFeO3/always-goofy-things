@@ -36,6 +36,18 @@ fn parse_four_kinds() {
 }
 
 #[test]
+fn dsl_roundtrips() {
+    for s in [
+        "exists artifacts/a.md",
+        "nonempty artifacts/a.md",
+        "contains artifacts/a.md:矛盾:追記",
+        "sql SELECT id FROM t",
+    ] {
+        assert_eq!(Check::parse(s).unwrap().to_dsl(), s);
+    }
+}
+
+#[test]
 fn parse_rejects_bad_forms() {
     for bad in [
         "",

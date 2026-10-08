@@ -56,6 +56,9 @@ pub(crate) struct SessionSpec {
 pub(crate) struct SessionOutcome {
     pub end_reason: EndReason,
     pub report: Option<String>,
+    /// Pre-condense text when condensing rewrote the message (the planner
+    /// parses structured blocks from here).
+    pub raw_report: Option<String>,
 }
 
 /// Run one fresh session: new `Session` (history 0), narrowed tools,
@@ -100,7 +103,9 @@ pub(crate) async fn run_session(
             Err(e)
         }
         Ok(end_reason) => {
-            let report = if end_reason.is_completed() {
+            // Condense runs only on completion; anything else keeps no report.
+            let (report, raw_report) = if end_reason.is_completed() {
+                let raw = todo_guard::last_assistant_report(&sess).map(str::to_string);
                 todo_guard::llm_guard_condense_final_message(
                     &mut inner,
                     &mut sess,
@@ -109,12 +114,21 @@ pub(crate) async fn run_session(
                     spec.report_rule.max_chars,
                 )
                 .await;
-                todo_guard::last_assistant_report(&sess).map(str::to_string)
+                let report = todo_guard::last_assistant_report(&sess).map(str::to_string);
+                let raw_report = match (&raw, &report) {
+                    (Some(r), Some(f)) if r != f => Some(r.clone()),
+                    _ => None,
+                };
+                (report, raw_report)
             } else {
-                None
+                (None, None)
             };
             ctx.plan_guard = inner.plan_guard.take();
-            Ok(SessionOutcome { end_reason, report })
+            Ok(SessionOutcome {
+                end_reason,
+                report,
+                raw_report,
+            })
         }
     }
 }

@@ -587,6 +587,55 @@ pub fn system_message_kb_extract(config: &Config) -> crate::model::Message {
     build_system_message(sections)
 }
 
+/// Read-only recon tools for the todo planner (it proposes; the app applies).
+pub(crate) const TODO_PLANNER_TOOLS: &[&str] = &[
+    "list_directory",
+    "read_file",
+    "grep_search",
+    "fetch_web",
+    "calc",
+];
+
+/// Build a system message for todo task sessions (new `todo.json` jobs).
+/// `allowed` narrows the tool sections the same way execution does;
+/// `None` keeps every `--only-tools`-enabled tool.
+pub fn system_message_todo_task(
+    config: &Config,
+    allowed: Option<&[&str]>,
+) -> crate::model::Message {
+    let mut sections = base_system_sections(|n| {
+        config.is_tool_enabled(n) && allowed.map_or(true, |l| l.contains(&n))
+    });
+    sections.push(format!(
+        "## 4. Todo Context (Task)\n\
+         - Execute ONLY the task in the user message; finish it completely before stopping.\n\
+         - Your final message is a Handover Report in exactly this format (keep the entire report within {} characters; nothing else; the application records it):\n\
+           - Status: done / blocked\n\
+           - Output: <file paths created or updated, or none> - plain comma-separated artifact paths only\n\
+           - Findings: <facts you observed, in one or two sentences>\n\
+           - Next: <what the next task should watch out for, or none>",
+        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
+    ));
+    build_system_message(sections)
+}
+
+/// Build a system message for the todo replan planner.
+/// Read-only: the planner proposes a revised plan in-report and never writes files.
+pub fn system_message_todo_planner(config: &Config) -> crate::model::Message {
+    let mut sections =
+        base_system_sections(|n| config.is_tool_enabled(n) && TODO_PLANNER_TOOLS.contains(&n));
+    sections.push(
+        "## 4. Todo Context (Replan Planner)\n\
+         - You plan only; a separate session executes tasks. Inspect the workspace read-only when needed.\n\
+         - The user message carries the goal, the current plan ([x] = done, immutable), and task reports.\n\
+         - Reply with a ```todo-plan fenced block holding the FULL revised task list as JSON \
+           ({\"tasks\": [{\"id\", \"description\", \"verify\": [check strings]}], \"deliverables\"?}), then notes.\n\
+         - Checks read as `exists <path>` / `nonempty <path>` / `contains <path>:<needle>`. Always include the block."
+            .to_string(),
+    );
+    build_system_message(sections)
+}
+
 /// User-facing name of the `-t`/`--todo` mode (`0` = ReAct). Public names
 /// follow docs/todo-mode.md ("Static Plan" / "Dynamic Replan").
 pub(crate) fn todo_mode_name(todo_mode: u8) -> &'static str {

@@ -26,6 +26,16 @@ pub(crate) enum Check {
 }
 
 impl Check {
+    /// Render back to the plan string form (`parse` roundtrips it).
+    pub(crate) fn to_dsl(&self) -> String {
+        match self {
+            Check::FileExists(p) => format!("exists {}", p),
+            Check::FileNonEmpty(p) => format!("nonempty {}", p),
+            Check::FileContains(p, needle) => format!("contains {}:{}", p, needle),
+            Check::SqlEmpty(q) => format!("sql {}", q),
+        }
+    }
+
     /// Parse one `verify` string: `exists <path>` / `nonempty <path>` /
     /// `contains <path>:<needle>` (split at the first `:`) / `sql <query>`.
     pub(crate) fn parse(s: &str) -> Result<Check> {
