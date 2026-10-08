@@ -49,6 +49,7 @@ mod pretty_kb;
 mod reasoning;
 mod reflex;
 mod reflex_literal;
+mod session;
 mod startup;
 mod todo;
 mod todo_guard;
@@ -345,6 +346,7 @@ async fn main() -> Result<()> {
                     metrics: &mut metrics,
                     plan_guard: None,
                     kb_ctx: kb_ctx.as_ref(),
+                    tool_policy: crate::session::ToolPolicy::Inherit,
                 };
                 let end_reason =
                     run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
@@ -365,6 +367,7 @@ async fn main() -> Result<()> {
                     metrics: &mut metrics,
                     plan_guard: None,
                     kb_ctx: kb_ctx.as_ref(),
+                    tool_policy: crate::session::ToolPolicy::Inherit,
                 };
                 match todo::run_todo_loop(&mut ctx, &mut session, query_text, attached_files).await
                 {

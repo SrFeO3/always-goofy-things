@@ -18,6 +18,7 @@ use crate::llm_stats::{CallStatus, LlmCallRecord, LlmRequestInfo, Metrics, forma
 use crate::model::*;
 use crate::persistence;
 use crate::pretty;
+use crate::session::ToolPolicy;
 use crate::startup;
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 use crate::tools::{self, ToolRunDecision, ToolRunDecisionKind};
@@ -209,6 +210,9 @@ pub(crate) struct LoopCtx<'a> {
     /// Knowledge Base context (single library.sqlite connection + run id);
     /// `None` when the `kb` feature is compiled out.
     pub kb_ctx: crate::tools::KbCtxOpt<'a>,
+    /// Per-session tool narrowing for fresh sessions (`session::run_session`
+    /// carries it on a short-lived inner context; `Inherit` = prior behavior).
+    pub tool_policy: ToolPolicy,
 }
 
 /// Reasoning loop for one user turn: LLM -> tools -> feedback -> repeat.
@@ -230,6 +234,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let metrics = &mut *ctx.metrics;
     let plan_guard = ctx.plan_guard.as_ref();
     let kb_ctx = ctx.kb_ctx;
+    let tool_policy = ctx.tool_policy;
     // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
     // signature smaller and avoids the caller having to pass it through.
     let is_batch = config.query.is_some();
@@ -274,7 +279,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
         Some(&calc_ledger),
         config.todo_mode,
         plan_guard,
-        |name| config.is_tool_enabled(name),
+        |name| crate::session::tool_enabled(config, tool_policy, name),
     );
     'reasoning_loop: loop {
         reasoning_turn += 1;
@@ -304,7 +309,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
         settings.last_llm_call = Some(std::time::Instant::now());
         let llm_start = std::time::Instant::now();
 
-        let llm_future = call_llm(config, settings, provider, &session.messages);
+        let llm_future = call_llm(config, settings, provider, tool_policy, &session.messages);
         let ctrl_c_future = tokio::signal::ctrl_c();
 
         let (assistant_msg, usage_opt, request_info) = tokio::select! {
@@ -492,7 +497,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     config.kb_auto_confirm,
                     config.mini_python_auto_confirm,
                     is_batch,
-                    |name| config.is_tool_enabled(name),
+                    |name| crate::session::tool_enabled(config, tool_policy, name),
                 )
                 .await;
                 let tool_call_decision_reason = tool_call_decision.reason.as_deref().unwrap_or("");
@@ -648,6 +653,7 @@ pub(crate) async fn call_llm(
     config: &startup::Config,
     settings: &Settings,
     provider: LlmProvider,
+    tool_policy: ToolPolicy,
     messages: &[Message],
 ) -> Result<(Message, Option<Usage>, LlmRequestInfo)> {
     let client = reqwest::Client::new();
@@ -655,7 +661,7 @@ pub(crate) async fn call_llm(
         config.db_type.as_deref(),
         config.kb_dir.as_deref(),
         config.mini_python_auto_confirm,
-        |n| config.is_tool_enabled(n),
+        |n| crate::session::tool_enabled(config, tool_policy, n),
     );
     let messages_vec = messages.to_vec();
 
@@ -1078,7 +1084,7 @@ pub(crate) async fn call_llm(
                 config.db_type.as_deref(),
                 config.kb_dir.as_deref(),
                 config.mini_python_auto_confirm,
-                |n| config.is_tool_enabled(n),
+                |n| crate::session::tool_enabled(config, tool_policy, n),
             ),
         );
         // If all tool calls were filtered out, set back to None
