@@ -35,6 +35,7 @@ mod file;
 mod file_pdf;
 #[cfg(feature = "gui")]
 mod gui;
+mod job;
 #[cfg(feature = "kb")]
 mod kb;
 #[cfg(feature = "kb")]

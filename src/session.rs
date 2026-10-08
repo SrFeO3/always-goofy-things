@@ -1,7 +1,7 @@
 //! Fresh-session starter (todo-refine Phase 0, Inner owner).
 //!
-//! Thin wrapper over `run_reasoning_loop`: fresh `Session`, per-session
-//! tool narrowing, report condense. No new runtime entity.
+//! Wraps `run_reasoning_loop` for one fresh session: new `Session`,
+//! per-session tool narrowing, and report condense. Adds no runtime entity.
 
 use anyhow::Result;
 
@@ -28,11 +28,7 @@ impl ToolPolicy {
 }
 
 /// Effective enablement: global `--only-tools` narrowed by the session policy.
-pub(crate) fn tool_enabled(
-    config: &startup::Config,
-    policy: ToolPolicy,
-    name: &str,
-) -> bool {
+pub(crate) fn tool_enabled(config: &startup::Config, policy: ToolPolicy, name: &str) -> bool {
     config.is_tool_enabled(name) && policy.allows(name)
 }
 
@@ -90,9 +86,14 @@ pub(crate) async fn run_session(
         kb_ctx: ctx.kb_ctx,
         tool_policy: spec.allow_tools,
     };
-    let res =
-        run_reasoning_loop(&mut inner, &mut sess, &call_label, spec.instruction, Vec::new())
-            .await;
+    let res = run_reasoning_loop(
+        &mut inner,
+        &mut sess,
+        &call_label,
+        spec.instruction,
+        Vec::new(),
+    )
+    .await;
     match res {
         Err(e) => {
             ctx.plan_guard = inner.plan_guard.take();
@@ -113,10 +114,7 @@ pub(crate) async fn run_session(
                 None
             };
             ctx.plan_guard = inner.plan_guard.take();
-            Ok(SessionOutcome {
-                end_reason,
-                report,
-            })
+            Ok(SessionOutcome { end_reason, report })
         }
     }
 }
@@ -125,11 +123,7 @@ pub(crate) async fn run_session(
 /// recent reports that fit `max_chars` (chars, newest wins, chronological
 /// order). Whole reports only, so no UTF-8 boundary risk. The single most
 /// recent report is always kept, even over budget, to never go in silent.
-pub(crate) fn assemble_instruction(
-    base: &str,
-    prior_reports: &[&str],
-    max_chars: usize,
-) -> String {
+pub(crate) fn assemble_instruction(base: &str, prior_reports: &[&str], max_chars: usize) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut used: usize = 0;
     for r in prior_reports.iter().rev() {
@@ -160,8 +154,13 @@ mod tests {
 
     #[test]
     fn allow_list_narrows() {
-        let kb_extract: ToolPolicy =
-            ToolPolicy::AllowList(&["kb_schema", "kb_search", "kb_read", "kb_insert", "kb_update"]);
+        let kb_extract: ToolPolicy = ToolPolicy::AllowList(&[
+            "kb_schema",
+            "kb_search",
+            "kb_read",
+            "kb_insert",
+            "kb_update",
+        ]);
         assert!(kb_extract.allows("kb_read"));
         assert!(!kb_extract.allows("write_file"));
         assert!(!kb_extract.allows("read_file"));
