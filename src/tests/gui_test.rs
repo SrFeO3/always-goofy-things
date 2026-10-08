@@ -1,13 +1,6 @@
 use eframe::egui;
 
-use super::{OutputStyle, foreground_for_style, is_todo_mode, plain_enter_pressed};
-
-#[test]
-fn workspace_is_enabled_only_for_todo_modes() {
-    assert!(!is_todo_mode(0));
-    assert!(is_todo_mode(1));
-    assert!(is_todo_mode(2));
-}
+use super::{OutputStyle, foreground_for_style, plain_enter_pressed};
 
 // --- Multiline input: Enter sends, Ctrl+O inserts a newline ---
 

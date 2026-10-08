@@ -38,5 +38,5 @@ Local KB (--features kb): builds a searchable knowledge base from your documents
 ## v0.8.0 (2026-09 end) - rework GUI
 GUI reworked as a CLI process shell; multi-line input via Ctrl+O in CLI and GUI.
 
-## v0.9.0 (2026-10 early) - rework todo into jobs, app-driven Local KB (BREAKING)
+## v0.9.0 (2026-10 early) - rework todo into jobs, app-driven Local KB (breaking)
 Todo mode (`-t`, `todo.md`) replaced by todo job runs (`/job run <todo.json> [--mode static|replan]`, details: docs/todo-job.md) and app-driven KB extraction (`/kb extract`, `/kb analyze`). BREAKING: `-t` is removed; plans are structured JSON with mechanical verification; job state is temporary (`.todo/`, auto-deleted on success).

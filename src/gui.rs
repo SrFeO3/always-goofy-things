@@ -547,10 +547,6 @@ fn parse_task_summary(todo_md: &str) -> TaskSummary {
     summary
 }
 
-fn is_todo_mode(todo_mode: u8) -> bool {
-    matches!(todo_mode, 1 | 2)
-}
-
 fn install_fonts(ctx: &egui::Context) {
     let fonts = system_fonts::find_from_presets(
         [
@@ -608,16 +604,14 @@ struct GuiShell {
 impl GuiShell {
     fn new(config: &Config) -> Result<Self> {
         let process = ProcessReader::start()?;
-        let workspace = if is_todo_mode(config.todo_mode) {
-            let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(&config.working_dir)
-            });
-            Some(WorkspaceInspector::new(root))
-        } else {
-            None
-        };
+        // Always on: the artifacts tab stays useful for job outputs;
+        // legacy tabs (todo/next-task/handover) simply read empty.
+        let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&config.working_dir)
+        });
+        let workspace = Some(WorkspaceInspector::new(root));
         Ok(Self {
             process,
             input: String::new(),
