@@ -565,6 +565,28 @@ pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message 
     build_system_message(sections)
 }
 
+/// Build a system message for KB extract sessions (todo-refine Phase 3).
+/// Narrows the tool sections to the five `kb_*` tools and overrides the
+/// dialogue playbook's self-declared `analyzed` (step 5): the application
+/// finalizes status after mechanical coverage.
+#[cfg(feature = "kb")]
+pub fn system_message_kb_extract(config: &Config) -> crate::model::Message {
+    let mut sections = base_system_sections(|n| {
+        config.is_tool_enabled(n) && crate::kb_analyze::KB_EXTRACT_TOOL_NAMES.contains(&n)
+    });
+    sections.push(format!(
+        "## 4. KB Context (Extract: knowledge registration)\n\
+         - Work ONLY the Scope in the user message; its units are your entire reading range (`kb_read` is for neighbours only).\n\
+         - Register entities / claims / relations / conditions / events with `kb_insert`, each with evidence in the same call (`ref` + `target_ref`).\n\
+         - Evidence is verbatim: `matched_text` is an exact substring of the source unit; `start` / `end` are character offsets with 0 <= start < end <= length. Never invent `matched_text`; no statement without a source unit. Cross-document relations are out of scope.\n\
+         - Correct mistakes by inserting a replacement and marking the old row obsolete via `kb_update` (never delete).\n\
+         - NEVER set `analysis_status` yourself; this overrides step (5) above. The application finalizes it after mechanical coverage.\n\
+         - Your final message is an Extraction Report (`Status` / `Units` / `Notes`) within {} characters.",
+        crate::kb_analyze::EXTRACT_REPORT_MAX_CHARS
+    ));
+    build_system_message(sections)
+}
+
 /// User-facing name of the `-t`/`--todo` mode (`0` = ReAct). Public names
 /// follow docs/todo-mode.md ("Static Plan" / "Dynamic Replan").
 pub(crate) fn todo_mode_name(todo_mode: u8) -> &'static str {

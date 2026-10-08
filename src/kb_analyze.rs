@@ -3,10 +3,16 @@
 //! Splits pending documents into byte-budget chunks and tracks them in
 //! `analysis_chunks`. Execution (fresh sessions) lands in Phase 3.
 
-use anyhow::Result;
-use rusqlite::params;
+use anyhow::{Result, anyhow};
+use rusqlite::{OptionalExtension, params};
 
-use crate::kb::{KbContext, lock_conn};
+use crate::job::{
+    Enumerator, JobOptions, JobOutcome, JobStatus, Store, Task, Verifier, VerifyResult, run_job,
+};
+use crate::kb::{KbContext, lock_conn, now_iso};
+use crate::model::Message;
+use crate::reasoning::LoopCtx;
+use crate::session::{ReportRule, SessionOutcome, SessionSpec, ToolPolicy};
 use crate::startup;
 
 /// Provisional per-chunk byte budget (D2: confirm by `--dry-run` metering).
@@ -251,147 +257,589 @@ pub(crate) fn extract_status(ctx: &KbContext, source: Option<&str>) -> Result<St
     Ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rusqlite::Connection;
-    use std::sync::{Arc, Mutex};
-    use uuid::Uuid;
+/// Tools allowed inside extract sessions (system text and policy share it).
+pub(crate) const KB_EXTRACT_TOOL_NAMES: &[&str] = &[
+    "kb_schema",
+    "kb_search",
+    "kb_read",
+    "kb_insert",
+    "kb_update",
+];
 
-    fn mem_ctx() -> KbContext {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::kb_schema::apply_pragmas(&conn).unwrap();
-        crate::kb_schema::migrate(&conn).unwrap();
-        let run_id = Uuid::new_v4();
-        conn.execute(
-            "INSERT INTO analysis_runs (id, label, status) VALUES (?1, 'test', 'completed')",
-            [run_id.to_string()],
-        )
-        .unwrap();
-        KbContext {
-            kb_dir: "mem".to_string(),
-            max_bytes: 65536,
-            conn: Arc::new(Mutex::new(conn)),
-            run_id,
-        }
-    }
+/// Extraction Report budget (shared by the rule and the system text).
+pub(crate) const EXTRACT_REPORT_MAX_CHARS: usize = 500;
 
-    fn add_doc(ctx: &KbContext, title: &str, source: &str, status: &str) -> String {
-        let id = Uuid::new_v4().to_string();
-        let conn = lock_conn(ctx).unwrap();
-        conn.execute(
-            "INSERT INTO documents (id, title, source, document_type, version, analysis_status, file_hash) \
-             VALUES (?1, ?2, ?3, 'md', '1', ?4, 'hash')",
-            params![id, title, source, status],
-        )
-        .unwrap();
-        id
-    }
+/// Final-report contract for extract sessions.
+pub(crate) const EXTRACT_REPORT_RULE: ReportRule = ReportRule {
+    title: "Extraction Report",
+    fields: &["Status", "Units", "Notes"],
+    max_chars: EXTRACT_REPORT_MAX_CHARS,
+};
 
-    fn add_unit(ctx: &KbContext, doc: &str, unit_type: &str, pos: i64, text: &str) {
-        let conn = lock_conn(ctx).unwrap();
-        conn.execute(
-            "INSERT INTO document_units (id, document_id, unit_type, text, position) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![Uuid::new_v4().to_string(), doc, unit_type, text, pos],
-        )
-        .unwrap();
-    }
+/// Uncovered units shorter than this (chars, trimmed) read as headings:
+/// Warn and proceed instead of failing the chunk.
+const HEADING_SHORT_CHARS: usize = 64;
 
-    fn ten(n: usize) -> String {
-        "x".repeat(n)
-    }
+/// Which chunks to (re)run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedoMode {
+    SkipDone,
+    IncludeDone,
+}
 
-    #[test]
-    fn packs_by_budget_without_splitting_units() {
-        let ctx = mem_ctx();
-        let doc = add_doc(&ctx, "t", "data/t.md", "pending");
-        for pos in 0..3 {
-            add_unit(&ctx, &doc, "paragraph", pos, &ten(10));
-        }
-        // 10+10 fit in 25; the third overflows into its own chunk.
-        let chunks = enumerate_extract_chunks(&ctx, None, 25).unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!((chunks[0].pos_from, chunks[0].pos_to), (0, 1));
-        assert_eq!((chunks[1].pos_from, chunks[1].pos_to), (2, 2));
-        assert_eq!(chunks[0].unit_count, 2);
-        assert_eq!(chunks[0].bytes_est, 20);
-    }
+/// Chunk-to-chunk handover (`off` = independent chunks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandoverMode {
+    Off,
+    Auto { max_chars: usize },
+}
 
-    #[test]
-    fn oversized_unit_is_its_own_chunk() {
-        let ctx = mem_ctx();
-        let doc = add_doc(&ctx, "t", "data/t.md", "pending");
-        add_unit(&ctx, &doc, "paragraph", 0, &ten(100));
-        add_unit(&ctx, &doc, "paragraph", 1, &ten(10));
-        let chunks = enumerate_extract_chunks(&ctx, None, 25).unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!((chunks[0].pos_from, chunks[0].pos_to), (0, 0));
-        assert_eq!(chunks[0].bytes_est, 100);
-    }
+/// Extract run knobs (CLI flags land here in Phase 5).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExtractOptions {
+    pub chunk_bytes: usize,
+    pub max_retries: u32,
+    pub redo: RedoMode,
+    pub handover: HandoverMode,
+}
 
-    #[test]
-    fn only_pending_current_docs_enumerated() {
-        let ctx = mem_ctx();
-        let pending = add_doc(&ctx, "p", "data/p.md", "pending");
-        let analyzing = add_doc(&ctx, "a", "data/a.md", "analyzing");
-        let done = add_doc(&ctx, "d", "data/d.md", "analyzed");
-        let old = add_doc(&ctx, "o", "data/o.md", "pending");
-        // Superseded version drops out.
-        {
-            let conn = lock_conn(&ctx).unwrap();
-            conn.execute(
-                "UPDATE documents SET superseded_by = 'next' WHERE id = ?1",
-                [&old],
-            )
-            .unwrap();
-        }
-        for d in [&pending, &analyzing, &done, &old] {
-            add_unit(&ctx, d, "paragraph", 0, "text");
-        }
-        let chunks = enumerate_extract_chunks(&ctx, None, 65536).unwrap();
-        let ids: Vec<&str> = chunks.iter().map(|c| c.document_id.as_str()).collect();
-        assert!(ids.contains(&pending.as_str()));
-        assert!(ids.contains(&analyzing.as_str()));
-        assert!(!ids.contains(&done.as_str()));
-        assert!(!ids.contains(&old.as_str()));
-    }
+/// Stable chunk key: `document_id|unit_type|pos_from|pos_to`.
+fn chunk_key(document_id: &str, unit_type: &str, pos_from: i64, pos_to: i64) -> String {
+    format!("{}|{}|{}|{}", document_id, unit_type, pos_from, pos_to)
+}
 
-    #[test]
-    fn dry_run_is_deterministic() {
-        let ctx = mem_ctx();
-        let doc = add_doc(&ctx, "t", "data/t.md", "pending");
-        for pos in 0..5 {
-            add_unit(&ctx, &doc, "paragraph", pos, &ten(10));
-        }
-        let a = dry_run_report(&enumerate_extract_chunks(&ctx, None, 25).unwrap());
-        let b = dry_run_report(&enumerate_extract_chunks(&ctx, None, 25).unwrap());
-        assert_eq!(a, b);
-        assert!(a.contains("3 chunks"));
-    }
-
-    #[test]
-    fn register_is_idempotent_and_status_reads_back() {
-        let ctx = mem_ctx();
-        let doc = add_doc(&ctx, "t", "data/t.md", "pending");
-        add_unit(&ctx, &doc, "paragraph", 0, "text");
-        let chunks = enumerate_extract_chunks(&ctx, None, 65536).unwrap();
-        assert_eq!(register_chunks(&ctx, &chunks).unwrap(), 1);
-        assert_eq!(register_chunks(&ctx, &chunks).unwrap(), 0);
-        let status = extract_status(&ctx, None).unwrap();
-        assert!(status.contains("0/1 chunks done"));
-        assert!(status.contains("pending"));
-    }
-
-    #[test]
-    fn write_approval_requires_rw() {
-        use clap::Parser;
-        let mut config = crate::startup::Config::try_parse_from(["agt"]).unwrap();
-        config.kb_auto_confirm = crate::startup::KbAutoConfirm::Rw;
-        assert!(require_write_approval(&config).is_ok());
-        config.kb_auto_confirm = crate::startup::KbAutoConfirm::Ro;
-        assert!(require_write_approval(&config).is_err());
-        config.kb_auto_confirm = crate::startup::KbAutoConfirm::Ask;
-        assert!(require_write_approval(&config).is_err());
+/// Split a chunk key back into its range.
+fn decode_key(key: &str) -> Result<(String, String, i64, i64)> {
+    let mut parts = key.split('|');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some(doc), Some(unit_type), Some(from), Some(to), None) => Ok((
+            doc.to_string(),
+            unit_type.to_string(),
+            from.parse()
+                .map_err(|_| anyhow!("[KB_INTERNAL_ERROR] bad chunk key {:?}", key))?,
+            to.parse()
+                .map_err(|_| anyhow!("[KB_INTERNAL_ERROR] bad chunk key {:?}", key))?,
+        )),
+        _ => anyhow::bail!("[KB_INTERNAL_ERROR] bad chunk key {:?}", key),
     }
 }
+
+/// Units in the range that still lack non-obsolete evidence.
+fn uncovered_units(
+    kb: &KbContext,
+    document_id: &str,
+    unit_type: &str,
+    pos_from: i64,
+    pos_to: i64,
+) -> Result<Vec<(String, i64, String)>> {
+    let conn = lock_conn(kb)?;
+    let mut stmt = conn.prepare(
+        "SELECT u.id, u.position, u.text FROM document_units u \
+         WHERE u.document_id = ?1 AND u.obsolete = 0 AND u.unit_type = ?2 \
+           AND u.position BETWEEN ?3 AND ?4 \
+           AND NOT EXISTS (SELECT 1 FROM evidence e \
+                            WHERE e.source_unit_id = u.id AND e.obsolete = 0) \
+         ORDER BY u.position ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![document_id, unit_type, pos_from, pos_to], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Offsets invented by the LLM fail the chunk: every evidence row of this
+/// run must land inside its unit with a verbatim excerpt.
+fn run_evidence_problems(
+    kb: &KbContext,
+    run_id: &str,
+    document_id: &str,
+    unit_type: &str,
+    pos_from: i64,
+    pos_to: i64,
+) -> Result<Vec<String>> {
+    let conn = lock_conn(kb)?;
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.start_offset, e.end_offset, e.matched_text, u.text \
+         FROM evidence e JOIN document_units u ON u.id = e.source_unit_id \
+         WHERE e.analysis_run_id = ?1 AND e.document_id = ?2 AND e.obsolete = 0 \
+           AND u.obsolete = 0 AND u.unit_type = ?3 AND u.position BETWEEN ?4 AND ?5",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![run_id, document_id, unit_type, pos_from, pos_to],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut problems = Vec::new();
+    for (id, start, end, matched, text) in &rows {
+        let len = text.chars().count() as i64;
+        let bad = match (start, end, matched) {
+            (Some(s), Some(e), Some(m)) => {
+                !(*s >= 0 && *s < *e && *e <= len && !m.is_empty() && text.contains(m))
+            }
+            _ => true,
+        };
+        if bad {
+            problems.push(id.clone());
+        }
+    }
+    Ok(problems)
+}
+
+/// Next pending chunk as a `run_job` task.
+/// Quote a literal for the coverage SQL string (ids/types are app-built,
+/// but quoting stays total).
+fn esc(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Uncovered-unit ids in the range; empty = full coverage.
+fn coverage_sql(document_id: &str, unit_type: &str, pos_from: i64, pos_to: i64) -> String {
+    format!(
+        "SELECT u.id FROM document_units u WHERE u.document_id = '{}' AND u.obsolete = 0 \
+         AND u.unit_type = '{}' AND u.position BETWEEN {} AND {} AND NOT EXISTS \
+         (SELECT 1 FROM evidence e WHERE e.source_unit_id = u.id AND e.obsolete = 0)",
+        esc(document_id),
+        esc(unit_type),
+        pos_from,
+        pos_to
+    )
+}
+
+/// Next pending chunk as a `run_job` task. The coverage query doubles as
+/// the task's mechanical check string.
+struct ExtractEnumerator {
+    chunks: Vec<ExtractChunk>,
+    statuses: std::collections::HashMap<String, String>,
+    redo_all: bool,
+    pos: usize,
+}
+
+impl ExtractEnumerator {
+    fn task_for(chunk: &ExtractChunk) -> Task {
+        Task {
+            id: chunk_key(
+                &chunk.document_id,
+                &chunk.unit_type,
+                chunk.pos_from,
+                chunk.pos_to,
+            ),
+            description: format!(
+                "extract {} [{}] pos {}..={} ({} units, {} bytes)",
+                chunk.document_label,
+                chunk.unit_type,
+                chunk.pos_from,
+                chunk.pos_to,
+                chunk.unit_count,
+                chunk.bytes_est
+            ),
+            verify: vec![crate::job::Check::SqlEmpty(coverage_sql(
+                &chunk.document_id,
+                &chunk.unit_type,
+                chunk.pos_from,
+                chunk.pos_to,
+            ))],
+        }
+    }
+}
+
+impl Enumerator for ExtractEnumerator {
+    async fn next_task(&mut self, _ctx: &mut LoopCtx<'_>) -> Result<Option<Task>> {
+        while self.pos < self.chunks.len() {
+            let chunk = &self.chunks[self.pos];
+            self.pos += 1;
+            let key = chunk_key(
+                &chunk.document_id,
+                &chunk.unit_type,
+                chunk.pos_from,
+                chunk.pos_to,
+            );
+            let done = self.statuses.get(&key).is_some_and(|s| s == CHUNK_DONE);
+            if done && !self.redo_all {
+                continue;
+            }
+            return Ok(Some(Self::task_for(chunk)));
+        }
+        Ok(None)
+    }
+}
+
+/// Coverage judge plus whole-document finalize (app-owned `analyzed`).
+struct ExtractVerifier<'a> {
+    kb: &'a KbContext,
+    docs: Vec<(String, String)>,
+}
+
+impl Verifier for ExtractVerifier<'_> {
+    fn check(&self, _ctx: &LoopCtx<'_>, task: &Task) -> Result<VerifyResult> {
+        judge_task(self.kb, task)
+    }
+
+    fn finalize(&self, _ctx: &LoopCtx<'_>) -> Result<JobOutcome> {
+        finalize_docs(self.kb, &self.docs)
+    }
+}
+
+/// Coverage probe over the task's own check strings, then offset
+/// integrity (this run) and the heading short-text rule.
+fn judge_task(kb: &KbContext, task: &Task) -> Result<VerifyResult> {
+    let (doc, unit_type, from, to) = decode_key(&task.id)?;
+    {
+        let probe = |q: &str| -> Result<bool> {
+            let conn = lock_conn(kb)?;
+            let mut stmt = conn.prepare(q)?;
+            let mut rows = stmt.query([])?;
+            Ok(rows.next()?.is_none())
+        };
+        let mut covered = true;
+        for check in &task.verify {
+            if !matches!(check.eval(&probe), VerifyResult::Pass) {
+                covered = false;
+                break;
+            }
+        }
+        if !covered {
+            let uncovered = uncovered_units(kb, &doc, &unit_type, from, to)?;
+            if uncovered
+                .iter()
+                .all(|(_, _, t)| t.trim().chars().count() < HEADING_SHORT_CHARS)
+            {
+                return Ok(VerifyResult::Warn {
+                    reason: format!(
+                        "{} short unit(s) without evidence (likely headings)",
+                        uncovered.len()
+                    ),
+                });
+            }
+            return Ok(VerifyResult::Fail {
+                reason: format!("{} unit(s) without evidence", uncovered.len()),
+            });
+        }
+    }
+    {
+        let problems =
+            run_evidence_problems(kb, &kb.run_id.to_string(), &doc, &unit_type, from, to)?;
+        if !problems.is_empty() {
+            return Ok(VerifyResult::Fail {
+                reason: format!(
+                    "{} evidence row(s) with bad offsets/excerpts (e.g. {})",
+                    problems.len(),
+                    problems[0]
+                ),
+            });
+        }
+    }
+    Ok(VerifyResult::Pass)
+}
+
+/// Whole-document finalize: app-owned `analyzed` for fully covered docs.
+fn finalize_docs(kb: &KbContext, docs: &[(String, String)]) -> Result<JobOutcome> {
+    {
+        let conn = lock_conn(kb)?;
+        let mut analyzed = Vec::new();
+        let mut incomplete = Vec::new();
+        for (doc_id, label) in docs {
+            let uncovered: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM document_units u \
+                 WHERE u.document_id = ?1 AND u.obsolete = 0 \
+                   AND length(trim(u.text)) >= ?2 \
+                   AND NOT EXISTS (SELECT 1 FROM evidence e \
+                                    WHERE e.source_unit_id = u.id AND e.obsolete = 0)",
+                params![doc_id, HEADING_SHORT_CHARS as i64],
+                |row| row.get(0),
+            )?;
+            if uncovered == 0 {
+                conn.execute(
+                    "UPDATE documents SET analysis_status = 'analyzed', analyzed_at = ?1 \
+                     WHERE id = ?2",
+                    params![now_iso(), doc_id],
+                )?;
+                analyzed.push(label.clone());
+            } else {
+                incomplete.push(label.clone());
+            }
+        }
+        drop(conn);
+        if incomplete.is_empty() {
+            return Ok(JobOutcome {
+                status: JobStatus::Completed,
+                summary: format!("analyzed({}): {}", analyzed.len(), analyzed.join(", ")),
+            });
+        }
+        Ok(JobOutcome {
+            status: JobStatus::Failed,
+            summary: format!(
+                "incomplete({}): {}",
+                incomplete.len(),
+                incomplete.join(", ")
+            ),
+        })
+    }
+}
+
+/// Chunk-row recorder: Pass/Warn close the row, Fail keeps it resumable.
+struct ExtractStore<'a> {
+    kb: &'a KbContext,
+}
+
+impl Store for ExtractStore<'_> {
+    fn record(
+        &self,
+        _ctx: &LoopCtx<'_>,
+        task: &Task,
+        outcome: &SessionOutcome,
+        verdict: &VerifyResult,
+    ) -> Result<()> {
+        record_chunk(self.kb, task, outcome, verdict)
+    }
+}
+
+/// Chunk-row write: Pass/Warn close the row, Fail keeps it resumable.
+fn record_chunk(
+    kb: &KbContext,
+    task: &Task,
+    outcome: &SessionOutcome,
+    verdict: &VerifyResult,
+) -> Result<()> {
+    let (doc, unit_type, from, to) = decode_key(&task.id)?;
+    let (status, error) = match verdict {
+        VerifyResult::Pass => (CHUNK_DONE, None),
+        VerifyResult::Warn { reason } => (CHUNK_DONE, Some(reason.clone())),
+        VerifyResult::Fail { reason } => (CHUNK_FAILED, Some(reason.clone())),
+    };
+    let conn = lock_conn(kb)?;
+    conn.execute(
+        "UPDATE analysis_chunks SET status = ?1, attempts = attempts + 1, \
+                report = ?2, error = ?3, finished_at = ?4, \
+                started_at = COALESCE(started_at, ?4) \
+         WHERE document_id = ?5 AND unit_type = ?6 AND pos_from = ?7 AND pos_to = ?8",
+        params![
+            status,
+            outcome.report,
+            error,
+            now_iso(),
+            doc,
+            unit_type,
+            from,
+            to
+        ],
+    )?;
+    Ok(())
+}
+
+/// Previous done chunk's report in the same document/type (handover auto).
+fn previous_report(
+    kb: &KbContext,
+    document_id: &str,
+    unit_type: &str,
+    pos_from: i64,
+    max_chars: usize,
+) -> Result<Option<String>> {
+    let conn = lock_conn(kb)?;
+    let report: Option<String> = conn
+        .query_row(
+            "SELECT report FROM analysis_chunks \
+             WHERE document_id = ?1 AND unit_type = ?2 AND pos_to < ?3 AND status = 'done' \
+             ORDER BY pos_to DESC LIMIT 1",
+            params![document_id, unit_type, pos_from],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(report) = report else {
+        return Ok(None);
+    };
+    if report.chars().count() <= max_chars {
+        return Ok(Some(report));
+    }
+    let mut end = max_chars;
+    while end > 0 && !report.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(Some(format!("{}…[truncated]", &report[..end])))
+}
+
+/// Build one chunk's fresh-session inputs (P1 prompt embedding).
+fn build_extract_spec(
+    kb: &KbContext,
+    session_label: &str,
+    system: &Message,
+    handover: HandoverMode,
+    task: &Task,
+) -> Result<SessionSpec> {
+    let (doc_id, unit_type, from, to) = decode_key(&task.id)?;
+    let conn = lock_conn(kb)?;
+    let label: String = conn.query_row(
+        "SELECT COALESCE(source, title) FROM documents WHERE id = ?1",
+        [&doc_id],
+        |row| row.get(0),
+    )?;
+    let mut units_stmt = conn.prepare(
+        "SELECT id, position, text FROM document_units \
+         WHERE document_id = ?1 AND unit_type = ?2 AND obsolete = 0 \
+           AND position BETWEEN ?3 AND ?4 ORDER BY position ASC",
+    )?;
+    let units = units_stmt
+        .query_map(params![doc_id, unit_type, from, to], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(units_stmt);
+    drop(conn);
+    let bytes: usize = units.iter().map(|(_, _, t)| t.as_bytes().len()).sum();
+    let handover_line = match handover {
+        HandoverMode::Off => "Handover: none (independent chunk).".to_string(),
+        HandoverMode::Auto { max_chars } => {
+            match previous_report(kb, &doc_id, &unit_type, from, max_chars)? {
+                Some(r) => format!("Handover (previous chunk report): {}", r),
+                None => "Handover: none (first chunk).".to_string(),
+            }
+        }
+    };
+    let mut instruction = format!(
+        "Scope: extract {} [{}] pos {}..={} ({} units, {} bytes). Read every unit below.\n\
+         Rules: register knowledge with kb_insert + evidence in the same call (ref/target_ref); \
+         matched_text verbatim; offsets are char offsets into unit.text; fix mistakes via kb_update \
+         obsolete (never delete); NEVER set analysis_status (the app finalizes it).\n\
+         Deliverable: at least one evidence row per unit; close with an Extraction Report.\n{}\nUnits:\n",
+        label,
+        unit_type,
+        from,
+        to,
+        units.len(),
+        bytes,
+        handover_line
+    );
+    for (id, pos, text) in &units {
+        instruction.push_str(&format!(
+            "<unit id=\"{}\" pos=\"{}\">{}</unit>\n",
+            id, pos, text
+        ));
+    }
+    Ok(SessionSpec {
+        label: format!(
+            "{}_kb-{}-{}-{}",
+            session_label,
+            &doc_id[..8.min(doc_id.len())],
+            unit_type,
+            from
+        ),
+        system: system.clone(),
+        instruction,
+        allow_tools: ToolPolicy::AllowList(KB_EXTRACT_TOOL_NAMES),
+        report_rule: EXTRACT_REPORT_RULE,
+        max_turns: None,
+    })
+}
+
+/// Run extract over pending chunks via `run_job` and return its summary.
+/// Non-`Completed` outcomes return early: resume later to finalize.
+pub(crate) async fn run_extract(
+    ctx: &mut LoopCtx<'_>,
+    source: Option<&str>,
+    options: &ExtractOptions,
+) -> Result<String> {
+    require_write_approval(ctx.config)?;
+    let kb: &KbContext = ctx.kb_ctx.ok_or_else(|| {
+        anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
+    })?;
+    let chunks = enumerate_extract_chunks(kb, source, options.chunk_bytes)?;
+    if chunks.is_empty() {
+        return Ok("[kb extract] no pending documents".to_string());
+    }
+    register_chunks(kb, &chunks)?;
+    let statuses = chunk_statuses(kb, &chunks)?;
+    let system = startup::system_message_kb_extract(ctx.config);
+    let session_label = ctx.config.session_label.clone();
+    let handover = options.handover;
+    let mut docs: Vec<(String, String)> = Vec::new();
+    for c in &chunks {
+        if !docs.iter().any(|(id, _)| id == &c.document_id) {
+            docs.push((c.document_id.clone(), c.document_label.clone()));
+        }
+    }
+    let mut enumerator = ExtractEnumerator {
+        chunks,
+        statuses,
+        redo_all: options.redo == RedoMode::IncludeDone,
+        pos: 0,
+    };
+    let verifier = ExtractVerifier { kb, docs };
+    let store = ExtractStore { kb };
+    let job_options = JobOptions {
+        max_retries: options.max_retries,
+    };
+    let outcome = run_job(
+        ctx,
+        &mut enumerator,
+        &verifier,
+        &store,
+        &job_options,
+        |task| build_extract_spec(kb, &session_label, &system, handover, task),
+    )
+    .await?;
+    Ok(outcome.summary)
+}
+
+/// Current row statuses keyed by chunk key.
+fn chunk_statuses(
+    kb: &KbContext,
+    chunks: &[ExtractChunk],
+) -> Result<std::collections::HashMap<String, String>> {
+    let conn = lock_conn(kb)?;
+    let mut map = std::collections::HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT document_id, unit_type, pos_from, pos_to, status FROM analysis_chunks")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    drop(conn);
+    let wanted: std::collections::HashSet<String> = chunks
+        .iter()
+        .map(|c| chunk_key(&c.document_id, &c.unit_type, c.pos_from, c.pos_to))
+        .collect();
+    for (doc, unit_type, from, to, status) in rows {
+        let key = chunk_key(&doc, &unit_type, from, to);
+        if wanted.contains(&key) {
+            map.insert(key, status);
+        }
+    }
+    Ok(map)
+}
+
+#[cfg(test)]
+#[path = "tests/kb_analyze_test.rs"]
+mod tests;
