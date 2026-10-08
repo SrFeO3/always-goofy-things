@@ -230,97 +230,48 @@ fn system_message_lists_only_enabled_editors() {
 }
 
 #[test]
-fn system_message_mode1_todo_section_keeps_fixed_number() {
+fn system_message_todo_task_keeps_fixed_number_and_narrows() {
     let config = cfg(vec![ToolName::ReadFile]);
-    let msg = system_message_mode1_task_loop(&config);
+    let msg = system_message_todo_task(&config, None);
     assert!(
-        msg.content
-            .contains("## 4. Todo Context (Static Plan: Task Loop)"),
+        msg.content.contains("## 4. Todo Context (Task)"),
         "Todo section must keep its fixed number 4: {}",
         msg.content
     );
+    assert!(msg.content.contains("Handover Report"));
+    let narrowed = system_message_todo_task(&cfg(vec![]), Some(&["read_file"]));
+    assert!(narrowed.content.contains("read_file"));
+    assert!(!narrowed.content.contains("write_file"));
 }
 
 #[test]
-fn system_message_mode2_sections_keep_fixed_numbers() {
+fn system_message_todo_planner_is_read_only() {
     let config = cfg(vec![]);
-    let replan = system_message_mode2_replan(&config);
-    assert!(
-        replan
-            .content
-            .contains("## 4. Todo Context (Dynamic Replan: Planner)")
-    );
-    let task = system_message_mode2_task_loop(&config);
-    assert!(
-        task.content
-            .contains("## 4. Todo Context (Dynamic Replan: Task Loop)")
-    );
+    let msg = system_message_todo_planner(&config);
+    assert!(msg.content.contains("## 4. Todo Context (Replan Planner)"));
+    assert!(msg.content.contains("```todo-plan"));
+    assert!(!msg.content.contains("write_file"));
+    assert!(!msg.content.contains("execute_bash"));
 }
 
 #[test]
-fn todo_system_messages_mention_outputs_lines() {
+fn todo_system_messages_mention_handover_report() {
     let config = cfg(vec![]);
-    for msg in [
-        system_message_mode1_task_loop(&config),
-        system_message_mode2_replan(&config),
-        system_message_mode2_task_loop(&config),
-    ] {
-        assert!(
-            msg.content.contains("`outputs:`"),
-            "todo system message must mention the outputs: line: {}",
-            msg.content
-        );
-    }
+    let msg = system_message_todo_task(&config, None);
+    assert!(
+        msg.content.contains("Handover Report"),
+        "todo task message must name the report contract: {}",
+        msg.content
+    );
 }
 
+#[cfg(feature = "kb")]
 #[test]
-fn system_message_mode2_uses_next_task_brief() {
+fn system_message_kb_extract_forbids_self_declared_analyzed() {
     let config = cfg(vec![]);
-    let replan = system_message_mode2_replan(&config);
-    assert!(
-        replan.content.contains("`./next-task.md`"),
-        "replan message must direct writing the per-task brief: {}",
-        replan.content
-    );
-    assert!(
-        replan
-            .content
-            .contains("Write ONLY these two files, in this order:"),
-        "replan message must list its outputs in order: {}",
-        replan.content
-    );
-    assert!(
-        replan.content.contains("is forbidden"),
-        "replan message must forbid writing any other file: {}",
-        replan.content
-    );
-    assert!(
-        replan
-            .content
-            .contains("mark each one must-read or optional"),
-        "replan message must split the brief's files into must-read / optional: {}",
-        replan.content
-    );
-    let task = system_message_mode2_task_loop(&config);
-    assert!(
-        task.content.contains("`./next-task.md`"),
-        "task message must read the per-task brief: {}",
-        task.content
-    );
-    assert!(
-        task.content
-            .contains("explore `artifacts/` with list_directory"),
-        "task message must allow exploring artifacts/ when the brief is insufficient: {}",
-        task.content
-    );
-    assert!(
-        task.content.contains("marked must-read or optional"),
-        "task message must mention the must-read / optional markings: {}",
-        task.content
-    );
-    assert!(
-        !task.content.contains("Do NOT read `artifacts/handover.md`"),
-        "task message must not forbid reading handover.md outright: {}",
-        task.content
-    );
+    let msg = system_message_kb_extract(&config);
+    assert!(msg.content.contains("## 4. KB Context (Extract"));
+    assert!(msg.content.contains("NEVER set `analysis_status`"));
+    assert!(msg.content.contains("Extraction Report"));
+    assert!(!msg.content.contains("write_file"));
 }

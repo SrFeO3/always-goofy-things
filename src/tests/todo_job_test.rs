@@ -119,7 +119,7 @@ fn next_undone_skips_done_in_order() {
 fn plan_block_takes_last_fence() {
     assert!(extract_plan_block("no fence here").is_none());
     let two = "notes ```todo-plan {\"tasks\": []} ``` mid ```todo-plan {\"tasks\": [1]} ``` end";
-    assert_eq!(extract_plan_block(two), Some(" {\"tasks\": [1]} ".into()));
+    assert_eq!(extract_plan_block(two), Some(" {\"tasks\": [1]} "));
 }
 
 #[test]
@@ -280,5 +280,55 @@ fn clean_removes_orphans_or_all() {
     assert!(std::fs::read_dir(&state_dir).unwrap().next().is_none());
     // Missing dir reads as nothing to do.
     assert!(clean_states(&dir.join("nodir"), false).unwrap().is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn status_reads_state_counts() {
+    let dir = scratch("status");
+    let p = write_plan(&dir, "todo.json", &plan_json());
+    let sp = state_file_for(&dir, &job_id_for(&p));
+    let mut states = HashMap::new();
+    states.insert("t1".to_string(), done_state("r"));
+    save_task_states(&sp, "j", &p, &states).unwrap();
+    let out = todo_status_in(&dir, &p).unwrap();
+    assert!(out.contains("[job status] 1/2 tasks done"));
+    assert!(out.contains("- [x] t1"));
+    assert!(out.contains("- [ ] t2 (not started)"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn dry_run_lists_tasks_checks_deliverables() {
+    let dir = scratch("dryrun");
+    let p = write_plan(&dir, "todo.json", &plan_json());
+    let out = dry_run_todo(&p).unwrap();
+    assert!(out.contains("[job dry-run] 2 tasks, 1 deliverables"));
+    assert!(out.contains("t1: take notes"));
+    assert!(out.contains("check: exists artifacts/notes.md"));
+    assert!(out.contains("deliverable: artifacts/report.md"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn generated_plan_writes_through_validation() {
+    let dir = scratch("genplan");
+    let path = dir.join(".todo").join("gen.json");
+    let plan = write_generated_plan(
+        "investigate",
+        r#"{"tasks": [{"id": "q1", "description": "look", "verify": ["exists artifacts/q.md"]}]}"#,
+        &path,
+        "artifacts/default.md",
+    )
+    .unwrap();
+    assert_eq!(plan.goal, "investigate");
+    assert_eq!(plan.deliverables, vec!["artifacts/default.md"]);
+    // Reload validates the written file.
+    let reloaded = load_plan(&path).unwrap();
+    assert_eq!(reloaded.tasks.len(), 1);
+    // Bad fence JSON fails before touching the disk.
+    assert!(
+        write_generated_plan("g", "not json", &dir.join("bad.json"), "artifacts/d.md").is_err()
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

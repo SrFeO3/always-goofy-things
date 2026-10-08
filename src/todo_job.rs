@@ -28,7 +28,7 @@ const PLANNER_HANDOVER_CHARS: usize = 4000;
 const TODO_STATE_DIR: &str = ".todo";
 
 /// Fence marker carrying the planner's revised plan.
-const PLAN_FENCE: &str = "```todo-plan";
+pub(crate) const PLAN_FENCE: &str = "```todo-plan";
 
 /// One planned task with parsed checks plus raw strings for display.
 #[derive(Debug, Clone)]
@@ -191,18 +191,13 @@ pub(crate) fn state_file_for(workspace: &Path, job_id: &str) -> PathBuf {
         .join(format!("{}.state.json", job_id))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum TaskStatus {
+    #[default]
     Pending,
     Done,
     Failed,
-}
-
-impl Default for TaskStatus {
-    fn default() -> Self {
-        TaskStatus::Pending
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -269,7 +264,7 @@ struct ProposedTask {
 }
 
 /// Take the LAST fenced block (a revision supersedes examples/older drafts).
-fn extract_plan_block(report: &str) -> Option<&str> {
+pub(crate) fn extract_plan_block(report: &str) -> Option<&str> {
     let mut last = None;
     let mut rest = report;
     while let Some(i) = rest.find(PLAN_FENCE) {
@@ -322,7 +317,7 @@ fn apply_replan(
         match tasks.iter().find(|t| &t.id == done) {
             Some(t) => {
                 let old = plan.tasks.iter().find(|t| &t.id == done);
-                if old.map_or(true, |o| o.description != t.description) {
+                if old.is_none_or(|o| o.description != t.description) {
                     anyhow::bail!("replan rejected: done task {:?} altered or renamed", done);
                 }
             }
@@ -507,11 +502,7 @@ impl Verifier for TodoVerifier {
 fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>) -> JobOutcome {
     let mut missing: Vec<String> = Vec::new();
     for d in &plan.deliverables {
-        let bad = match std::fs::metadata(d) {
-            Ok(m) if m.len() > 0 => false,
-            _ => true,
-        };
-        if bad {
+        if !matches!(std::fs::metadata(d), Ok(m) if m.len() > 0) {
             missing.push(d.clone());
         }
     }
@@ -776,7 +767,95 @@ fn outcome_with_finalize(outcome: JobOutcome, plan: &Plan, state_path: &Path) ->
     finalize_plan(plan, &load_task_states(state_path))
 }
 
-/// Scaffold template for `/job init` (Phase 5 writes it; refuses overwrite).
+/// Dry-run text: tasks, checks, deliverables. No execution, no state.
+pub(crate) fn dry_run_todo(plan_path: &Path) -> Result<String> {
+    let plan = load_plan(plan_path)?;
+    let mut out = format!(
+        "[job dry-run] {} tasks, {} deliverables\n",
+        plan.tasks.len(),
+        plan.deliverables.len()
+    );
+    for t in &plan.tasks {
+        out.push_str(&format!(" - {}: {}\n", t.id, t.description));
+        for c in &t.verify_raw {
+            out.push_str(&format!("     check: {}\n", c));
+        }
+    }
+    for d in &plan.deliverables {
+        out.push_str(&format!(" deliverable: {}\n", d));
+    }
+    Ok(out)
+}
+
+/// Progress text from the state file (missing file = all pending).
+pub(crate) fn todo_status(plan_path: &Path) -> Result<String> {
+    todo_status_in(Path::new("."), plan_path)
+}
+
+/// Workspace-explicit progress (tests point it at scratch dirs).
+pub(crate) fn todo_status_in(workspace: &Path, plan_path: &Path) -> Result<String> {
+    let plan = load_plan(plan_path)?;
+    let states = load_task_states(&state_file_for(workspace, &job_id_for(plan_path)));
+    let done = plan
+        .tasks
+        .iter()
+        .filter(|t| matches!(states.get(&t.id).map(|s| s.status), Some(TaskStatus::Done)))
+        .count();
+    let mut out = format!("[job status] {}/{} tasks done\n", done, plan.tasks.len());
+    for t in &plan.tasks {
+        let line = match states.get(&t.id) {
+            Some(s) if s.status == TaskStatus::Done => {
+                format!(" - [x] {} (attempts {})\n", t.id, s.attempts)
+            }
+            Some(s) => format!(
+                " - [ ] {} (attempts {}, error: {})\n",
+                t.id,
+                s.attempts,
+                s.error.as_deref().unwrap_or("none")
+            ),
+            None => format!(" - [ ] {} (not started)\n", t.id),
+        };
+        out.push_str(&line);
+    }
+    Ok(out)
+}
+
+/// Write a planner-fenced plan to disk for generated jobs (analyze).
+/// Validates through the same gate as replan, then re-validates the file.
+/// Missing deliverables fall back to `default_deliverable` so finalize
+/// keeps its teeth. Overwrites: generated plans live in managed space.
+pub(crate) fn write_generated_plan(
+    goal: &str,
+    fence_block: &str,
+    path: &Path,
+    default_deliverable: &str,
+) -> Result<Plan> {
+    let proposed: ProposedPlan = serde_json::from_str(fence_block)
+        .map_err(|e| anyhow!("bad generated plan JSON: {:#}", e))?;
+    let mut plan = Plan {
+        goal: goal.to_string(),
+        tasks: Vec::new(),
+        deliverables: Vec::new(),
+    };
+    apply_replan(&mut plan, &HashMap::new(), proposed)?;
+    if plan.deliverables.is_empty() {
+        plan.deliverables = vec![default_deliverable.to_string()];
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let doc = serde_json::json!({
+        "goal": plan.goal,
+        "tasks": plan.tasks.iter().map(|t| serde_json::json!({
+            "id": t.id, "description": t.description, "verify": t.verify_raw,
+        })).collect::<Vec<_>>(),
+        "deliverables": plan.deliverables,
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    load_plan(path)
+}
+
+/// Scaffold template for `/job init` (refuses overwrite).
 pub(crate) const TODO_TEMPLATE: &str = r#"{
   "goal": "TODO: describe the job goal",
   "tasks": [

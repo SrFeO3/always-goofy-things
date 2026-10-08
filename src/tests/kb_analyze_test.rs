@@ -328,7 +328,6 @@ fn record_closes_and_counts_attempts() {
     add_unit(&ctx, &doc, "paragraph", 0, "text");
     let chunks = enumerate_extract_chunks(&ctx, None, 65536).unwrap();
     register_chunks(&ctx, &chunks).unwrap();
-    let store = ExtractStore { kb: &ctx };
     let task = ExtractEnumerator::task_for(&chunks[0]);
     record_chunk(
         &ctx,

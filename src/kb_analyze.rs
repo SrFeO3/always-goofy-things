@@ -5,6 +5,7 @@
 
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
+use std::path::Path;
 
 use crate::job::{
     Enumerator, JobOptions, JobOutcome, JobStatus, Store, Task, Verifier, VerifyResult, run_job,
@@ -12,7 +13,7 @@ use crate::job::{
 use crate::kb::{KbContext, lock_conn, now_iso};
 use crate::model::Message;
 use crate::reasoning::LoopCtx;
-use crate::session::{ReportRule, SessionOutcome, SessionSpec, ToolPolicy};
+use crate::session::{ReportRule, SessionOutcome, SessionSpec, ToolPolicy, run_session};
 use crate::startup;
 
 /// Provisional per-chunk byte budget (D2: confirm by `--dry-run` metering).
@@ -132,7 +133,7 @@ fn pack_units(
     let mut cur: Vec<(String, i64, usize)> = Vec::new();
     let mut cur_bytes: usize = 0;
     for (id, pos, text) in &units {
-        let len = text.as_bytes().len();
+        let len = text.len(); // bytes (`String::len`); never SQL `length()`
         if !cur.is_empty() && cur_bytes + len > chunk_bytes {
             chunks.push(make_chunk(doc_id, label, unit_type, &cur, cur_bytes));
             cur.clear();
@@ -202,7 +203,7 @@ pub(crate) fn register_chunks(ctx: &KbContext, chunks: &[ExtractChunk]) -> Resul
             "INSERT OR IGNORE INTO analysis_chunks \
              (id, run_id, document_id, unit_type, pos_from, pos_to, unit_count, \
               bytes_est, status, attempts, read_ranges) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
             params![
                 id,
                 ctx.run_id.to_string(),
@@ -212,6 +213,7 @@ pub(crate) fn register_chunks(ctx: &KbContext, chunks: &[ExtractChunk]) -> Resul
                 c.pos_to,
                 c.unit_count as i64,
                 c.bytes_est as i64,
+                CHUNK_PENDING,
                 read_ranges
             ],
         )?;
@@ -279,6 +281,9 @@ pub(crate) const EXTRACT_REPORT_RULE: ReportRule = ReportRule {
 /// Uncovered units shorter than this (chars, trimmed) read as headings:
 /// Warn and proceed instead of failing the chunk.
 const HEADING_SHORT_CHARS: usize = 64;
+
+/// Handover budget for `--handover auto` between adjacent chunks.
+pub(crate) const HANDOVER_AUTO_CHARS: usize = 2000;
 
 /// Which chunks to (re)run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,7 +715,7 @@ fn build_extract_spec(
         .collect::<Result<Vec<_>, _>>()?;
     drop(units_stmt);
     drop(conn);
-    let bytes: usize = units.iter().map(|(_, _, t)| t.as_bytes().len()).sum();
+    let bytes: usize = units.iter().map(|(_, _, t)| t.len()).sum();
     let handover_line = match handover {
         HandoverMode::Off => "Handover: none (independent chunk).".to_string(),
         HandoverMode::Auto { max_chars } => {
@@ -838,6 +843,138 @@ fn chunk_statuses(
         }
     }
     Ok(map)
+}
+
+/// Tools for analyze executors: KB reads/writes plus report workspace.
+/// (`write_file` prompts y/N interactively; batch needs `--unsafe-reflex`.)
+pub(crate) const ANALYZE_EXEC_TOOLS: &[&str] = &[
+    "kb_schema",
+    "kb_search",
+    "kb_read",
+    "kb_insert",
+    "kb_update",
+    "list_directory",
+    "read_file",
+    "write_file",
+    "grep_search",
+    "fetch_web",
+    "calc",
+];
+
+/// Planning reads a little wider than the todo planner (KB scoping).
+const ANALYZE_PLANNER_TOOLS: &[&str] = &[
+    "list_directory",
+    "read_file",
+    "grep_search",
+    "fetch_web",
+    "calc",
+    "kb_schema",
+    "kb_search",
+    "kb_read",
+];
+
+/// Analyze run knobs.
+#[derive(Debug, Clone)]
+pub(crate) struct AnalyzeOptions {
+    pub max_retries: u32,
+    pub note: String,
+}
+
+/// Stable generated-plan path per goal (reruns resume through it).
+fn analyze_plan_path(workspace: &Path, goal: &str) -> std::path::PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    goal.hash(&mut h);
+    workspace.join(format!(".todo/kb-analyze-{:016x}.json", h.finish()))
+}
+
+/// Cross-document investigation: plan once from the goal, then run the
+/// replan job over the generated plan (todo engine, KB-aware tools).
+/// Verification is deliverables (fatal) plus evidence discipline reviewed
+/// at the final replan; open questions stay human-read (R7).
+pub(crate) async fn run_kb_analyze(
+    ctx: &mut LoopCtx<'_>,
+    goal: &str,
+    sources: &[String],
+    options: &AnalyzeOptions,
+) -> Result<String> {
+    use crate::todo_job::{TodoMode, TodoOptions, run_todo};
+    require_write_approval(ctx.config)?;
+    if goal.trim().is_empty() {
+        anyhow::bail!("[KB_CONFIG_ERROR] /kb analyze needs a goal.");
+    }
+    let focus = if sources.is_empty() {
+        String::new()
+    } else {
+        format!("\nFocus documents: {}.", sources.join(", "))
+    };
+    let session_label = ctx.config.session_label.clone();
+    let spec = SessionSpec {
+        label: format!("{}_analyze-plan", session_label),
+        system: startup::system_message_todo_planner(ctx.config),
+        instruction: format!(
+            "Goal (cross-document investigation): {}{}\n\
+             Plan it as analyzing tasks over the KB (kb_search/kb_schema/kb_read to scope, \
+             kb_insert/kb_update with evidence to record links, write_file for a report under \
+             artifacts/). Reply with a {} fenced block holding the FULL task list as JSON \
+             ({{\"tasks\": [{{\"id\", \"description\", \"verify\": [check strings]}}], \"deliverables\"?}}), \
+             then notes. Checks read as exists/nonempty/contains/sql.",
+            goal,
+            focus,
+            crate::todo_job::PLAN_FENCE,
+        ),
+        allow_tools: ToolPolicy::AllowList(ANALYZE_PLANNER_TOOLS),
+        report_rule: ReportRule {
+            title: "Analyze Plan",
+            fields: &["Plan", "Notes"],
+            max_chars: crate::todo_job::PLANNER_REPORT_MAX_CHARS,
+        },
+        max_turns: None,
+    };
+    let outcome = run_session(ctx, spec).await?;
+    if !outcome.end_reason.is_completed() {
+        anyhow::bail!(
+            "[KB_LLM_ERROR] Planning session ended ({:?}); rephrase the goal and retry.",
+            outcome.end_reason
+        );
+    }
+    let text = outcome
+        .raw_report
+        .as_deref()
+        .or(outcome.report.as_deref())
+        .unwrap_or("");
+    let Some(block) = crate::todo_job::extract_plan_block(text) else {
+        anyhow::bail!(
+            "[KB_LLM_ERROR] Planner produced no plan block; rephrase the goal and retry."
+        );
+    };
+    let path = analyze_plan_path(std::path::Path::new("."), goal);
+    let deliverable = format!("artifacts/kb-analyze-{:08x}.md", {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        goal.hash(&mut h);
+        h.finish() as u32
+    });
+    crate::todo_job::write_generated_plan(goal, block, &path, &deliverable)?;
+    let mut note = String::new();
+    if !sources.is_empty() {
+        note.push_str(&format!("Focus documents: {}. ", sources.join(", ")));
+    }
+    note.push_str(&options.note);
+    run_todo(
+        ctx,
+        &path,
+        &TodoOptions {
+            mode: TodoMode::Replan,
+            max_retries: options.max_retries,
+            max_stalls: 3,
+            note,
+            executor_policy: ToolPolicy::AllowList(ANALYZE_EXEC_TOOLS),
+        },
+    )
+    .await
 }
 
 #[cfg(test)]

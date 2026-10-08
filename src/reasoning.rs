@@ -203,9 +203,9 @@ pub(crate) struct LoopCtx<'a> {
     pub provider: LlmProvider,
     pub settings: &'a mut Settings,
     pub metrics: &'a mut Metrics,
-    /// Plan-write guard for `execute_tool` while a Mode-2 executor session
-    /// runs; `None` otherwise (set by `run_todo_loop_mode2`, cleared by
-    /// `run_replan_loop`).
+    /// Plan-write guard (legacy Mode-2 executor protection, still enforced
+    /// in `execute_tool`). New job runners never set it: planners propose
+    /// in-report and the application applies, so this stays `None`.
     pub plan_guard: Option<crate::todo_guard::PlanWriteGuard>,
     /// Knowledge Base context (single library.sqlite connection + run id);
     /// `None` when the `kb` feature is compiled out.

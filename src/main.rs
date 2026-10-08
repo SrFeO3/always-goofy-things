@@ -54,7 +54,6 @@ mod reflex;
 mod reflex_literal;
 mod session;
 mod startup;
-mod todo;
 mod todo_guard;
 mod todo_job;
 mod tools;
@@ -102,7 +101,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let is_batch = config.query.is_some() || config.todo_mode > 0;
+    if config.todo_mode > 0 {
+        anyhow::bail!(
+            "-t/--todo was removed; use /job run <todo.json> [--mode static|replan] instead (batch: -q \"/job run ...\")"
+        );
+    }
+
+    let is_batch = config.query.is_some();
     let start_time = std::time::Instant::now();
 
     // Set working directory and print banner (all modes)
@@ -163,13 +168,7 @@ async fn main() -> Result<()> {
     println!("\x1b[90mSession ID: {}\x1b[0m", session.id);
 
     // Main conversation loop
-    let mut batch_input: Option<String> = if config.todo_mode > 0 {
-        // In todo mode, -q is an additional instruction for every replan and
-        // task session (appended to the user message); todo.md is the plan.
-        Some(config.query.clone().unwrap_or_default())
-    } else {
-        config.query.clone()
-    };
+    let mut batch_input: Option<String> = config.query.clone();
     loop {
         let input = if let Some(q) = batch_input.take() {
             // Batch: use the -q argument as the first (and only) user input
@@ -209,8 +208,70 @@ async fn main() -> Result<()> {
                 }
             }
         };
-        if input.trim().is_empty() && config.todo_mode == 0 {
+        if input.trim().is_empty() {
             continue;
+        }
+        // Long jobs (/job, /kb extract, /kb analyze): parsed synchronously,
+        // executed here. No turn advance, like other slash commands.
+        if let Some(req) = cmd::parse_job_request(&input) {
+            match req {
+                Ok(req) => match execute_job_request(
+                    req,
+                    &config,
+                    provider,
+                    &mut settings,
+                    &mut metrics,
+                    kb_ctx.as_ref(),
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        handle_turn_output(
+                            &summary,
+                            &config,
+                            session.turn,
+                            &session.label,
+                            false,
+                            start_time,
+                            &metrics,
+                        )?;
+                        println!("{}", summary);
+                        if is_batch {
+                            #[cfg(feature = "kb")]
+                            if let Some(kctx) = &kb_ctx {
+                                kb::kb_finish_run(kctx);
+                            }
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        if is_batch {
+                            if let Some(output_path) = &config.output_file {
+                                let note = format!("\n\n[job] Error: {}\n", e);
+                                let written = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(output_path)
+                                    .and_then(|mut f| f.write_all(note.as_bytes()));
+                                if let Err(we) = written {
+                                    eprintln!(
+                                        "Failed to write completion-unconfirmed note to '{}': {}",
+                                        output_path, we
+                                    );
+                                }
+                            }
+                            return Err(e);
+                        }
+                        eprintln!("\x1b[91mJob error: {}\x1b[0m", e);
+                        continue;
+                    }
+                },
+                Err(msg) => {
+                    eprintln!("\x1b[91mSlash command error: {}\x1b[0m", msg);
+                    continue;
+                }
+            }
         }
         // Slash commands. cmd.rs mutates `session` / `settings` in place.
         if let Some(result) = cmd::try_handle_slash_command(
@@ -341,64 +402,26 @@ async fn main() -> Result<()> {
         }
 
         // --- Mode-aware execution ---
-        let (done, final_answer) = match config.todo_mode {
-            0 => {
-                let mut ctx = LoopCtx {
-                    config: &config,
-                    provider,
-                    settings: &mut settings,
-                    metrics: &mut metrics,
-                    plan_guard: None,
-                    kb_ctx: kb_ctx.as_ref(),
-                    tool_policy: crate::session::ToolPolicy::Inherit,
-                };
-                let end_reason =
-                    run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
-                        .await?;
-                let done = end_reason.is_completed();
-                let answer = if done {
-                    session.messages.last().unwrap().content.clone()
-                } else {
-                    String::new()
-                };
-                (done, answer)
-            }
-            1 | 2 => {
-                let mut ctx = LoopCtx {
-                    config: &config,
-                    provider,
-                    settings: &mut settings,
-                    metrics: &mut metrics,
-                    plan_guard: None,
-                    kb_ctx: kb_ctx.as_ref(),
-                    tool_policy: crate::session::ToolPolicy::Inherit,
-                };
-                match todo::run_todo_loop(&mut ctx, &mut session, query_text, attached_files).await
-                {
-                    Ok(summary) => (true, summary),
-                    Err(e) => {
-                        // Leave an error note in -o before exiting non-zero.
-                        // Write failure is warned about; the original error
-                        // propagates.
-                        if let Some(output_path) = &config.output_file {
-                            let note = format!("\n\n[todo] Error: {}\n", e);
-                            let written = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(output_path)
-                                .and_then(|mut f| f.write_all(note.as_bytes()));
-                            if let Err(we) = written {
-                                eprintln!(
-                                    "Failed to write completion-unconfirmed note to '{}': {}",
-                                    output_path, we
-                                );
-                            }
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-            _ => unreachable!(),
+        let (done, final_answer) = {
+            let mut ctx = LoopCtx {
+                config: &config,
+                provider,
+                settings: &mut settings,
+                metrics: &mut metrics,
+                plan_guard: None,
+                kb_ctx: kb_ctx.as_ref(),
+                tool_policy: crate::session::ToolPolicy::Inherit,
+            };
+            let end_reason =
+                run_reasoning_loop(&mut ctx, &mut session, "main", query_text, attached_files)
+                    .await?;
+            let done = end_reason.is_completed();
+            let answer = if done {
+                session.messages.last().unwrap().content.clone()
+            } else {
+                String::new()
+            };
+            (done, answer)
         };
 
         if done {
@@ -427,6 +450,158 @@ async fn main() -> Result<()> {
         kb::kb_finish_run(kctx);
     }
     Ok(())
+}
+
+/// Execute a parsed long-job request; returns the printable summary.
+async fn execute_job_request(
+    req: cmd::JobRequest,
+    config: &startup::Config,
+    provider: LlmProvider,
+    settings: &mut Settings,
+    metrics: &mut Metrics,
+    kb_ctx: crate::tools::KbCtxOpt<'_>,
+) -> Result<String> {
+    use cmd::JobRequest as R;
+    match req {
+        R::TodoInit { path } => {
+            todo_job::init_plan(std::path::Path::new(&path))?;
+            Ok(format!(
+                "Wrote scaffold {}. Fill goal/tasks, then /job run it.",
+                path
+            ))
+        }
+        R::TodoRun {
+            plan,
+            mode,
+            dry_run,
+            status,
+            max_retries,
+            note,
+        } => {
+            let path = std::path::Path::new(&plan);
+            if dry_run {
+                return todo_job::dry_run_todo(path);
+            }
+            if status {
+                return todo_job::todo_status(path);
+            }
+            let mut ctx = LoopCtx {
+                config,
+                provider,
+                settings,
+                metrics,
+                plan_guard: None,
+                kb_ctx,
+                tool_policy: crate::session::ToolPolicy::Inherit,
+            };
+            todo_job::run_todo(
+                &mut ctx,
+                path,
+                &todo_job::TodoOptions {
+                    mode,
+                    max_retries,
+                    max_stalls: 3,
+                    note,
+                    executor_policy: crate::session::ToolPolicy::Inherit,
+                },
+            )
+            .await
+        }
+        R::TodoClean { all } => {
+            let deleted = todo_job::clean_states(std::path::Path::new("."), all)?;
+            Ok(format!("Removed {} stale job state(s).", deleted.len()))
+        }
+        #[cfg(feature = "kb")]
+        R::KbExtract {
+            source,
+            chunk_bytes,
+            dry_run,
+            status,
+            max_retries,
+            redo,
+            handover_auto,
+        } => {
+            let kb = kb_ctx.ok_or_else(|| {
+                anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
+            })?;
+            if dry_run {
+                let chunks = kb_analyze::enumerate_extract_chunks(
+                    kb,
+                    source.as_deref(),
+                    chunk_bytes.unwrap_or(kb_analyze::DEFAULT_CHUNK_BYTES),
+                )?;
+                return Ok(kb_analyze::dry_run_report(&chunks));
+            }
+            if status {
+                return kb_analyze::extract_status(kb, source.as_deref());
+            }
+            let mut ctx = LoopCtx {
+                config,
+                provider,
+                settings,
+                metrics,
+                plan_guard: None,
+                kb_ctx,
+                tool_policy: crate::session::ToolPolicy::Inherit,
+            };
+            kb_analyze::run_extract(
+                &mut ctx,
+                source.as_deref(),
+                &kb_analyze::ExtractOptions {
+                    chunk_bytes: chunk_bytes.unwrap_or(kb_analyze::DEFAULT_CHUNK_BYTES),
+                    max_retries,
+                    redo: if redo {
+                        kb_analyze::RedoMode::IncludeDone
+                    } else {
+                        kb_analyze::RedoMode::SkipDone
+                    },
+                    handover: if handover_auto {
+                        kb_analyze::HandoverMode::Auto {
+                            max_chars: kb_analyze::HANDOVER_AUTO_CHARS,
+                        }
+                    } else {
+                        kb_analyze::HandoverMode::Off
+                    },
+                },
+            )
+            .await
+        }
+        #[cfg(not(feature = "kb"))]
+        R::KbExtract { .. } => Err(anyhow!(
+            "This binary was built without the 'kb' feature. Rebuild with --features kb."
+        )),
+        #[cfg(feature = "kb")]
+        R::KbAnalyze {
+            goal,
+            sources,
+            max_retries,
+            note,
+        } => {
+            if kb_ctx.is_none() {
+                anyhow::bail!("[KB_CONFIG_ERROR] The knowledge base is not initialized.");
+            }
+            let mut ctx = LoopCtx {
+                config,
+                provider,
+                settings,
+                metrics,
+                plan_guard: None,
+                kb_ctx,
+                tool_policy: crate::session::ToolPolicy::Inherit,
+            };
+            kb_analyze::run_kb_analyze(
+                &mut ctx,
+                &goal,
+                &sources,
+                &kb_analyze::AnalyzeOptions { max_retries, note },
+            )
+            .await
+        }
+        #[cfg(not(feature = "kb"))]
+        R::KbAnalyze { .. } => Err(anyhow!(
+            "This binary was built without the 'kb' feature. Rebuild with --features kb."
+        )),
+    }
 }
 
 /// Write final answer to file (-o) and print batch summary.

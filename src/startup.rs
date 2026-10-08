@@ -448,13 +448,14 @@ fn base_system_sections(is_enabled: impl Fn(&str) -> bool) -> Vec<String> {
         tool_sections.push(
             "## 2-5. Knowledge Base (kb_*)\n\
              - Answer from the KB: base every statement about a document's content on kb_search / kb_schema results, never on memory; cite the source unit(s) (matched_text / position) that back each answer. Use the v_*_current views so superseded (old) document versions do not leak into answers.\n\
-             - Analysis procedure (when asked to analyze a document or extract its knowledge):\n\
-               (1) Call kb_schema first, then find the CURRENT version's id (query v_documents_current, or documents WHERE superseded_by IS NULL) and read its units with kb_read (page through them with limit/offset).\n\
-               (2) Register entities, claims, relations, conditions, and events with kb_insert, together with their evidence. Give each claim / relation / event a ref and a matching evidence item (target_type + target_ref) in the same call.\n\
-               (3) Evidence is mandatory: every claim / relation / event must have an evidence row whose matched_text is a verbatim excerpt from the source unit and whose source_unit_id points at that unit. Never paraphrase or invent matched_text; do not insert a statement with no source unit to back it. For a cross-document relation, the evidence needs source_unit_id (its document_id is derived from that unit).\n\
-               (4) Check coverage for gaps: re-read any unit that produced no claims, and kb_search for claims with no evidence; then correct mistakes by inserting a replacement row and marking the old row obsolete via kb_update (never delete).\n\
-               (5) Complete the document: set analysis_status to \"analyzed\" via kb_update (target_type=documents, annotations.analysis_status=\"analyzed\") ONLY after you have read every unit of the document (track kb_read's total against the offset) and registered all its knowledge. Never treat \"analyzing\" as a finished state, and never skip sections as \"low importance\" - if you cannot cover something, record it explicitly in annotations instead of silently omitting it.\n\
-               (6) Report progress with verified numbers from kb_search (e.g. COUNT(*) of units / claims), never from memory or estimates. For cross-document identity, resolve duplicates with canonical_entities + entity_links (via kb_insert) - do not mark an entity obsolete merely because a similar one exists in another document."
+             - Analysis procedure (document work belongs to jobs, not dialogue):\n\
+               (1) Knowledge extraction is an app-driven job: run `/kb extract` (or `/kb extract --dry-run` first for chunk/cost estimates). Do NOT extract a whole document inline in dialogue.\n\
+               (2) Cross-document work (dependencies, contradictions, canonical identity, reports) is another job: `/kb analyze \"<goal>\"`. Small lookups stay in dialogue.\n\
+               (3) Answer from the KB: base every statement about a document's content on kb_search / kb_schema results, never on memory; cite the source unit(s) (matched_text / position) that back each answer. Use the v_*_current views so superseded (old) document versions do not leak into answers.\n\
+               (4) Evidence is mandatory for writes: every claim / relation / event must have an evidence row whose matched_text is a verbatim excerpt from the source unit and whose source_unit_id points at that unit. Never paraphrase or invent matched_text; do not insert a statement with no source unit to back it. For a cross-document relation, the evidence needs source_unit_id (its document_id is derived from that unit).\n\
+               (5) Never set analysis_status yourself (the `/kb extract` job finalizes it after mechanical coverage). Never treat \"analyzing\" as finished, and never skip sections as \"low importance\" - if you cannot cover something, record it explicitly in annotations instead of silently omitting it.\n\
+               (6) Report progress with verified numbers from kb_search (e.g. COUNT(*) of units / claims), never from memory or estimates. For cross-document identity, resolve duplicates with canonical_entities + entity_links (via kb_insert) - do not mark an entity obsolete merely because a similar one exists in another document.\n\
+               (7) Correct mistakes by inserting a replacement row and marking the old row obsolete via kb_update (never delete)."
                 .to_string(),
         );
     }
@@ -492,77 +493,6 @@ fn build_system_message(sections: Vec<String>) -> crate::model::Message {
         ),
         ..Default::default()
     }
-}
-
-/// Build a system message for Mode 1 (Static Plan) task sessions.
-/// The plan is read from ./todo.md with read_file; the task LLM executes the
-/// single task named in the user message.
-pub fn system_message_mode1_task_loop(config: &Config) -> crate::model::Message {
-    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(format!(
-        "## 4. Todo Context (Static Plan: Task Loop)\n\
-         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the plan, handover.md holds the notes and reports from previous tasks.\n\
-         - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
-         - Finish the task completely (create its outputs) before stopping.\n\
-         - Check `artifacts/` for previous work; save your outputs there.\n\
-         - Handover entries may be followed by an `outputs:` line listing the artifact paths the previous task created; read the listed files with read_file when your task needs them.\n\
-         - Your final message must be a Handover Report in exactly this format (keep the entire report within {} characters; nothing else; the application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself):\n\
-           - Status: done / blocked\n\
-           - Output: <file paths created or updated, or none> - plain comma-separated artifact paths only (e.g. artifacts/a.md, artifacts/b.md); no annotations, parentheses, or semicolons after a path; do not list todo.md or handover files\n\
-           - Findings: <facts you observed, in one or two sentences>\n\
-           - Next: <what the next task should watch out for, or none>",
-        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
-    ));
-    build_system_message(sections)
-}
-
-/// Build a system message for the Mode 2 (Dynamic Replan) replan session.
-/// The replan session (planner role) only updates the plan; it never executes
-/// the tasks.
-pub fn system_message_mode2_replan(config: &Config) -> crate::model::Message {
-    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(format!(
-        "## 4. Todo Context (Dynamic Replan: Planner)\n\
-         - You are the task planner. Do NOT execute the tasks in `## Tasks`; a separate task session executes them after your replan.\n\
-         - Read `./todo.md` and `artifacts/handover.md` FIRST with read_file; todo.md is the current plan, handover.md holds the task reports and planner notes from previous sessions (each task report is followed by an `outputs:` line listing the artifact paths that task declared).\n\
-         - todo.md has a FIXED format:\n\
-           - `# <title>`, `## Goal`, `## Tasks`, and optionally one `## Deliverables` section. NEVER add or rename sections beyond these; NEVER add prose to the `## Tasks` or `## Deliverables` lists; keep the `- [ ]` / `- [x]` bullet format.\n\
-           - `## Deliverables`: one file per bullet (`- artifacts/<name>`), nothing else on the line. List only files the plan actually produces (the final report included); keep the list in sync as tasks change.\n\
-         - Mark completed tasks `[x]` (verify the files named in their `outputs:` lines exist in `artifacts/` with read_file / list_directory), and add, remove, reorder, or split tasks. If ALL tasks are `[x]` but the Goal is not yet achieved, add the tasks needed to finish it.\n\
-         - Write ONLY these two files, in this order:\n\
-           1. `./todo.md` - the updated plan; text alone does not update the plan.\n\
-           2. `./next-task.md` (write_file; overwrite it every time) - the brief for the IMMEDIATELY NEXT task: its scope, the files it must read (mark each one must-read or optional), the previous task's `outputs:`, and warnings.\n\
-           Writing any other file - including everything under `artifacts/` - is forbidden.\n\
-         - Your final message must be your plan-update notes for the next planner session: anything it must know that does not fit in `./todo.md` or `./next-task.md`, in exactly this format (keep the entire note within {} characters; nothing else; the application saves your note to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself):\n\
-           - Status: <overall state of the job>\n\
-           - Progress: <what the completed tasks achieved>\n\
-           - Decisions: <what you changed in the plan and why>\n\
-           - Next: <what happens next, or \"none\">",
-        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
-    ));
-    build_system_message(sections)
-}
-
-/// Build a system message for Mode 2 (Dynamic Replan) task sessions.
-/// The plan is read from ./todo.md with read_file; the task LLM executes the
-/// single task named in the user message and updates the plan on completion.
-pub fn system_message_mode2_task_loop(config: &Config) -> crate::model::Message {
-    let mut sections = base_system_sections(|n| config.is_tool_enabled(n));
-    sections.push(format!(
-        "## 4. Todo Context (Dynamic Replan: Task Loop)\n\
-         - Read `./todo.md` and `./next-task.md` FIRST with read_file; todo.md is the plan, next-task.md is the brief for your task: your scope, the files to read (marked must-read or optional), the previous task's `outputs:`, and warnings. If next-task.md is missing or the brief is insufficient, explore `artifacts/` with list_directory and read only the files your task needs.\n\
-         - Execute ONLY the task in the user message; do NOT execute other tasks.\n\
-         - Finish the task completely (create its outputs) before stopping.\n\
-         - After completing, update `./todo.md`: mark ONLY your task `[x]`; you may add subtasks to `## Tasks` if needed. Do NOT edit the `## Deliverables` section (the planner owns it) or existing tasks.\n\
-         - Check `artifacts/` for previous work; save your outputs there.\n\
-         - Your final message must be a Handover Report in exactly this format (keep the entire report within {} characters; nothing else; the application saves your report to `artifacts/handover.md`; do NOT edit `artifacts/handover.md` yourself):\n\
-           - Status: done / blocked\n\
-           - Output: <file paths created or updated, or none> - plain comma-separated artifact paths only (e.g. artifacts/a.md, artifacts/b.md); no annotations, parentheses, or semicolons after a path; do not list todo.md or handover files\n\
-           - Findings: <facts you observed, in one or two sentences>\n\
-           - Next: <what the next task should watch out for, or none>",
-        crate::todo_guard::HANDOVER_REPORT_MAX_CHARS
-    ));
-    build_system_message(sections)
 }
 
 /// Build a system message for KB extract sessions (todo-refine Phase 3).
@@ -604,7 +534,7 @@ pub fn system_message_todo_task(
     allowed: Option<&[&str]>,
 ) -> crate::model::Message {
     let mut sections = base_system_sections(|n| {
-        config.is_tool_enabled(n) && allowed.map_or(true, |l| l.contains(&n))
+        config.is_tool_enabled(n) && allowed.is_none_or(|l| l.contains(&n))
     });
     sections.push(format!(
         "## 4. Todo Context (Task)\n\

@@ -23,6 +23,288 @@ use crate::llm_stats::{Metrics, ModelTotals, fmt_ms};
 use crate::model::{Message, Session, Settings};
 use crate::startup::{C_DIM_GRAY, C_DIM_GREEN, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, RESET};
 
+/// A parsed long-job request. Pure data; the caller (`main`) executes it
+/// so parsing stays synchronous and unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JobRequest {
+    TodoInit {
+        path: String,
+    },
+    TodoRun {
+        plan: String,
+        mode: crate::todo_job::TodoMode,
+        dry_run: bool,
+        status: bool,
+        max_retries: u32,
+        note: String,
+    },
+    TodoClean {
+        all: bool,
+    },
+    KbExtract {
+        source: Option<String>,
+        chunk_bytes: Option<usize>,
+        dry_run: bool,
+        status: bool,
+        max_retries: u32,
+        redo: bool,
+        handover_auto: bool,
+    },
+    KbAnalyze {
+        goal: String,
+        sources: Vec<String>,
+        max_retries: u32,
+        note: String,
+    },
+}
+
+/// Quote-aware splitter (`"a b" c` -> `["a b", "c"]`).
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = false;
+    let mut in_word = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quote = !quote;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !quote => {
+                if in_word {
+                    out.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            _ => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        out.push(cur);
+    }
+    out
+}
+
+/// Take a flag value (`--note x`); missing value is an error naming usage.
+fn take_value(args: &[String], i: &mut usize, flag: &str, usage: &str) -> Result<String, String> {
+    *i += 1;
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| format!("{} needs a value. {}", flag, usage))
+}
+
+/// Parse `/job ...` and the long-job `/kb ...` forms. `None` = not a
+/// job command (fall through to the interactive dispatcher).
+pub(crate) fn parse_job_request(input: &str) -> Option<Result<JobRequest, String>> {
+    let tokens = split_args(input.trim());
+    let (cmd, rest) = match tokens.split_first() {
+        Some((first, rest)) if first == "/job" => ("job", rest),
+        Some((first, rest)) if first == "/kb" => ("kb", rest),
+        _ => return None,
+    };
+    if cmd == "kb" {
+        match rest.first() {
+            Some(s) if s == "extract" || s == "analyze" => {}
+            // Short forms (/kb list, ...) stay with the interactive dispatcher.
+            _ => return None,
+        }
+    }
+    Some(parse_job_tokens(cmd, rest))
+}
+
+fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
+    if cmd == "job" {
+        let (sub, args) = match rest.split_first() {
+            Some((s, a)) => (s.as_str(), a),
+            None => return Err(
+                "Usage: /job init <path> | run <todo.json> [--mode static|replan] | clean [--all]"
+                    .to_string(),
+            ),
+        };
+        return match sub {
+            "init" => {
+                let path = args
+                    .first()
+                    .cloned()
+                    .ok_or("Usage: /job init <path>".to_string())?;
+                Ok(JobRequest::TodoInit { path })
+            }
+            "run" => {
+                let plan = args.first().cloned().ok_or(
+                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--max-retries N] [--note \"...\"]".to_string(),
+                )?;
+                let mut mode = crate::todo_job::TodoMode::Static;
+                let (mut dry_run, mut status) = (false, false);
+                let mut max_retries = 1u32;
+                let mut note = String::new();
+                let mut i = 1;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--mode" => {
+                            match take_value(args, &mut i, "--mode", "static|replan")?.as_str() {
+                                "static" => mode = crate::todo_job::TodoMode::Static,
+                                "replan" => mode = crate::todo_job::TodoMode::Replan,
+                                other => {
+                                    return Err(format!(
+                                        "--mode must be static|replan, got {:?}",
+                                        other
+                                    ));
+                                }
+                            }
+                        }
+                        "--dry-run" => dry_run = true,
+                        "--status" => status = true,
+                        "--max-retries" => {
+                            max_retries =
+                                take_value(args, &mut i, "--max-retries", "N")?
+                                    .parse()
+                                    .map_err(|_| "--max-retries needs an integer".to_string())?;
+                        }
+                        "--note" => note = take_value(args, &mut i, "--note", "\"...\"")?,
+                        other => return Err(format!("Unknown /job run flag {:?}", other)),
+                    }
+                    i += 1;
+                }
+                Ok(JobRequest::TodoRun {
+                    plan,
+                    mode,
+                    dry_run,
+                    status,
+                    max_retries,
+                    note,
+                })
+            }
+            "clean" => {
+                let mut all = false;
+                for a in args {
+                    match a.as_str() {
+                        "--all" => all = true,
+                        other => {
+                            return Err(format!(
+                                "Unknown /job clean flag {:?} (want --all)",
+                                other
+                            ));
+                        }
+                    }
+                }
+                Ok(JobRequest::TodoClean { all })
+            }
+            other => Err(format!(
+                "Unknown /job subcommand {:?} (want init|run|clean)",
+                other
+            )),
+        };
+    }
+    // /kb long jobs; short forms were filtered by the caller.
+    let (sub, args) = match rest.split_first() {
+        Some((s, a)) => (s.as_str(), a),
+        None => return Err("Usage: /kb extract [<source>] [flags]".to_string()),
+    };
+    match sub {
+        "extract" => {
+            let mut source: Option<String> = None;
+            let mut chunk_bytes: Option<usize> = None;
+            let (mut dry_run, mut status) = (false, false);
+            let mut max_retries = 1u32;
+            let (mut redo, mut handover_auto) = (false, false);
+            let mut i = 0;
+            while i < args.len() {
+                let a = args[i].as_str();
+                if a.starts_with("--") {
+                    match a {
+                        "--dry-run" => dry_run = true,
+                        "--status" => status = true,
+                        "--redo" => redo = true,
+                        "--chunk-bytes" => {
+                            chunk_bytes = Some(
+                                take_value(args, &mut i, "--chunk-bytes", "N")?
+                                    .parse()
+                                    .map_err(|_| "--chunk-bytes needs an integer".to_string())?,
+                            );
+                        }
+                        "--max-retries" => {
+                            max_retries =
+                                take_value(args, &mut i, "--max-retries", "N")?
+                                    .parse()
+                                    .map_err(|_| "--max-retries needs an integer".to_string())?;
+                        }
+                        "--handover" => {
+                            match take_value(args, &mut i, "--handover", "off|auto")?.as_str() {
+                                "off" => handover_auto = false,
+                                "auto" => handover_auto = true,
+                                other => {
+                                    return Err(format!(
+                                        "--handover must be off|auto, got {:?}",
+                                        other
+                                    ));
+                                }
+                            }
+                        }
+                        other => return Err(format!("Unknown /kb extract flag {:?}", other)),
+                    }
+                } else if source.is_none() {
+                    source = Some(args[i].clone());
+                } else {
+                    return Err("Usage: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]".to_string());
+                }
+                i += 1;
+            }
+            Ok(JobRequest::KbExtract {
+                source,
+                chunk_bytes,
+                dry_run,
+                status,
+                max_retries,
+                redo,
+                handover_auto,
+            })
+        }
+        "analyze" => {
+            let goal = args.first().cloned().ok_or(
+                "Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]"
+                    .to_string(),
+            )?;
+            if goal.starts_with("--") {
+                return Err("Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]".to_string());
+            }
+            let mut sources = Vec::new();
+            let mut max_retries = 1u32;
+            let mut note = String::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--sources" => {
+                        i += 1;
+                        while i < args.len() && !args[i].starts_with("--") {
+                            sources.push(args[i].clone());
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    "--max-retries" => {
+                        max_retries = take_value(args, &mut i, "--max-retries", "N")?
+                            .parse()
+                            .map_err(|_| "--max-retries needs an integer".to_string())?;
+                    }
+                    "--note" => note = take_value(args, &mut i, "--note", "\"...\"")?,
+                    other => return Err(format!("Unknown /kb analyze flag {:?}", other)),
+                }
+                i += 1;
+            }
+            Ok(JobRequest::KbAnalyze {
+                goal,
+                sources,
+                max_retries,
+                note,
+            })
+        }
+        _ => Err("Unknown /kb long-job subcommand (want extract|analyze)".to_string()),
+    }
+}
+
 /// Outcome of handling a slash command. The caller still owns the amended
 /// turn counter for `RewoundTo` / `RestoredTo`; `Settings`/`Session` mutations
 /// happen in-place inside this module so no value is echoed back.
@@ -417,6 +699,9 @@ fn print_help() {
    /restore [label] Restore the previous session (optionally specifying a label to switch to)
    /stats           Show LLM resource usage (per-model and session totals)
    /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
+   /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
+   /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]
+   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--max-retries N] [--note \"...\"] / clean [--all]
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
@@ -867,3 +1152,7 @@ pub(crate) fn handle_restore(
 #[cfg(test)]
 #[path = "tests/cmd_rewind_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/cmd_job_test.rs"]
+mod job_tests;
