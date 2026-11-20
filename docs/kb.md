@@ -69,8 +69,7 @@ All optional - the KB works with none of them:
 ### Tool confirmation (`kb_*`)
 
 - Reads (`kb_search` / `kb_schema` / `kb_read`) ask `y/N`; auto-approve with `--kb-auto-confirm ro`.
-- Writes (`kb_insert` / `kb_update`) too, with `--kb-auto-confirm rw` (needed in
-  batch / todo modes, where stdin is unavailable).
+- Writes (`kb_insert` / `kb_update`) too, with `--kb-auto-confirm rw`.
 - The KB gate is independent: the global `--unsafe-reflex` never applies to the KB tools.
 - `--only-tools` treats them like any other tool: omitted names are hidden from the LLM and
   refused. `/kb` is a CLI command, not a tool - `--only-tools` does not disable it.
@@ -196,7 +195,7 @@ pending`, and split into paragraph units. Check:
 #### 1-3. Analyze it
 
 Extract the document with the job. Approve the writes with `y` (`kb_insert` is a write
-tool; batch runs need `--kb-auto-confirm rw`):
+tool):
 
 ```text
 /kb extract rfc9110.txt
@@ -303,7 +302,7 @@ near-duplicates.
 |---|---|
 | `/kb` or `kb_*` are missing | Build with `--features kb` (the KB then lives in the app data dir by default; `--kb-dir <dir>` / `KB_DIR` to choose a location) |
 | `/kb list` still shows `pending` | Expected: run `/kb extract` (How analysis works). Questions don't change the status |
-| Writes keep pausing | Press `y` in interactive mode. In batch/automation, approve the KB calls with `--kb-auto-confirm ro` (reads) or `rw` (reads + writes); the global `--unsafe-reflex` does not apply to KB tools |
+| Writes keep pausing | Press `y` in interactive mode, or approve the KB calls with `--kb-auto-confirm ro` (reads) or `rw` (reads + writes); the global `--unsafe-reflex` does not apply to KB tools |
 | You changed a document | Replace the file and run `/kb sync` (same content -> skipped; changes -> a new version, old ones kept as history) |
 | Remove a document | `/kb delete rfc9110.txt` (current version) or `/kb delete rfc9110.txt --all-versions` |
 | Make a backup | `/kb backup` (writes `my-doc-library/db/backup/library-<timestamp>.sqlite` via `VACUUM INTO`) |

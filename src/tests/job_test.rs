@@ -193,7 +193,6 @@ fn test_config() -> Config {
         provider_extras: Vec::<ProviderExtra>::new(),
         tool_result_format: ToolResultFormat::JsonString,
         only_tools: Vec::<ToolName>::new(),
-        query: None,
         output_file: None,
         max_reasoning_turns: 30,
         max_replan_attempts: 3,

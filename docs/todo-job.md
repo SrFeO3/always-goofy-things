@@ -77,6 +77,3 @@ The LLM never writes state itself; the application owns the JSON.
 /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--max-retries N] [--note "..."]
 /job clean [--all]   Remove abandoned job states
 ```
-
-Batch runs (`-q "/job run ..."`) work unattended; writes then need `--unsafe-reflex`,
-and extra instructions go in `--note`.

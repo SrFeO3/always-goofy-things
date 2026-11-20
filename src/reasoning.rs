@@ -184,7 +184,7 @@ pub(crate) enum EndReason {
     /// `max_reasoning_empty_responses` reached (0 = unlimited retries, so
     /// this is only returned when a positive limit was configured).
     EmptyLimit,
-    /// `max_reasoning_turns` reached (interactive mode only; batch bails).
+    /// `max_reasoning_turns` reached.
     MaxTurns,
 }
 
@@ -218,7 +218,7 @@ pub(crate) struct LoopCtx<'a> {
 ///
 /// Returns `Ok(EndReason::Completed)` (final answer = last message) or a
 /// termination reason (Ctrl+C / connection error / limits). `Err(_)` on
-/// persistence failure or batch max-turns.
+/// persistence failure.
 pub(crate) async fn run_reasoning_loop<'a>(
     ctx: &mut LoopCtx<'a>,
     session: &mut Session,
@@ -233,9 +233,6 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let metrics = &mut *ctx.metrics;
     let kb_ctx = ctx.kb_ctx;
     let tool_policy = ctx.tool_policy;
-    // Batch mode is derived from `-q/--query`. Re-deriving here keeps the
-    // signature smaller and avoids the caller having to pass it through.
-    let is_batch = config.query.is_some();
     // Update the existing user message if a previous broken turn pushed one,
     // else push a new one (avoids inflating the history turn count).
     let user_msg_count = session.messages.iter().filter(|m| m.role == "user").count();
@@ -278,12 +275,6 @@ pub(crate) async fn run_reasoning_loop<'a>(
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
-            if is_batch {
-                anyhow::bail!(
-                    "Max reasoning turns ({}) exceeded without a final answer",
-                    config.max_reasoning_turns
-                );
-            }
             eprintln!(
                 "\x1b[93m\u{26a0}\u{fe0f} Max reasoning turns ({}) reached. Returning to prompt.\x1b[0m",
                 config.max_reasoning_turns
@@ -490,7 +481,6 @@ pub(crate) async fn run_reasoning_loop<'a>(
                     config.db_unsafe_reflex,
                     config.kb_auto_confirm,
                     config.mini_python_auto_confirm,
-                    is_batch,
                     |name| crate::session::tool_enabled(config, tool_policy, name),
                 )
                 .await;

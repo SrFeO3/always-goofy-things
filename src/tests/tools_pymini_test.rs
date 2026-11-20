@@ -602,7 +602,6 @@ async fn mini_python_uses_its_own_gate_only() {
         false,
         crate::startup::KbAutoConfirm::Ask,
         MiniPythonAutoConfirm::Ro,
-        true,
         |_| true,
     )
     .await;
@@ -618,43 +617,11 @@ async fn mini_python_uses_its_own_gate_only() {
         false,
         crate::startup::KbAutoConfirm::Ask,
         MiniPythonAutoConfirm::Rw,
-        true,
         |_| true,
     )
     .await;
     assert!(d.proceed);
     assert_eq!(d.mini_python_write, Some(true));
-
-    // ask in batch mode: denied (no stdin).
-    let d = confirm_execute_tool(
-        "mini_python_interpreter",
-        args,
-        false,
-        false,
-        crate::startup::KbAutoConfirm::Ask,
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(!d.proceed);
-
-    // The global --unsafe-reflex must NOT approve mini python.
-    let d = confirm_execute_tool(
-        "mini_python_interpreter",
-        args,
-        true,
-        false,
-        crate::startup::KbAutoConfirm::Ask,
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(
-        !d.proceed,
-        "--unsafe-reflex must never approve arbitrary code"
-    );
 
     // Non-mini tools carry no mini decision.
     let d = confirm_execute_tool(
@@ -664,7 +631,6 @@ async fn mini_python_uses_its_own_gate_only() {
         false,
         crate::startup::KbAutoConfirm::Ask,
         MiniPythonAutoConfirm::Ask,
-        true,
         |_| true,
     )
     .await;

@@ -40,8 +40,6 @@ Then type a query at the prompt:
 - "Translate this Rust project into Shakespearean English without breaking the code."
 - "@spec.md Build a CLI puzzle game in Rust based on this spec."
 
-Batch mode (`-q`) runs a single query non-interactively (including `/job ...` requests, which run unattended). See [Usage](#usage) below for input keys and more examples.
-
 ## Options and Settings
 
 Options can be set via environment variables or command-line flags (flags take precedence).
@@ -56,7 +54,7 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
 | `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
-| `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). In batch mode, exceeding it exits with error. | `30` |
+| `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
 | `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured for `execute_bash` / `grep_search` (per output stream: stdout and stderr each); excess output keeps the tail (`0` = unlimited). `mini_python_interpreter` applies the same value to its stdout and stderr **combined**. | `1048576` |
 | `--tool-timeout-secs <NUM>` | `TOOL_TIMEOUT_SECS` | Wall-clock timeout in seconds for `execute_bash` / `grep_search` (`0` = unlimited). | `30` |
@@ -66,10 +64,9 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-p, --pretty-level <LEVEL>` | `PRETTY_LEVEL` | UI decoration level (`0`-`1`). | `1` |
 | `-s, --session-label <LABEL>` | `SESSION_LABEL` | Label for session persistence files (enables running multiple sessions). | `default` |
 | (none) | `SESSION_DATA_DIR` | Root directory where session, todo-archive and resource-statistics JSONL files are stored; overrides the platform app-data directory. | (platform default) |
-| `-q, --query <QUERY>` | (none) | Run in batch mode: execute once and exit, printing the final answer to stdout. | (interactive) |
 | `-o, --output <FILE>` | `OUTPUT_FILE` | Write each turn's final LLM response to a file. | (none) |
-| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Required for unattended job runs (`-q "/job ..."`), where non-auto-confirmed tool calls are denied. Never applies to `mini_python_interpreter` (it runs arbitrary code). | false |
-| `--mini-python-auto-confirm <MODE>` | `MINI_PYTHON_AUTO_CONFIRM` | Auto-approve `mini_python_interpreter` without confirmation: `ro` = read-only workspace mount (writes fail inside the sandbox), `rw` = read-write workspace mount. `ask` (default) prompts `y/N`; batch runs deny. Independent of `--unsafe-reflex`. | `ask` |
+| `--unsafe-reflex` | `UNSAFE_REFLEX_MODE` | Bypasses manual confirmation for tool-execution safety checkpoints. Never applies to `mini_python_interpreter` (it runs arbitrary code). | false |
+| `--mini-python-auto-confirm <MODE>` | `MINI_PYTHON_AUTO_CONFIRM` | Auto-approve `mini_python_interpreter` without confirmation: `ro` = read-only workspace mount (writes fail inside the sandbox), `rw` = read-write workspace mount. `ask` (default) prompts `y/N`. Independent of `--unsafe-reflex`. | `ask` |
 | `license` | (none) | Subcommand: print the third-party license notices bundled into this binary and exit. | (none) |
 
 ### LLM Provider (`LLM_PROVIDER`)
@@ -124,7 +121,7 @@ Controls the visual styling and decorations applied to the terminal output.
 
 ### Todo Jobs (`/job`)
 
-Plan-and-Execute execution for long jobs, split into tasks. Write a `todo.json` plan and run `/job run <todo.json> [--mode static|replan]`; each task runs in a fresh LLM context, verified mechanically. Batch: `-q "/job run ..."`.
+Plan-and-Execute execution for long jobs, split into tasks. Write a `todo.json` plan and run `/job run <todo.json> [--mode static|replan]`; each task runs in a fresh LLM context, verified mechanically.
 
 See [docs/todo-job.md](docs/todo-job.md) for the plan format and quick-start guides.
 
@@ -156,17 +153,6 @@ Then type a query like "Who are you and what tools can you use?" (`Enter` sends 
 - "@src/main.rs, @Cargo.toml Explain the structure of these files."
 - "@diagram.png Explain the architecture shown in this image."
 - "@@spec.pdf:12-15 Extract all error codes and recovery procedures defined in this section."
-
-### Batch Mode (`-q`)
-
-Run a single query non-interactively and exit. The final answer is written to stdout (or `-o <file>`). Progress and errors go to stderr.
-
-```bash
-cargo run -- -q "@src/main.rs Explain the architecture" -o result.txt
-```
-
-> [!WARNING]
-> In batch mode, large files are attached without confirmation and tools that usually prompt `y/N` are automatically denied.
 
 ### Todo Jobs (`/job`)
 

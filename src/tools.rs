@@ -597,7 +597,6 @@ pub async fn confirm_execute_tool(
     db_unsafe_reflex: bool,
     kb_auto_confirm: crate::startup::KbAutoConfirm,
     mini_python_auto_confirm: crate::startup::MiniPythonAutoConfirm,
-    batch: bool,
     is_enabled: impl Fn(&str) -> bool,
 ) -> ToolRunDecision {
     // Disabled tools are rejected before any prompt or auto-confirm:
@@ -642,8 +641,7 @@ pub async fn confirm_execute_tool(
 
     // mini_python_interpreter runs arbitrary code, approved ONLY by its own
     // gate (--mini-python-auto-confirm). The global --unsafe-reflex never
-    // applies; `ask` mode falls through to the interactive y/N prompt below
-    // (batch / todo modes deny there).
+    // applies; `ask` mode falls through to the interactive y/N prompt below.
     let is_mini_python = name == "mini_python_interpreter";
     if is_mini_python && let Some(write) = mini_python_auto_confirm.auto_approve() {
         let reason = Some(format!(
@@ -669,15 +667,6 @@ pub async fn confirm_execute_tool(
         && proceed
     {
         return ToolRunDecision::new(true, ToolRunDecisionKind::AutoConfirm, reason);
-    }
-
-    // In batch mode, deny any tool that wasn't auto-confirmed (no stdin available).
-    if batch {
-        return ToolRunDecision::new(
-            false,
-            ToolRunDecisionKind::SystemError,
-            Some("Skipped: please try simpler and safer operations.".to_string()),
-        );
     }
 
     // Tool approval is read from the child's stdin. In the GUI build this is

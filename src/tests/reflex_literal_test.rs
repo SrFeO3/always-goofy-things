@@ -156,7 +156,6 @@ fn subpath_rejects_traversal_absolute_and_home() {
 
 #[test]
 fn subpath_rejects_trailing_slash() {
-    // Current behavior: `list_directory artifacts/` is denied in batch mode.
-    // (Known friction point, intentionally unchanged here.)
+    // `list_directory artifacts/` is rejected by the subpath rule.
     assert!(!is_safe_subpath("artifacts/"));
 }

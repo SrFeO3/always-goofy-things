@@ -18,7 +18,6 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         provider: None,
         provider_extras: Vec::new(),
         tool_result_format: ToolResultFormat::JsonString,
-        query: None,
         output_file: None,
         max_reasoning_turns: 30,
         max_replan_attempts: 3,
@@ -112,6 +111,20 @@ fn provider_extras_rejects_unknown_name() {
     assert!(
         result.is_err(),
         "unknown provider extra must fail at parse time"
+    );
+}
+
+#[test]
+fn query_flag_rejected() {
+    // Batch mode (`-q` / `--query`) was removed; the flags must be rejected
+    // so a re-introduction regresses here instead of silently re-enabling it.
+    assert!(
+        Config::try_parse_from(["agt", "-q", "hello"]).is_err(),
+        "-q must be rejected: batch mode was removed"
+    );
+    assert!(
+        Config::try_parse_from(["agt", "--query", "hello"]).is_err(),
+        "--query must be rejected: batch mode was removed"
     );
 }
 

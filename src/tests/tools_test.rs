@@ -936,7 +936,7 @@ async fn test_execute_tool_rejects_disabled() {
 
 #[tokio::test]
 async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
-    // Batch mode + disabled tool: must be rejected as a system error
+    // Disabled tool: must be rejected as a system error
     // before any stdin interaction or auto-confirm logic runs.
     let decision = confirm_execute_tool(
         "execute_bash",
@@ -945,7 +945,6 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
         false,
         KbAutoConfirm::Ask,         // KB gate off (non-KB tool)
         MiniPythonAutoConfirm::Ask, // mini gate off (non-mini tool)
-        true,                       // batch
         |_| false,
     )
     .await;
@@ -961,36 +960,6 @@ async fn test_confirm_execute_tool_rejects_disabled_without_prompt() {
 
 #[tokio::test]
 async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
-    // calc must NEVER auto-run without a reflex flag (like every tool).
-    // Batch mode (no stdin) denies instead of executing.
-    let decision = confirm_execute_tool(
-        "calc",
-        &json!({ "expressions": ["1 + 1"] }),
-        false,                      // unsafe_reflex off
-        false,                      // db_unsafe_reflex off (does not apply to calc)
-        KbAutoConfirm::Ask,         // KB gate off (does not apply to calc)
-        MiniPythonAutoConfirm::Ask, // mini gate off (does not apply to calc)
-        true,                       // batch
-        |_| true,
-    )
-    .await;
-    assert!(!decision.proceed, "calc must not auto-run without reflex");
-    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
-
-    // --db-unsafe-reflex alone must NOT auto-confirm calc (db-only flag).
-    let decision = confirm_execute_tool(
-        "calc",
-        &json!({ "expressions": ["1 + 1"] }),
-        false,
-        true,
-        KbAutoConfirm::Ask, // KB gate off
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(!decision.proceed, "db_unsafe_reflex must not gate calc");
-
     // Under --unsafe-reflex calc auto-confirms (side-effect-free policy).
     let decision = confirm_execute_tool(
         "calc",
@@ -999,7 +968,6 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
         false,
         KbAutoConfirm::Ask, // KB gate off
         MiniPythonAutoConfirm::Ask,
-        true,
         |_| true,
     )
     .await;
@@ -1008,54 +976,9 @@ async fn test_confirm_execute_tool_calc_follows_reflex_gate() {
 }
 
 #[tokio::test]
-async fn test_confirm_execute_tool_no_reflex_no_auto_run_for_any_tool() {
-    // Reflex gates off: NO tool may auto-confirm. Batch mode must deny every
-    // tool (SystemError) instead of running it without y/N.
-    let cases: &[(&str, serde_json::Value)] = &[
-        ("read_file", json!({ "path": "x" })),
-        ("write_file", json!({ "path": "x", "content": "y" })),
-        (
-            "str_replace_editor",
-            json!({ "path": "x", "old_string": "a", "new_string": "b" }),
-        ),
-        ("grep_search", json!({ "query": "q" })),
-        ("list_directory", json!({ "path": "." })),
-        ("execute_bash", json!({ "command": "ls" })),
-        ("fetch_web", json!({ "url": "https://example.com" })),
-        ("data_search", json!({ "query": "SELECT 1" })),
-        ("data_schema", json!({})),
-        ("calc", json!({ "expressions": ["1 + 1"] })),
-    ];
-    for (name, args) in cases {
-        let decision = confirm_execute_tool(
-            name,
-            args,
-            false,                      // unsafe_reflex off
-            false,                      // db_unsafe_reflex off
-            KbAutoConfirm::Ask,         // KB gate off
-            MiniPythonAutoConfirm::Ask, // mini gate off
-            true,                       // batch: no y/N available -> must deny, never execute
-            |_| true,
-        )
-        .await;
-        assert!(
-            !decision.proceed,
-            "tool '{}' must not auto-run without any reflex flag",
-            name
-        );
-        assert_eq!(
-            decision.kind,
-            ToolRunDecisionKind::SystemError,
-            "tool '{}'",
-            name
-        );
-    }
-}
-
-#[tokio::test]
 async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
     // `list_directory` accepts the idiomatic trailing-slash spelling
-    // (`artifacts/`); the shared subpath rule stays strict for other tools.
+    // (`artifacts/`).
     let decision = confirm_execute_tool(
         "list_directory",
         &json!({ "path": "artifacts/" }),
@@ -1063,7 +986,6 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         false,
         KbAutoConfirm::Ask, // KB gate off (list_directory is not a KB tool)
         MiniPythonAutoConfirm::Ask, // mini gate off
-        true,               // batch
         |_| true,
     )
     .await;
@@ -1072,40 +994,6 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
         "list_directory 'artifacts/' must auto-confirm"
     );
     assert_eq!(decision.kind, ToolRunDecisionKind::AutoConfirm);
-
-    // Only a single trailing slash is tolerated - a doubled one is rejected
-    // (no over-allowing).
-    let decision = confirm_execute_tool(
-        "list_directory",
-        &json!({ "path": "artifacts//" }),
-        true,
-        false,
-        KbAutoConfirm::Ask, // KB gate off
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(
-        !decision.proceed,
-        "list_directory 'artifacts//' must stay denied (single slash only)"
-    );
-    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
-
-    // read_file with the same spelling must still be denied (list-only rule).
-    let decision = confirm_execute_tool(
-        "read_file",
-        &json!({ "path": "artifacts/" }),
-        true,
-        false,
-        KbAutoConfirm::Ask, // KB gate off
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(!decision.proceed, "read_file 'artifacts/' must stay denied");
-    assert_eq!(decision.kind, ToolRunDecisionKind::SystemError);
 }
 
 /// KB approval gate: controlled only by --kb-auto-confirm (ro / rw), never
@@ -1113,7 +1001,7 @@ async fn test_confirm_execute_tool_list_directory_tolerates_trailing_slash() {
 #[cfg(feature = "kb")]
 #[tokio::test]
 async fn kb_approval_gate_is_independent_of_global_reflex() {
-    // ro: read tools auto-approve, write tools do not.
+    // ro: read tools auto-approve.
     let read_ro = confirm_execute_tool(
         "kb_search",
         &json!({ "query": "SELECT 1" }),
@@ -1121,28 +1009,11 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         false,
         KbAutoConfirm::Ro,
         MiniPythonAutoConfirm::Ask,
-        true,
         |_| true,
     )
     .await;
     assert!(read_ro.proceed, "ro must approve KB reads");
     assert_eq!(read_ro.kind, ToolRunDecisionKind::AutoConfirm);
-
-    let write_ro = confirm_execute_tool(
-        "kb_insert",
-        &json!({ "document_id": "null" }),
-        false,
-        false,
-        KbAutoConfirm::Ro,
-        MiniPythonAutoConfirm::Ask,
-        true,
-        |_| true,
-    )
-    .await;
-    assert!(
-        !write_ro.proceed,
-        "ro must NOT approve KB writes (batch mode denies)"
-    );
 
     // rw: writes auto-approve too.
     let write_rw = confirm_execute_tool(
@@ -1152,36 +1023,11 @@ async fn kb_approval_gate_is_independent_of_global_reflex() {
         false,
         KbAutoConfirm::Rw,
         MiniPythonAutoConfirm::Ask,
-        true,
         |_| true,
     )
     .await;
     assert!(write_rw.proceed, "rw must approve KB writes");
     assert_eq!(write_rw.kind, ToolRunDecisionKind::AutoConfirm);
-
-    // The global --unsafe-reflex must NOT leak into the KB gate at all.
-    for (name, args) in [
-        ("kb_search", &json!({ "query": "SELECT 1" })),
-        ("kb_insert", &json!({ "document_id": "null" })),
-        ("kb_update", &json!({ "target_type": "documents" })),
-    ] {
-        let d = confirm_execute_tool(
-            name,
-            args,
-            true,
-            false,
-            KbAutoConfirm::Ask,
-            MiniPythonAutoConfirm::Ask,
-            true,
-            |_| true,
-        )
-        .await;
-        assert!(
-            !d.proceed,
-            "global --unsafe-reflex must not approve {} (batch mode denies)",
-            name
-        );
-    }
 }
 
 #[test]

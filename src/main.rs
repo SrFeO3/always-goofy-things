@@ -101,9 +101,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let is_batch = config.query.is_some();
-    let start_time = std::time::Instant::now();
-
     // Set working directory and print banner (all modes)
     let _current_dir = startup::print_startup_info(&config, &provider)?;
 
@@ -143,12 +140,10 @@ async fn main() -> Result<()> {
     // Accumulated token metrics.
     let mut metrics = Metrics::default();
 
-    if !is_batch {
-        println!(
-            "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
-            C_CYAN, RESET
-        );
-    }
+    println!(
+        "\n{}Describe your task and press Enter to start (or /help, /exit, ^D).{}",
+        C_CYAN, RESET
+    );
 
     // Initial session: system message + label + turn 1.
     let mut session = Session::new(
@@ -162,44 +157,33 @@ async fn main() -> Result<()> {
     println!("\x1b[90mSession ID: {}\x1b[0m", session.id);
 
     // Main conversation loop
-    let mut batch_input: Option<String> = config.query.clone();
     loop {
-        let input = if let Some(q) = batch_input.take() {
-            // Batch: use the -q argument as the first (and only) user input
-            q
-        } else if is_batch {
-            // Batch mode with no more input (should not reach here normally)
-            break;
-        } else {
-            // Interactive: read from the user
-            let query_prompt = format!("\nUser-{} (Enter=send, Ctrl+O=newline) > ", session.turn);
-            let readline = query_reader.readline(&query_prompt);
-
-            match readline {
-                Ok(line) => {
-                    // The GUI child receives framed multiline messages from the GUI.
-                    #[cfg(feature = "gui")]
-                    let line = gui::decode_child_input(line);
-                    // Add to CLI input history (allows using arrow keys to recall previous inputs)
-                    query_reader.add_history_entry(line.as_str())?;
-                    line
-                }
-                Err(ReadlineError::Interrupted) => {
-                    // Ctrl+C: Don't exit, show guidance instead
-                    println!(
-                        "\x1b[93mUse '/exit' or '/quit' to end the session, or press Ctrl+D.\x1b[0m"
-                    );
-                    continue;
-                }
-                Err(ReadlineError::Eof) => {
-                    // Ctrl+D on an empty line, exit
-                    println!("Ctrl-D received. Exiting.");
-                    break;
-                }
-                Err(err) => {
-                    println!("Error reading line: {:?}", err);
-                    break;
-                }
+        let query_prompt = format!("\nUser-{} (Enter=send, Ctrl+O=newline) > ", session.turn);
+        let readline = query_reader.readline(&query_prompt);
+        let input = match readline {
+            Ok(line) => {
+                // The GUI child receives framed multiline messages from the GUI.
+                #[cfg(feature = "gui")]
+                let line = gui::decode_child_input(line);
+                // Add to CLI input history (allows using arrow keys to recall previous inputs)
+                query_reader.add_history_entry(line.as_str())?;
+                line
+            }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C: Don't exit, show guidance instead
+                println!(
+                    "\x1b[93mUse '/exit' or '/quit' to end the session, or press Ctrl+D.\x1b[0m"
+                );
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl+D on an empty line, exit
+                println!("Ctrl-D received. Exiting.");
+                break;
+            }
+            Err(err) => {
+                println!("Error reading line: {:?}", err);
+                break;
             }
         };
         if input.trim().is_empty() {
@@ -225,38 +209,11 @@ async fn main() -> Result<()> {
                             &config,
                             session.turn,
                             &session.label,
-                            false,
-                            start_time,
-                            &metrics,
                         )?;
                         println!("{}", summary);
-                        if is_batch {
-                            #[cfg(feature = "kb")]
-                            if let Some(kctx) = &kb_ctx {
-                                kb::kb_finish_run(kctx);
-                            }
-                            return Ok(());
-                        }
                         continue;
                     }
                     Err(e) => {
-                        if is_batch {
-                            if let Some(output_path) = &config.output_file {
-                                let note = format!("\n\n[job] Error: {}\n", e);
-                                let written = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(output_path)
-                                    .and_then(|mut f| f.write_all(note.as_bytes()));
-                                if let Err(we) = written {
-                                    eprintln!(
-                                        "Failed to write completion-unconfirmed note to '{}': {}",
-                                        output_path, we
-                                    );
-                                }
-                            }
-                            return Err(e);
-                        }
                         eprintln!("\x1b[91mJob error: {}\x1b[0m", e);
                         continue;
                     }
@@ -312,32 +269,23 @@ async fn main() -> Result<()> {
                         if !oversized.is_empty() {
                             for (path, size) in &oversized {
                                 let size_str = attach::format_file_size(*size);
-                                if is_batch {
-                                    eprintln!(
-                                        "\x1b[93m[Warning] {} exceeds 1 MiB: {} (attaching anyway)\x1b[0m",
-                                        path, size_str
-                                    );
-                                } else {
-                                    println!(
-                                        "{}[Warning] {} exceeds 1 MiB: {}{}",
-                                        startup::C_YELLOW,
-                                        path,
-                                        size_str,
-                                        startup::RESET
-                                    );
-                                }
+                                println!(
+                                    "{}[Warning] {} exceeds 1 MiB: {}{}",
+                                    startup::C_YELLOW,
+                                    path,
+                                    size_str,
+                                    startup::RESET
+                                );
                             }
-                            if !is_batch {
-                                print!("Attach these files anyway? (y/N) ");
-                                let _ = io::stdout().flush();
-                                let mut confirm = String::new();
-                                let read_ok = io::stdin().read_line(&mut confirm).is_ok();
-                                #[cfg(feature = "gui")]
-                                let confirm = gui::decode_child_input(confirm);
-                                if !read_ok || !confirm.trim().eq_ignore_ascii_case("y") {
-                                    // User cancelled or error - do not advance
-                                    continue;
-                                }
+                            print!("Attach these files anyway? (y/N) ");
+                            let _ = io::stdout().flush();
+                            let mut confirm = String::new();
+                            let read_ok = io::stdin().read_line(&mut confirm).is_ok();
+                            #[cfg(feature = "gui")]
+                            let confirm = gui::decode_child_input(confirm);
+                            if !read_ok || !confirm.trim().eq_ignore_ascii_case("y") {
+                                // User cancelled or error - do not advance
+                                continue;
                             }
                         }
 
@@ -424,17 +372,7 @@ async fn main() -> Result<()> {
                 &config,
                 session.turn,
                 &session.label,
-                is_batch,
-                start_time,
-                &metrics,
             )?;
-            if is_batch {
-                #[cfg(feature = "kb")]
-                if let Some(kctx) = &kb_ctx {
-                    kb::kb_finish_run(kctx);
-                }
-                return Ok(());
-            }
             session.turn += 1;
         }
     }
@@ -598,15 +536,12 @@ async fn execute_job_request(
     }
 }
 
-/// Write final answer to file (-o) and print batch summary.
+/// Write final answer to file (-o).
 fn handle_turn_output(
     final_answer: &str,
     config: &startup::Config,
     turn: i32,
     label: &str,
-    is_batch: bool,
-    start_time: std::time::Instant,
-    metrics: &Metrics,
 ) -> Result<()> {
     // -o file output
     if let Some(output_path) = &config.output_file {
@@ -629,54 +564,5 @@ fn handle_turn_output(
             .map_err(|e| anyhow!("Failed to write output to '{}': {}", output_path, e))?;
     }
 
-    if is_batch {
-        // Batch: print to stdout if no -o was given, then summary & exit
-        if config.output_file.is_none() {
-            println!("{}", final_answer);
-        }
-        let elapsed = start_time.elapsed();
-        let secs = elapsed.as_secs_f64();
-        let time_str = if secs >= 60.0 {
-            format!("{:.0}m {:.1}s", secs / 60.0, secs % 60.0)
-        } else {
-            format!("{:.1}s", secs)
-        };
-        let out_label = config.output_file.as_deref().unwrap_or("stdout");
-        let q_preview: String = config
-            .query
-            .as_deref()
-            .map(|q| {
-                let one_line = q.replace('\n', "\\n").replace('\r', "");
-                let chars: Vec<char> = one_line.chars().collect();
-                if chars.len() > 10 {
-                    format!("{}...", chars[..10].iter().collect::<String>())
-                } else {
-                    one_line
-                }
-            })
-            .unwrap_or_default();
-        eprintln!(
-            "\n{}Batch completed in {}, output -> {}, query: \"{}\"{}.",
-            C_CYAN, time_str, out_label, q_preview, RESET
-        );
-        // Token / LLM-time summary (resource accounting).
-        let t = &metrics.totals;
-        eprintln!(
-            "Tokens: In {}, Cache {}, CacheW {}, Out {}, Reasoning {}",
-            llm_stats::fmt_tokens(t.in_normal + t.in_cached + t.in_cache_write + t.in_audio),
-            llm_stats::fmt_tokens(t.in_cached),
-            llm_stats::fmt_tokens(t.in_cache_write),
-            llm_stats::fmt_tokens(t.out_normal),
-            llm_stats::fmt_tokens(t.out_reasoning),
-        );
-        let llm_secs = t.llm_ms_total as f64 / 1000.0;
-        let wall_secs = secs;
-        let pct = if wall_secs > 0.0 {
-            100.0 * llm_secs / wall_secs
-        } else {
-            0.0
-        };
-        eprintln!("LLM time: {:.1}s ({:.1}% of wall)", llm_secs, pct);
-    }
     Ok(())
 }

@@ -850,7 +850,7 @@ fn chunk_statuses(
 }
 
 /// Tools for analyze executors: KB reads/writes plus report workspace.
-/// (`write_file` prompts y/N interactively; batch needs `--unsafe-reflex`.)
+/// (`write_file` prompts y/N interactively.)
 pub(crate) const ANALYZE_EXEC_TOOLS: &[&str] = &[
     "kb_schema",
     "kb_search",

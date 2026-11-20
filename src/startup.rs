@@ -16,7 +16,7 @@ use crate::tools::ToolName;
 /// apply to them).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
 pub(crate) enum KbAutoConfirm {
-    /// Always ask `y/N` (interactive); batch / todo modes deny instead.
+    /// Always ask `y/N` (interactive).
     #[default]
     Ask,
     /// Auto-approve only the read-only tools (kb_search / kb_schema / kb_read).
@@ -39,7 +39,7 @@ impl std::fmt::Display for KbAutoConfirm {
 /// `--unsafe-reflex` never applies to it: it runs arbitrary code).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
 pub(crate) enum MiniPythonAutoConfirm {
-    /// Always ask `y/N` (interactive); batch / todo modes deny instead.
+    /// Always ask `y/N` (interactive).
     #[default]
     Ask,
     /// Auto-approve with a read-only workspace mount (writes fail structurally).
@@ -60,7 +60,7 @@ impl std::fmt::Display for MiniPythonAutoConfirm {
 
 impl MiniPythonAutoConfirm {
     /// The write permission this gate auto-approves, or `None` when it asks
-    /// (interactive y/N; batch / todo modes deny).
+    /// (interactive y/N).
     pub(crate) fn auto_approve(self) -> Option<bool> {
         match self {
             MiniPythonAutoConfirm::Rw => Some(true),
@@ -222,20 +222,12 @@ pub struct Config {
     #[arg(long = "only-tools", env = "ONLY_TOOLS", value_delimiter = ',')]
     pub only_tools: Vec<ToolName>,
 
-    /// Batch query: run once non-interactively and print result to stdout.
-    /// When set, the application runs in batch mode and exits after completion.
-    #[arg(short = 'q', long)]
-    pub query: Option<String>,
-
     /// Write each turn's final LLM response to a file.
-    /// In batch mode (-q): single write (1 turn).
-    /// In interactive mode: append each turn with a separator.
+    /// Append each turn with a separator.
     #[arg(short = 'o', long = "output", env = "OUTPUT_FILE")]
     pub output_file: Option<String>,
 
     /// Maximum reasoning turns per user message (tool-calling loop safety limit) (0 = unlimited).
-    /// In batch mode (-q), exceeding this exits with an error.
-    /// In interactive mode, exceeding this returns control to the user.
     #[arg(long, env = "MAX_REASONING_TURNS", default_value_t = 30)]
     pub max_reasoning_turns: u32,
 
@@ -296,7 +288,7 @@ pub struct Config {
     pub kb_auto_confirm: KbAutoConfirm,
 
     /// Auto-approve mini_python_interpreter: `ro` = read-only mount (writes denied),
-    /// `rw` = read-write, `ask` (default) = y/N; batch/todo deny. --unsafe-reflex never applies.
+    /// `rw` = read-write, `ask` (default) = y/N. --unsafe-reflex never applies.
     #[arg(long, env = "MINI_PYTHON_AUTO_CONFIRM", value_enum, default_value_t = MiniPythonAutoConfirm::Ask)]
     pub mini_python_auto_confirm: MiniPythonAutoConfirm,
 
@@ -583,14 +575,6 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
         APP_DESCRIPTION
     );
     println!("CONFIGURATION:");
-    println!(
-        "  run                : {}",
-        if config.query.is_some() {
-            "batch"
-        } else {
-            "interactive"
-        }
-    );
     println!("  working-dir        : {}", current_dir.display());
     println!("  unsafe-reflex      : {}", config.unsafe_reflex);
     println!("  llm-url            : {}", config.llm_url);
