@@ -382,7 +382,7 @@ impl DynamicEnumerator {
         base.push_str(
             "{\"tasks\": [{\"id\", \"description\", \"verify\": [check strings]}], \"deliverables\"?} \
              with the FULL revised list, then notes. Done ([x]) tasks are immutable; new ids unique; \
-             checks parse as exists/nonempty/contains/sql. Always include the block.",
+             checks parse as nonempty/contains/sql. Always include the block.",
         );
         if !self.feedback.is_empty() {
             base.push_str(&format!("\nApp feedback: {}", self.feedback.join(" / ")));
@@ -851,8 +851,8 @@ pub(crate) fn write_generated_plan(
 pub(crate) const TODO_TEMPLATE: &str = r#"{
   "goal": "TODO: describe the job goal",
   "tasks": [
-    {"id": "t1", "description": "TODO: first task", "verify": ["exists artifacts/t1.done"]},
-    {"id": "t2", "description": "TODO: second task", "verify": ["exists artifacts/t2.done"]}
+    {"id": "t1", "description": "TODO: first task", "verify": ["nonempty artifacts/t1.done"]},
+    {"id": "t2", "description": "TODO: second task", "verify": ["nonempty artifacts/t2.done"]}
   ],
   "deliverables": ["artifacts/final.md"]
 }

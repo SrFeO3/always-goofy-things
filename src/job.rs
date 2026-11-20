@@ -19,7 +19,6 @@ pub(crate) struct Task {
 /// Completion condition. Mechanical judge (see `Check::parse` for the DSL).
 #[derive(Debug, Clone)]
 pub(crate) enum Check {
-    FileExists(String),           // path exists
     FileNonEmpty(String),         // exists and non-empty
     FileContains(String, String), // (path, needle)
     SqlEmpty(String),             // zero rows = success. KB use
@@ -29,24 +28,16 @@ impl Check {
     /// Render back to the plan string form (`parse` roundtrips it).
     pub(crate) fn to_dsl(&self) -> String {
         match self {
-            Check::FileExists(p) => format!("exists {}", p),
             Check::FileNonEmpty(p) => format!("nonempty {}", p),
             Check::FileContains(p, needle) => format!("contains {}:{}", p, needle),
             Check::SqlEmpty(q) => format!("sql {}", q),
         }
     }
 
-    /// Parse one `verify` string: `exists <path>` / `nonempty <path>` /
+    /// Parse one `verify` string: `nonempty <path>` /
     /// `contains <path>:<needle>` (split at the first `:`) / `sql <query>`.
     pub(crate) fn parse(s: &str) -> Result<Check> {
         let t = s.trim();
-        if let Some(p) = t.strip_prefix("exists ") {
-            let p = p.trim();
-            if p.is_empty() {
-                anyhow::bail!("bad check {:?}: `exists` needs a path", s);
-            }
-            return Ok(Check::FileExists(p.to_string()));
-        }
         if let Some(p) = t.strip_prefix("nonempty ") {
             let p = p.trim();
             if p.is_empty() {
@@ -72,7 +63,7 @@ impl Check {
             return Ok(Check::SqlEmpty(q.to_string()));
         }
         anyhow::bail!(
-            "bad check {:?}: expected `exists` / `nonempty` / `contains` / `sql`",
+            "bad check {:?}: expected `nonempty` / `contains` / `sql`",
             s
         )
     }
@@ -82,15 +73,6 @@ impl Check {
     /// as retry-then-failed, not as a runner crash.
     pub(crate) fn eval(&self, sql_probe: &dyn Fn(&str) -> Result<bool>) -> VerifyResult {
         match self {
-            Check::FileExists(p) => {
-                if std::path::Path::new(p).exists() {
-                    VerifyResult::Pass
-                } else {
-                    VerifyResult::Fail {
-                        reason: format!("missing {}", p),
-                    }
-                }
-            }
             Check::FileNonEmpty(p) => match std::fs::metadata(p) {
                 Ok(m) if m.len() > 0 => VerifyResult::Pass,
                 Ok(_) => VerifyResult::Fail {

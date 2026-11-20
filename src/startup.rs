@@ -548,7 +548,7 @@ pub fn system_message_todo_planner(config: &Config) -> crate::model::Message {
          - The user message carries the goal, the current plan ([x] = done, immutable), and task reports.\n\
          - Reply with a ```todo-plan fenced block holding the FULL revised task list as JSON \
            ({\"tasks\": [{\"id\", \"description\", \"verify\": [check strings]}], \"deliverables\"?}), then notes.\n\
-         - Checks read as `exists <path>` / `nonempty <path>` / `contains <path>:<needle>`. Always include the block."
+         - Checks read as `nonempty <path>` / `contains <path>:<needle>`. Always include the block."
             .to_string(),
     );
     build_system_message(sections)

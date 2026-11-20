@@ -13,11 +13,7 @@ use anyhow::anyhow;
 // -- DSL parse --
 
 #[test]
-fn parse_four_kinds() {
-    assert!(matches!(
-        Check::parse("exists artifacts/a.md"),
-        Ok(Check::FileExists(_))
-    ));
+fn parse_three_kinds() {
     assert!(matches!(
         Check::parse("nonempty artifacts/a.md"),
         Ok(Check::FileNonEmpty(_))
@@ -38,7 +34,6 @@ fn parse_four_kinds() {
 #[test]
 fn dsl_roundtrips() {
     for s in [
-        "exists artifacts/a.md",
         "nonempty artifacts/a.md",
         "contains artifacts/a.md:矛盾:追記",
         "sql SELECT id FROM t",
@@ -52,7 +47,6 @@ fn parse_rejects_bad_forms() {
     for bad in [
         "",
         "bogus x",
-        "exists ",
         "nonempty ",
         "contains no-colon-here",
         "contains :needle-only",
@@ -93,19 +87,15 @@ fn eval_file_checks_are_deterministic() {
     // Same state twice: identical verdicts.
     for _ in 0..2 {
         assert!(matches!(
-            Check::FileExists(ps.to_string()).eval(&no_probe),
-            VerifyResult::Pass
-        ));
-        assert!(matches!(
-            Check::FileExists(ms.to_string()).eval(&no_probe),
-            VerifyResult::Fail { .. }
-        ));
-        assert!(matches!(
             Check::FileNonEmpty(ps.to_string()).eval(&no_probe),
             VerifyResult::Pass
         ));
         assert!(matches!(
             Check::FileNonEmpty(es.to_string()).eval(&no_probe),
+            VerifyResult::Fail { .. }
+        ));
+        assert!(matches!(
+            Check::FileNonEmpty(ms.to_string()).eval(&no_probe),
             VerifyResult::Fail { .. }
         ));
         assert!(matches!(

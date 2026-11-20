@@ -9,7 +9,7 @@ fn plan_json() -> serde_json::Value {
     serde_json::json!({
         "goal": "write a report",
         "tasks": [
-            {"id": "t1", "description": "take notes", "verify": ["exists artifacts/notes.md"]},
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
             {"id": "t2", "description": "draft report", "verify": ["nonempty artifacts/draft.md"]}
         ],
         "deliverables": ["artifacts/report.md"]
@@ -131,8 +131,8 @@ fn replan_validates_and_applies() {
     // Valid: keep done, split pending.
     let ok: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
-            {"id": "t1", "description": "take notes", "verify": ["exists artifacts/notes.md"]},
-            {"id": "t2a", "description": "draft part one", "verify": ["exists artifacts/p1.md"]},
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
+            {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]},
             {"id": "t2b", "description": "draft part two"}
         ]}"#,
     )
@@ -157,7 +157,7 @@ fn replan_validates_and_applies() {
     // Reject: bad check string.
     let bad_check: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
-            {"id": "t1", "description": "take notes", "verify": ["exists artifacts/notes.md"]},
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
             {"id": "t9", "description": "new", "verify": ["frobnicate x"]}]}"#,
     )
     .unwrap();
@@ -165,7 +165,7 @@ fn replan_validates_and_applies() {
     // Deliverables replaced when present.
     let with_del: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
-            {"id": "t1", "description": "take notes", "verify": ["exists artifacts/notes.md"]}],
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]}],
          "deliverables": ["artifacts/other.md"]}"#,
     )
     .unwrap();
@@ -222,13 +222,13 @@ fn instruction_carries_checks_note_and_handover() {
     let task = PlanTask {
         id: "t2".to_string(),
         description: "draft it".to_string(),
-        verify_raw: vec!["exists artifacts/d.md".to_string()],
+        verify_raw: vec!["nonempty artifacts/d.md".to_string()],
         checks: Vec::new(),
     };
     let s = build_task_instruction("make report", "be quick", Some("prev done"), &task);
     assert!(s.contains("draft it"));
     assert!(s.contains("make report"));
-    assert!(s.contains("exists artifacts/d.md"));
+    assert!(s.contains("nonempty artifacts/d.md"));
     assert!(s.contains("be quick"));
     assert!(s.contains("prev done"));
     let bare = build_task_instruction("g", "", None, &task);
@@ -305,7 +305,7 @@ fn dry_run_lists_tasks_checks_deliverables() {
     let out = dry_run_todo(&p).unwrap();
     assert!(out.contains("[job dry-run] 2 tasks, 1 deliverables"));
     assert!(out.contains("t1: take notes"));
-    assert!(out.contains("check: exists artifacts/notes.md"));
+    assert!(out.contains("check: nonempty artifacts/notes.md"));
     assert!(out.contains("deliverable: artifacts/report.md"));
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -316,7 +316,7 @@ fn generated_plan_writes_through_validation() {
     let path = dir.join(".todo").join("gen.json");
     let plan = write_generated_plan(
         "investigate",
-        r#"{"tasks": [{"id": "q1", "description": "look", "verify": ["exists artifacts/q.md"]}]}"#,
+        r#"{"tasks": [{"id": "q1", "description": "look", "verify": ["nonempty artifacts/q.md"]}]}"#,
         &path,
         "artifacts/default.md",
     )

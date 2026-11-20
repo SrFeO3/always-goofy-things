@@ -923,7 +923,7 @@ pub(crate) async fn run_kb_analyze(
              kb_insert/kb_update with evidence to record links, write_file for a report under \
              artifacts/). Reply with a {} fenced block holding the FULL task list as JSON \
              ({{\"tasks\": [{{\"id\", \"description\", \"verify\": [check strings]}}], \"deliverables\"?}}), \
-             then notes. Checks read as exists/nonempty/contains/sql.",
+             then notes. Checks read as nonempty/contains/sql.",
             goal,
             focus,
             crate::todo_job::PLAN_FENCE,
