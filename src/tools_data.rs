@@ -38,22 +38,6 @@ use serde_json::{Value, json};
 use crate::startup;
 
 // ---------------------------------------------------------------------------
-// Constants -- default endpoints for development / testing
-// ---------------------------------------------------------------------------
-
-/// GreptimeDB standalone default HTTP endpoint (dev / test).
-#[allow(dead_code)]
-const GREPTIMEDB_DEFAULT_URL: &str = "http://localhost:4000/v1/sql";
-
-/// ClickHouse default HTTP endpoint (port 8123 is the native HTTP query interface).
-#[allow(dead_code)]
-const CLICKHOUSE_DEFAULT_URL: &str = "http://localhost:8123";
-
-/// InfluxDB v3 default HTTP endpoint.
-#[allow(dead_code)]
-const INFLUXDB_DEFAULT_URL: &str = "http://localhost:8086/api/v2/query";
-
-// ---------------------------------------------------------------------------
 // DbContext -- connection parameters built once from Config
 // ---------------------------------------------------------------------------
 

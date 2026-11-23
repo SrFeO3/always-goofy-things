@@ -1,4 +1,4 @@
-//! LLM deviation guards for the todo modes.
+//! LLM deviation guards for todo jobs.
 //!
 //! Verifies LLM work and fixes deviations the application can handle
 //! mechanically: replan feedback, condensing retries, or safer fallbacks.

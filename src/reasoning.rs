@@ -264,8 +264,8 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let mut empty_response_count: usize = 0;
     let mut reasoning_turn: u32 = 0;
     let mut end_reason = EndReason::Completed;
-    // Number ledger for calc results (spec: number ledger): todo modes append
-    // under <workspace>/artifacts/, other modes to the session data dir.
+    // Number ledger for calc results (spec: number ledger): todo jobs append
+    // under <workspace>/artifacts/, other sessions to the session data dir.
     let calc_ledger = tools_calc::CalcLedger::new(&session.label, ctx.job_session);
     let db_ctx = tools_data::db_context_from_config(config);
     let tool_context =

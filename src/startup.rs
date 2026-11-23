@@ -217,8 +217,8 @@ pub struct Config {
     /// Only these AI tools are enabled (repeatable / comma-separated).
     /// When unset, all tools are enabled. Disabled tools are hidden from the
     /// LLM and refuse to execute even if called.
-    /// Note: todo modes (-t/--todo) require `read_file`, and mode 2 also
-    /// requires `write_file`; disabling them breaks the todo workflow.
+    /// Note: todo jobs need `read_file` (and `write_file` for report tasks);
+    /// disabling them breaks the todo workflow.
     #[arg(long = "only-tools", env = "ONLY_TOOLS", value_delimiter = ',')]
     pub only_tools: Vec<ToolName>,
 

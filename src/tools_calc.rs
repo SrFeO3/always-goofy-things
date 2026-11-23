@@ -8,8 +8,8 @@
 //!
 //! The reasoning loop (`run_reasoning_loop`) supplies a `CalcLedger`; this
 //! module assigns `calc_id`s (C-0001, C-0002, ...) and appends one structured
-//! record per expression to the ledger: todo modes append under
-//! `<workspace>/artifacts/`, other modes to the session data dir (same root
+//! record per expression to the ledger: todo jobs append under
+//! `<workspace>/artifacts/`, other sessions to the session data dir (same root
 //! as the session JSONL files).
 
 use std::fs::OpenOptions;

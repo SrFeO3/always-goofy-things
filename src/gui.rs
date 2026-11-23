@@ -422,31 +422,10 @@ where
     });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkspaceTab {
-    Todo,
-    NextTask,
-    Handover,
-    Artifacts,
-}
-
-#[derive(Debug, Default, Clone)]
-struct TaskSummary {
-    total: usize,
-    completed: usize,
-    pending: usize,
-    next_task: Option<String>,
-}
-
 struct WorkspaceInspector {
     root: PathBuf,
-    selected: WorkspaceTab,
-    todo_md: String,
-    next_task_md: String,
-    handover_md: String,
     artifacts: Vec<PathBuf>,
     selected_artifact: Option<PathBuf>,
-    task_summary: TaskSummary,
     last_refresh: Instant,
 }
 
@@ -454,13 +433,8 @@ impl WorkspaceInspector {
     fn new(root: PathBuf) -> Self {
         let mut inspector = Self {
             root,
-            selected: WorkspaceTab::Todo,
-            todo_md: String::new(),
-            next_task_md: String::new(),
-            handover_md: String::new(),
             artifacts: Vec::new(),
             selected_artifact: None,
-            task_summary: TaskSummary::default(),
             last_refresh: Instant::now() - REFRESH_INTERVAL,
         };
         inspector.refresh();
@@ -475,10 +449,6 @@ impl WorkspaceInspector {
 
     fn refresh(&mut self) {
         self.last_refresh = Instant::now();
-        self.todo_md = read_text(&self.root.join("todo.md"));
-        self.next_task_md = read_text(&self.root.join("next-task.md"));
-        self.handover_md = read_text(&self.root.join("artifacts").join("handover.md"));
-        self.task_summary = parse_task_summary(&self.todo_md);
         self.artifacts = list_files(&self.root.join("artifacts"));
         if self
             .selected_artifact
@@ -516,35 +486,6 @@ fn list_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
-}
-
-fn parse_task_summary(todo_md: &str) -> TaskSummary {
-    let mut summary = TaskSummary::default();
-    let mut in_tasks = false;
-    for line in todo_md.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## Tasks") {
-            in_tasks = true;
-            continue;
-        }
-        if in_tasks && trimmed.starts_with("##") {
-            break;
-        }
-        if !in_tasks {
-            continue;
-        }
-        if trimmed.starts_with("- [x]") {
-            summary.total += 1;
-            summary.completed += 1;
-        } else if let Some(description) = trimmed.strip_prefix("- [ ]") {
-            summary.total += 1;
-            summary.pending += 1;
-            if summary.next_task.is_none() {
-                summary.next_task = Some(description.trim().to_string());
-            }
-        }
-    }
-    summary
 }
 
 fn install_fonts(ctx: &egui::Context) {
@@ -604,8 +545,7 @@ struct GuiShell {
 impl GuiShell {
     fn new(config: &Config) -> Result<Self> {
         let process = ProcessReader::start()?;
-        // Always on: the artifacts tab stays useful for job outputs;
-        // legacy tabs (todo/next-task/handover) simply read empty.
+        // Always on: the artifacts list stays useful for job outputs.
         let root = std::fs::canonicalize(&config.working_dir).unwrap_or_else(|_| {
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
@@ -772,60 +712,28 @@ impl GuiShell {
         };
 
         ui.heading("Workspace");
-        ui.horizontal_wrapped(|ui| {
-            for (tab, label) in [
-                (WorkspaceTab::Todo, "Todo"),
-                (WorkspaceTab::NextTask, "Next task"),
-                (WorkspaceTab::Handover, "Handover"),
-                (WorkspaceTab::Artifacts, "Artifacts"),
-            ] {
-                if ui
-                    .selectable_label(workspace.selected == tab, label)
-                    .clicked()
-                {
-                    workspace.selected = tab;
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .id_salt("artifact_list")
+            .max_height(100.0)
+            .show(ui, |ui| {
+                if workspace.artifacts.is_empty() {
+                    ui.label("(no artifacts)");
                 }
-            }
-        });
+                for path in workspace.artifacts.clone() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    let selected = workspace.selected_artifact.as_ref() == Some(&path);
+                    if ui.selectable_label(selected, name).clicked() {
+                        workspace.selected_artifact = Some(path.clone());
+                    }
+                }
+            });
         ui.separator();
-
-        let summary = &workspace.task_summary;
-        ui.label(format!(
-            "Progress: {} / {} ({} pending)",
-            summary.completed, summary.total, summary.pending
-        ));
-        if let Some(next) = &summary.next_task {
-            ui.label(format!("Next: {next}"));
-        }
-        ui.separator();
-
-        match workspace.selected {
-            WorkspaceTab::Todo => text_view(ui, &workspace.todo_md),
-            WorkspaceTab::NextTask => text_view(ui, &workspace.next_task_md),
-            WorkspaceTab::Handover => text_view(ui, &workspace.handover_md),
-            WorkspaceTab::Artifacts => {
-                egui::ScrollArea::vertical()
-                    .id_salt("artifact_list")
-                    .max_height(100.0)
-                    .show(ui, |ui| {
-                        if workspace.artifacts.is_empty() {
-                            ui.label("(no artifacts)");
-                        }
-                        for path in workspace.artifacts.clone() {
-                            let name = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.display().to_string());
-                            let selected = workspace.selected_artifact.as_ref() == Some(&path);
-                            if ui.selectable_label(selected, name).clicked() {
-                                workspace.selected_artifact = Some(path.clone());
-                            }
-                        }
-                    });
-                ui.separator();
-                text_view(ui, &workspace.selected_artifact_text());
-            }
-        }
+        text_view(ui, &workspace.selected_artifact_text());
     }
 
     fn draw_input(&mut self, ui: &mut egui::Ui) {
