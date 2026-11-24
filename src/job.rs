@@ -3,6 +3,8 @@
 //! Runs one task at a time: enumerate, fresh session, verify, record.
 //! Retries failed tasks fresh; warnings proceed; interruptions stop resumable.
 
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::reasoning::LoopCtx;
@@ -69,6 +71,37 @@ impl Check {
             "bad check {:?}: expected `nonempty` / `contains` / `sql`",
             s
         )
+    }
+
+    /// Like `eval`, but file checks must resolve inside `root` (the same
+    /// containment policy as the tools: relative only, no escape, symlinks
+    /// resolved). A violation is a `Fail` so the LLM sees the reason instead
+    /// of a crash.
+    pub(crate) fn eval_in(
+        &self,
+        root: &Path,
+        sql_probe: &dyn Fn(&str) -> Result<bool>,
+    ) -> VerifyResult {
+        let resolved = match self {
+            Check::FileNonEmpty(p) => match crate::tools::resolve_workspace_path(root, p) {
+                Ok(x) => Check::FileNonEmpty(x.to_string_lossy().into_owned()),
+                Err(e) => {
+                    return VerifyResult::Fail {
+                        reason: format!("{}: {:#}", p, e),
+                    };
+                }
+            },
+            Check::FileContains(p, needle) => match crate::tools::resolve_workspace_path(root, p) {
+                Ok(x) => Check::FileContains(x.to_string_lossy().into_owned(), needle.clone()),
+                Err(e) => {
+                    return VerifyResult::Fail {
+                        reason: format!("{}: {:#}", p, e),
+                    };
+                }
+            },
+            Check::SqlEmpty(_) => self.clone(),
+        };
+        resolved.eval(sql_probe)
     }
 
     /// Evaluate against the workspace (and `sql_probe` for `SqlEmpty`).

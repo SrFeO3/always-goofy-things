@@ -232,3 +232,45 @@ async fn empty_plan_completes_without_sessions() {
     assert_eq!(outcome.status, JobStatus::Completed);
     assert_eq!(outcome.summary, "nothing to do");
 }
+
+// -- workspace containment for mechanical checks (P3-6) --
+
+#[test]
+fn eval_in_rejects_paths_outside_the_workspace() {
+    let root = scratch_dir("ws-root");
+    std::fs::create_dir_all(root.join("artifacts")).unwrap();
+    std::fs::write(root.join("artifacts/a.md"), "body").unwrap();
+    let outside = scratch_dir("ws-outside");
+    std::fs::write(outside.join("secret.md"), "secret").unwrap();
+    let no_probe = |_: &str| -> Result<bool> { unreachable!() };
+
+    // Inside the workspace passes.
+    assert!(matches!(
+        Check::FileNonEmpty("artifacts/a.md".to_string()).eval_in(&root, &no_probe),
+        VerifyResult::Pass
+    ));
+    // Escaping `..` is rejected even if the target exists.
+    assert!(matches!(
+        Check::FileNonEmpty("../outside-secret.md".to_string()).eval_in(&root, &no_probe),
+        VerifyResult::Fail { .. }
+    ));
+    // Absolute paths are rejected.
+    let abs = root.join("artifacts/a.md");
+    assert!(matches!(
+        Check::FileNonEmpty(abs.to_string_lossy().into_owned()).eval_in(&root, &no_probe),
+        VerifyResult::Fail { .. }
+    ));
+    // A symlink pointing outside the root is rejected after canonicalization.
+    #[cfg(unix)]
+    {
+        let link = root.join("artifacts/link.md");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(outside.join("secret.md"), &link).unwrap();
+        assert!(matches!(
+            Check::FileNonEmpty("artifacts/link.md".to_string()).eval_in(&root, &no_probe),
+            VerifyResult::Fail { .. }
+        ));
+    }
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(&outside).ok();
+}

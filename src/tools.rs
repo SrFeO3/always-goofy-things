@@ -535,12 +535,23 @@ where
     }
 }
 
-/// Validate a path stays inside the workspace: lexical fast reject, then
-/// canonicalize (resolving symlinks; parent for not-yet-existing paths) and
-/// check against the workspace root.
-fn validate_path(path: &str) -> Result<()> {
+/// Workspace root for verification paths: the registered root, or the current
+/// directory when none was registered (unit tests). Production always
+/// registers it at startup.
+pub(crate) fn workspace_root_or_cwd() -> PathBuf {
+    WORKSPACE_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Resolve a workspace-relative path to an absolute path, enforcing the same
+/// containment policy as the tools: relative only, no escaping `..`, and the
+/// canonicalized result must stay under `root` (symlinks are resolved).
+/// Missing files are allowed as long as their parent resolves inside `root`.
+pub(crate) fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
     let mut depth: i32 = 0;
-    for component in std::path::Path::new(path).components() {
+    for component in Path::new(path).components() {
         match component {
             std::path::Component::Prefix(_) | std::path::Component::RootDir => {
                 return Err(anyhow!(
@@ -563,27 +574,38 @@ fn validate_path(path: &str) -> Result<()> {
     }
 
     let p = Path::new(path);
-    let resolved = match fs::canonicalize(p) {
+    // Relative paths are interpreted under `root` (not the process CWD), so the
+    // check is self-contained and tests can use any root.
+    let abs = root.join(p);
+    let resolved = match fs::canonicalize(&abs) {
         Ok(r) => r,
         Err(_) => {
-            let Some(parent) = p.parent().filter(|pp| !pp.as_os_str().is_empty()) else {
-                return Ok(()); // bare filename, under CWD
+            let Some(parent) = abs.parent() else {
+                return Ok(abs);
             };
             match fs::canonicalize(parent) {
-                Ok(parent_resolved) => parent_resolved.join(p.file_name().unwrap_or_default()),
-                Err(_) => return Ok(()), // no existing ancestor: lexically safe
+                Ok(parent_resolved) => parent_resolved.join(abs.file_name().unwrap_or_default()),
+                Err(_) => return Ok(abs), // no existing ancestor: lexically safe
             }
         }
     };
 
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     // Both sides are canonicalized, so on Windows the casing matches as well.
-    if !resolved.starts_with(workspace_root()) {
+    if !resolved.starts_with(&root) {
         return Err(anyhow!(
             "[SECURITY_VIOLATION] Path resolves outside the workspace: '{}'",
             path
         ));
     }
-    Ok(())
+    Ok(resolved)
+}
+
+/// Validate a path stays inside the workspace: lexical fast reject, then
+/// canonicalize (resolving symlinks; parent for not-yet-existing paths) and
+/// check against the workspace root.
+fn validate_path(path: &str) -> Result<()> {
+    resolve_workspace_path(workspace_root(), path).map(|_| ())
 }
 
 /// Confirms tool execution (via user interaction or auto-rules).

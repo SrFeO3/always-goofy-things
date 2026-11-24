@@ -483,11 +483,36 @@ fn planner_instruction(
         }
     }
     let mut base = format!(
-        "Goal: {}\nPlan:\n{}\nReply with a {} fenced block ",
+        "Goal: {}\nDeliverables: {}\nPlan:\n{}\nReply with a {} fenced block ",
         plan.goal,
+        if plan.deliverables.is_empty() {
+            "(none)".to_string()
+        } else {
+            plan.deliverables.join(", ")
+        },
         lines.join("\n"),
         PLAN_FENCE
     );
+    let failures: Vec<String> = plan
+        .tasks
+        .iter()
+        .filter_map(|t| {
+            let st = states.get(&t.id)?;
+            if st.status != TaskStatus::Pending {
+                return None;
+            }
+            st.error
+                .as_ref()
+                .filter(|e| !e.trim().is_empty())
+                .map(|e| format!("{}: {}", t.id, e))
+        })
+        .collect();
+    if !failures.is_empty() {
+        base.push_str(&format!(
+            "\nVerification failures: {}",
+            failures.join(" / ")
+        ));
+    }
     base.push_str(
         "{\"tasks\": [{\"id\", \"description\", \"verify\": [check strings], \"brief\"}], \
          \"deliverables\"?} with the FULL revised list, then notes. Done ([x]) and cancelled \
@@ -510,11 +535,13 @@ fn planner_instruction(
 }
 
 /// Evaluate a task's checks mechanically (sql has no database in a todo job).
+/// File paths go through the shared workspace containment gate.
 fn eval_task(task: &Task) -> VerifyResult {
     let no_sql =
         |_: &str| -> Result<bool> { anyhow::bail!("sql checks need a database (todo has none)") };
+    let root = crate::tools::workspace_root_or_cwd();
     for check in &task.verify {
-        match check.eval(&no_sql) {
+        match check.eval_in(&root, &no_sql) {
             VerifyResult::Pass => {}
             fail => return fail,
         }
@@ -524,7 +551,7 @@ fn eval_task(task: &Task) -> VerifyResult {
 
 /// Two-tier finalize: every task terminal (done/cancelled), deliverables fatal,
 /// declared task outputs warn.
-fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>) -> JobOutcome {
+fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>, root: &Path) -> JobOutcome {
     let incomplete: Vec<&str> = plan
         .tasks
         .iter()
@@ -547,10 +574,23 @@ fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>) -> JobOutcome
         };
     }
     let mut missing: Vec<String> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
     for d in &plan.deliverables {
-        if !matches!(std::fs::metadata(d), Ok(m) if m.len() > 0) {
-            missing.push(d.clone());
+        match crate::tools::resolve_workspace_path(root, d) {
+            Ok(path) if matches!(std::fs::metadata(&path), Ok(m) if m.len() > 0) => {}
+            Ok(_) => missing.push(d.clone()),
+            Err(_) => invalid.push(d.clone()),
         }
+    }
+    if !invalid.is_empty() {
+        return JobOutcome {
+            status: JobStatus::Failed,
+            summary: format!(
+                "invalid deliverables({}): {} (must be workspace-relative)",
+                invalid.len(),
+                invalid.join(", ")
+            ),
+        };
     }
     if !missing.is_empty() {
         return JobOutcome {
@@ -647,6 +687,7 @@ fn executor_spec(
     goal: &str,
     notes: &str,
     brief: Option<&str>,
+    previous_error: Option<&str>,
     pos: usize,
     task: &PlanTask,
     policy: ToolPolicy,
@@ -654,7 +695,7 @@ fn executor_spec(
     SessionSpec {
         label: task_session_label(session_label, pos, &task.id),
         system: system.clone(),
-        instruction: build_task_instruction(goal, notes, brief, task),
+        instruction: build_task_instruction(goal, notes, brief, task, previous_error),
         allow_tools: policy,
         report_rule: TODO_REPORT_RULE,
         max_turns: None,
@@ -786,6 +827,7 @@ pub(crate) async fn run_todo(
             &plan.goal,
             &options.note,
             briefs.get(&task.id).map(String::as_str),
+            states.get(&task.id).and_then(|s| s.error.as_deref()),
             pos,
             &plan_task,
             options.executor_policy,
@@ -822,7 +864,7 @@ pub(crate) async fn run_todo(
         } else {
             stalls += 1;
             if options.max_stalls > 0 && stalls > options.max_stalls {
-                let out = finalize_plan(&plan, &states);
+                let out = finalize_plan(&plan, &states, &crate::tools::workspace_root_or_cwd());
                 return Ok(format!(
                     "{} (stalled {} rounds without progress; rerun to continue)",
                     out.summary, stalls
@@ -831,7 +873,7 @@ pub(crate) async fn run_todo(
         }
     }
 
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, &crate::tools::workspace_root_or_cwd());
     Ok(out.summary)
 }
 
@@ -1011,7 +1053,13 @@ fn task_session_label(session_label: &str, pos: usize, task_id: &str) -> String 
 }
 
 /// Executor instruction: own task plus goal and the planner's brief (if any).
-fn build_task_instruction(goal: &str, note: &str, brief: Option<&str>, task: &PlanTask) -> String {
+fn build_task_instruction(
+    goal: &str,
+    note: &str,
+    brief: Option<&str>,
+    task: &PlanTask,
+    previous_error: Option<&str>,
+) -> String {
     let mut s = format!("Task ({}): {}", task.id, task.description);
     s.push_str(&format!("\nGoal: {}", goal));
     if !task.verify_raw.is_empty() {
@@ -1019,6 +1067,9 @@ fn build_task_instruction(goal: &str, note: &str, brief: Option<&str>, task: &Pl
     }
     if let Some(b) = brief.filter(|b| !b.trim().is_empty()) {
         s.push_str(&format!("\nBrief: {}", b));
+    }
+    if let Some(e) = previous_error.filter(|e| !e.trim().is_empty()) {
+        s.push_str(&format!("\nPrevious attempt failed verification: {}", e));
     }
     if !note.trim().is_empty() {
         s.push_str(&format!("\nAdditional instructions: {}", note));

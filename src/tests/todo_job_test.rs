@@ -314,7 +314,8 @@ fn replan_validates_and_applies() {
 #[test]
 fn finalize_separates_fatal_and_warn() {
     let dir = scratch("finalize");
-    let report = dir.join("artifacts").join("report.md");
+    let report_rel = "artifacts/report.md";
+    let report = dir.join(report_rel);
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, "").unwrap();
     let plan = Plan {
@@ -325,7 +326,7 @@ fn finalize_separates_fatal_and_warn() {
             verify_raw: Vec::new(),
             checks: Vec::new(),
         }],
-        deliverables: vec![report.to_string_lossy().into_owned()],
+        deliverables: vec![report_rel.to_string()],
     };
     let mut states = HashMap::new();
     // Relative artifacts path: parsed, then reported missing (warn tier).
@@ -335,12 +336,12 @@ fn finalize_separates_fatal_and_warn() {
         done_state(&format!("- Status: done\n- Output: {}", ghost_rel)),
     );
     // Empty deliverable is fatal even with outputs present.
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, &dir);
     assert_eq!(out.status, JobStatus::Failed);
     assert!(out.summary.contains("missing deliverables"));
     // Non-empty deliverable completes; ghost output warns.
     std::fs::write(&report, "body").unwrap();
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, &dir);
     assert_eq!(out.status, JobStatus::Completed);
     assert!(out.summary.contains("Completed: deliverables(1)"));
     assert!(out.summary.contains("todo-job-test-ghost"));
@@ -349,7 +350,7 @@ fn finalize_separates_fatal_and_warn() {
         "t1".to_string(),
         done_state("- Status: done\n- Output: none"),
     );
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, &dir);
     assert!(!out.summary.contains("Warnings"));
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -362,13 +363,13 @@ fn instruction_carries_checks_note_and_brief() {
         verify_raw: vec!["nonempty artifacts/d.md".to_string()],
         checks: Vec::new(),
     };
-    let s = build_task_instruction("make report", "be quick", Some("prev done"), &task);
+    let s = build_task_instruction("make report", "be quick", Some("prev done"), &task, None);
     assert!(s.contains("draft it"));
     assert!(s.contains("make report"));
     assert!(s.contains("nonempty artifacts/d.md"));
     assert!(s.contains("be quick"));
     assert!(s.contains("Brief: prev done"));
-    let bare = build_task_instruction("g", "", None, &task);
+    let bare = build_task_instruction("g", "", None, &task, None);
     assert!(!bare.contains("Brief:"));
 }
 
@@ -594,7 +595,7 @@ fn finalize_requires_every_task_terminal() {
     let mut states = HashMap::new();
     states.insert("t1".to_string(), done_state("- Status: done"));
     // t2 is still pending: not a completed job.
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, std::path::Path::new("."));
     assert_eq!(out.status, JobStatus::Failed);
     assert!(out.summary.contains("incomplete tasks(1): t2"));
 
@@ -607,7 +608,79 @@ fn finalize_requires_every_task_terminal() {
             ..Default::default()
         },
     );
-    let out = finalize_plan(&plan, &states);
+    let out = finalize_plan(&plan, &states, std::path::Path::new("."));
     assert_eq!(out.status, JobStatus::Completed);
     assert!(out.summary.contains("Cancelled(1): t2 (removed by replan)"));
+}
+
+#[test]
+fn instructions_carry_deliverables_and_failure_reason() {
+    let plan = Plan {
+        goal: "write a report".to_string(),
+        tasks: vec![PlanTask {
+            id: "t1".to_string(),
+            description: "draft".to_string(),
+            verify_raw: vec!["nonempty artifacts/r.md".to_string()],
+            checks: Vec::new(),
+        }],
+        deliverables: vec!["artifacts/r.md".to_string()],
+    };
+    let mut states = HashMap::new();
+    states.insert(
+        "t1".to_string(),
+        TaskState {
+            status: TaskStatus::Pending,
+            attempts: 1,
+            error: Some("empty artifacts/r.md".to_string()),
+            ..Default::default()
+        },
+    );
+    // Planner sees the deliverables list and why the task failed.
+    let p = planner_instruction(&plan, &states, &[], "");
+    assert!(p.contains("Deliverables: artifacts/r.md"));
+    assert!(p.contains("Verification failures: t1: empty artifacts/r.md"));
+    // The executor retry sees only its own failure reason.
+    let retry = build_task_instruction(
+        "write a report",
+        "",
+        None,
+        &plan.tasks[0],
+        states["t1"].error.as_deref(),
+    );
+    assert!(retry.contains("Previous attempt failed verification: empty artifacts/r.md"));
+    // First attempt has no failure line.
+    let first = build_task_instruction("write a report", "", None, &plan.tasks[0], None);
+    assert!(!first.contains("Previous attempt"));
+    // Done tasks' warnings are not reported as pending failures.
+    states.insert(
+        "t1".to_string(),
+        TaskState {
+            status: TaskStatus::Done,
+            error: Some("warning".to_string()),
+            ..Default::default()
+        },
+    );
+    let p = planner_instruction(&plan, &states, &[], "");
+    assert!(!p.contains("Verification failures"));
+}
+
+#[test]
+fn finalize_rejects_deliverables_outside_workspace() {
+    let dir = scratch("finalize-ws");
+    let plan = Plan {
+        goal: "g".to_string(),
+        tasks: vec![PlanTask {
+            id: "t1".to_string(),
+            description: "d".to_string(),
+            verify_raw: Vec::new(),
+            checks: Vec::new(),
+        }],
+        deliverables: vec!["../escape.md".to_string()],
+    };
+    let states = HashMap::from([("t1".to_string(), done_state("- Status: done"))]);
+    let out = finalize_plan(&plan, &states, &dir);
+    assert_eq!(out.status, JobStatus::Failed);
+    assert!(out.summary.contains("invalid deliverables(1)"));
+    assert!(out.summary.contains("must be workspace-relative"));
+    std::fs::remove_dir_all(&dir).ok();
 }

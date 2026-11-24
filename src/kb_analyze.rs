@@ -518,8 +518,9 @@ fn judge_task(kb: &KbContext, task: &Task) -> Result<VerifyResult> {
             Ok(rows.next()?.is_none())
         };
         let mut covered = true;
+        let root = crate::tools::workspace_root_or_cwd();
         for check in &task.verify {
-            if !matches!(check.eval(&probe), VerifyResult::Pass) {
+            if !matches!(check.eval_in(&root, &probe), VerifyResult::Pass) {
                 covered = false;
                 break;
             }
