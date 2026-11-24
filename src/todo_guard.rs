@@ -3,6 +3,8 @@
 //! Condenses an over-long final message, and detects declared `Output:` paths
 //! that are missing.
 
+use std::path::Path;
+
 use crate::model::Session;
 use crate::reasoning::{LoopCtx, run_reasoning_loop};
 
@@ -101,12 +103,18 @@ fn extract_output_paths(report: &str) -> Vec<String> {
     paths
 }
 
-/// Declared `Output:` paths that do not exist on disk.
+/// Declared `Output:` paths that do not exist under `root`.
 /// Missing paths are reported to the next replan (Mode 2) or warned about (Mode 1).
-pub(crate) fn llm_guard_declared_outputs(report: &str) -> Vec<String> {
+/// Paths that escape the workspace are reported missing too (same containment
+/// policy as `verify`/`deliverables`).
+pub(crate) fn llm_guard_declared_outputs(root: &Path, report: &str) -> Vec<String> {
     extract_output_paths(report)
         .into_iter()
-        .filter(|p| !std::path::Path::new(p).exists())
+        .filter(|p| {
+            crate::tools::resolve_workspace_path(root, p)
+                .map(|path| !path.exists())
+                .unwrap_or(true)
+        })
         .collect()
 }
 

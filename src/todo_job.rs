@@ -189,17 +189,18 @@ fn live_plan_path(plan_path: &Path) -> PathBuf {
 /// Plan definition hash (goal + tasks + deliverables); P1-3 compares it to the
 /// seed so a hand-edited `todo.json` can trigger a reset.
 fn plan_hash(plan: &Plan) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    plan.goal.hash(&mut h);
-    for t in &plan.tasks {
-        t.id.hash(&mut h);
-        t.description.hash(&mut h);
-        t.verify_raw.hash(&mut h);
-    }
-    plan.deliverables.hash(&mut h);
-    h.finish()
+    let tasks: Vec<(&str, &str, &[String])> = plan
+        .tasks
+        .iter()
+        .map(|t| {
+            (
+                t.id.as_str(),
+                t.description.as_str(),
+                t.verify_raw.as_slice(),
+            )
+        })
+        .collect();
+    crate::stable_hash::stable_hash(&(plan.goal.as_str(), tasks, plan.deliverables.as_slice()))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -605,7 +606,7 @@ fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>, root: &Path) 
     let mut declared_missing: Vec<String> = Vec::new();
     for t in &plan.tasks {
         if let Some(r) = states.get(&t.id).and_then(|s| s.handover.clone()) {
-            declared_missing.extend(llm_guard_declared_outputs(&r));
+            declared_missing.extend(llm_guard_declared_outputs(root, &r));
         }
     }
     declared_missing.sort();
@@ -702,6 +703,35 @@ fn executor_spec(
     }
 }
 
+/// Todo executions must be able to write at least one deliverable (all todo
+/// checks are file-based). Fail before the first LLM call when `--only-tools`
+/// or the policy leaves no write path.
+fn check_executor_tools(policy: ToolPolicy, enabled: impl Fn(&str) -> bool) -> Result<()> {
+    let is_on = |n: &str| {
+        enabled(n)
+            && match policy {
+                ToolPolicy::Inherit => true,
+                ToolPolicy::AllowList(list) => list.contains(&n),
+            }
+    };
+    if !startup::TODO_EXEC_TOOLS.iter().any(|n| is_on(n)) {
+        anyhow::bail!("[TOOL_CONFIG_ERROR] no todo executor tool is enabled; check --only-tools");
+    }
+    const WRITE: &[&str] = &[
+        "write_file",
+        "str_replace_editor",
+        "execute_bash",
+        "mini_python_interpreter",
+    ];
+    if !WRITE.iter().any(|n| is_on(n)) {
+        anyhow::bail!(
+            "[TOOL_CONFIG_ERROR] todo needs a write path (write_file / str_replace_editor / \
+             execute_bash / mini_python_interpreter); check --only-tools"
+        );
+    }
+    Ok(())
+}
+
 /// y/N confirmation for a replan scope reduction (stdin; EOF = no).
 fn confirm_cancel_removal(prompt: &str) -> bool {
     use std::io::Write as _;
@@ -727,6 +757,7 @@ pub(crate) async fn run_todo(
     options: &TodoOptions,
 ) -> Result<String> {
     let live_path = live_plan_path(plan_path);
+    check_executor_tools(options.executor_policy, |n| ctx.config.is_tool_enabled(n))?;
     // Per-task retry is gone (retries are loop-driven via `max_stalls`); the
     // option stays only for CLI compatibility.
     let _ = options.max_retries;
@@ -910,7 +941,22 @@ pub(crate) fn todo_status_in(plan_path: &Path) -> Result<String> {
         None => (load_plan(plan_path)?, HashMap::new()),
     };
     let done = count_done(&plan, &states);
-    let mut out = format!("[job status] {}/{} tasks done\n", done, plan.tasks.len());
+    let cancelled = plan
+        .tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                states.get(&t.id).map(|s| s.status),
+                Some(TaskStatus::Cancelled)
+            )
+        })
+        .count();
+    let active = plan.tasks.len() - cancelled;
+    let mut out = format!("[job status] {}/{} tasks done", done, active);
+    if cancelled > 0 {
+        out.push_str(&format!(" (+{} cancelled)", cancelled));
+    }
+    out.push('\n');
     for t in &plan.tasks {
         let line = match states.get(&t.id) {
             Some(s) if s.status == TaskStatus::Cancelled => format!(
@@ -967,7 +1013,12 @@ pub(crate) fn write_generated_plan(
         plan.deliverables = vec![default_deliverable.to_string()];
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        if parent.file_name().and_then(|n| n.to_str()) == Some(TODO_STATE_DIR) {
+            let workspace = parent.parent().unwrap_or_else(|| Path::new("."));
+            ensure_state_dir(workspace)?;
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     let doc = serde_json::json!({
         "goal": plan.goal,
@@ -1003,11 +1054,41 @@ pub(crate) fn init_plan(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Validate the workspace-local `.todo/` directory if it exists. A symlinked
+/// `.todo` could redirect live-plan writes/removals outside the workspace.
+fn check_state_dir(workspace: &Path) -> Result<Option<PathBuf>> {
+    let dir = workspace.join(TODO_STATE_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
+            "[SECURITY_VIOLATION] '{}' must not be a symlink",
+            dir.display()
+        ),
+        Ok(m) if !m.is_dir() => anyhow::bail!(
+            "[SECURITY_VIOLATION] '{}' exists and is not a directory",
+            dir.display()
+        ),
+        Ok(_) => Ok(Some(dir)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `.todo/` for writes: validate if present, create otherwise.
+fn ensure_state_dir(workspace: &Path) -> Result<PathBuf> {
+    if let Some(dir) = check_state_dir(workspace)? {
+        return Ok(dir);
+    }
+    let dir = workspace.join(TODO_STATE_DIR);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 /// Delete stale state/live files under `.todo/`: `all` removes everything,
 /// otherwise only files whose seed plan is gone. Generated analyze plans
 /// (`kb-analyze-*.json`, no `.state.json`/`.live.json` suffix) survive.
 pub(crate) fn clean_states(workspace: &Path, all: bool) -> Result<Vec<PathBuf>> {
-    let dir = workspace.join(TODO_STATE_DIR);
+    let Some(dir) = check_state_dir(workspace)? else {
+        return Ok(Vec::new());
+    };
     let mut deleted = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(deleted);

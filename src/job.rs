@@ -206,7 +206,9 @@ pub(crate) struct JobOptions {
 }
 
 /// Run the job loop. `Err` only on machinery failure; task outcomes
-/// (pass / fail / interrupt) come back as `JobOutcome`.
+/// (pass / fail / interrupt) come back as `JobOutcome`. `build` also receives
+/// the previous attempt's failure reason (`None` on the first attempt) so a
+/// retry prompt can name what went wrong.
 #[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) async fn run_job<E, V, S>(
     ctx: &mut LoopCtx<'_>,
@@ -214,7 +216,7 @@ pub(crate) async fn run_job<E, V, S>(
     verifier: &V,
     store: &S,
     options: &JobOptions,
-    build: impl Fn(&Task) -> Result<SessionSpec>,
+    build: impl Fn(&Task, Option<&str>) -> Result<SessionSpec>,
 ) -> Result<JobOutcome>
 where
     E: Enumerator,
@@ -228,10 +230,11 @@ where
         };
         println!("--- [Job] {}: {} ---", task.id, task.description);
         let mut retries = 0u32;
+        let mut previous_failure: Option<String> = None;
         loop {
             // Fatal machinery faults abort; task outcomes stop resumable.
             // A failing `build` (lost chunk rows) aborts the same way.
-            let outcome = run_session(ctx, build(&task)?).await?;
+            let outcome = run_session(ctx, build(&task, previous_failure.as_deref())?).await?;
             if !outcome.end_reason.is_completed() {
                 // Best-effort verdict so `--status` shows the attempt;
                 // the task stays pending either way.
@@ -264,6 +267,7 @@ where
                         "[retry {}/{}] {}: {}",
                         retries, options.max_retries, task.id, reason
                     );
+                    previous_failure = Some(reason.clone());
                     continue;
                 }
                 VerifyResult::Fail { reason } => {

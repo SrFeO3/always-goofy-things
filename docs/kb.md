@@ -70,6 +70,8 @@ All optional - the KB works with none of them:
 
 - Reads (`kb_search` / `kb_schema` / `kb_read`) ask `y/N`; auto-approve with `--kb-auto-confirm ro`.
 - Writes (`kb_insert` / `kb_update`) too, with `--kb-auto-confirm rw`.
+- `/kb extract` and `/kb analyze` write knowledge rows, so they require `--kb-auto-confirm rw`
+  up front and refuse to start otherwise.
 - The KB gate is independent: the global `--unsafe-reflex` never applies to the KB tools.
 - `--only-tools` treats them like any other tool: omitted names are hidden from the LLM and
   refused. `/kb` is a CLI command, not a tool - `--only-tools` does not disable it.
@@ -83,9 +85,9 @@ All optional - the KB works with none of them:
 /kb sync                           Rescan data/ for added / changed / missing files (also reports broken references)
 /kb backup [path]                  Snapshot the knowledge database (VACUUM INTO)
 /kb restore <snapshot>             Replace the knowledge database with a snapshot and reopen
-/kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
+/kb extract [<source>] [--chunk-bytes N] [--chunk-units N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
                                     Extract knowledge app-driven, chunk by chunk (see How analysis works)
-/kb analyze "<goal>" [--sources ...] [--max-retries N] [--note "..."]
+/kb analyze "<goal>" [--sources ...] [--max-retries N] [--note "..."] [--reset]
                                     Investigate across documents (dependencies, contradictions, identity)
 ```
 
@@ -139,10 +141,11 @@ You should see the `kb-feature : enabled (run_id: ...)` row in the configuration
 
 `/kb add` and `/kb sync` only do **machine extraction** (files -> units, status `pending`); they
 never run the LLM. `/kb extract` does the rest as an app-driven job: it splits each pending
-document into byte-budget chunks, runs one fresh LLM session per chunk to register knowledge
-with evidence, and marks the document `analyzed` once every unit is covered (verified
-mechanically, not self-declared). Re-running skips finished chunks; re-registration is
-safe: entities, claims, relations, conditions, events, and links are deduplicated.
+document into byte- and unit-budget chunks, runs one fresh LLM session per chunk to register
+knowledge with evidence, and marks the document `analyzed` once every unit is covered
+(verified mechanically, not self-declared). Re-running skips finished chunks;
+re-registration is safe: entities, claims, relations, conditions, events, and links are
+deduplicated.
 
 ```text
 /kb extract --dry-run      # preview: chunks, sizes, rough token cost (runs nothing)
@@ -152,18 +155,24 @@ safe: entities, claims, relations, conditions, events, and links are deduplicate
 ```
 
 Extraction costs time and tokens in proportion to chunk count - check `--dry-run` first.
-To lower per-call load, shrink `--chunk-bytes` (more chunks, more calls); to cap cost,
-lower `--max-retries`. `--redo` re-runs finished chunks (otherwise they are skipped), and
-`--handover auto` carries the previous chunk's summary forward (default `off`: independent).
+To lower per-call load, shrink `--chunk-bytes` (default 64 KiB) or `--chunk-units`
+(default 40, `0` = unlimited) (more chunks, more calls); to cap cost, lower
+`--max-retries`. `--redo` re-runs finished chunks (otherwise they are skipped); it does
+not delete earlier evidence (re-registration is deduplicated), so think of it as a
+second pass rather than a rollback. `--handover auto` carries the previous chunk's
+summary forward (default `off`: independent).
 A document larger than one LLM context still completes: chunks keep each session small,
 and the knowledge stays queryable across the whole document afterwards.
 
-Done means every unit backs at least one evidence row (short heading-only units are
-accepted with a warning); anything else stays pending.
+Done means every unit backs at least one **verbatim** evidence row (short heading-only
+units are accepted with a warning); anything else stays pending. Offsets must slice the
+unit text exactly to `matched_text`, and rows from older runs count only when they pass
+that same check. A document with no units is marked `analyzed` (nothing to extract).
 
 > **Evidence is mandatory**: every claim / relation / event must be backed by an `evidence` row whose
 > `matched_text` is a verbatim excerpt from the source unit. The extract job rejects invented
-excerpts and re-reads gaps until each unit is backed. A cross-document relation's evidence needs
+> excerpts and re-reads gaps until each unit is backed; a retry prompt lists the units that are
+> still missing evidence. A cross-document relation's evidence needs
 > `source_unit_id` (its `document_id` is derived from that unit).
 
 ### Pattern 1 - One document
@@ -194,8 +203,8 @@ pending`, and split into paragraph units. Check:
 
 #### 1-3. Analyze it
 
-Extract the document with the job. Approve the writes with `y` (`kb_insert` is a write
-tool):
+Extract the document with the job (it writes knowledge rows, so start the app with
+`--kb-auto-confirm rw`):
 
 ```text
 /kb extract rfc9110.txt
@@ -258,7 +267,9 @@ The job plans the investigation, then runs it in fresh sessions: **cross-documen
 (a relation whose `document_id` is `"null"`; in SQL the column is `NULL`, so use
 `document_id IS NULL`), `contradicts` links with per-side evidence, and `canonical_entities` /
 `entity_links` identity (ambiguous links go to `annotations`, never forced). Small follow-ups
-stay in dialogue.
+stay in dialogue. Rerunning the same goal resumes its live plan; `--reset` discards the
+generated plan and progress and starts over (an existing report artifact is overwritten with
+a warning).
 
 #### 2-4. Ask across both
 

@@ -38,5 +38,8 @@ Local KB (--features kb): builds a searchable knowledge base from your documents
 ## v0.8.0 (2026-09 end) - rework GUI
 GUI reworked as a CLI process shell; multi-line input via Ctrl+O in CLI and GUI.
 
-## v0.9.0 (2026-10 early) - rework todo into jobs, app-driven Local KB (breaking)
-Todo mode (`-t`, `todo.md`) replaced by todo job runs (`/job run <todo.json> [--mode static|replan]`, details: docs/todo-job.md) and app-driven KB extraction (`/kb extract`, `/kb analyze`). BREAKING: `-t` is removed; plans are structured JSON with mechanical verification; job state is temporary (`.todo/`, auto-deleted on success).
+## v0.9.0 (2026-10 early) - rework todo into jobs, app-driven Local KB (breaking; includes AI-caused regressions)
+Todo mode (`-t`, `todo.md`) replaced by todo job runs (`/job run <todo.json> [--mode static|replan]`, details: docs/todo-job.md) and app-driven KB extraction (`/kb extract`, `/kb analyze`). BREAKING: `-t` is removed; plans are structured JSON with mechanical verification; job state is temporary (`.todo/`, auto-deleted on success). This release also carries a noticeable number of AI-caused regressions (redundant changes that broke existing behavior), which later versions fix.
+
+## v0.9.6 (2026-11 late) - rework todo and drop batch mode
+Todo mode runs a single status-driven loop over a live plan (`todo.json` seed -> `todo.live.json`), with mechanical verification, safe replans, and resume. Batch mode (`-q`) is dropped. KB extraction verifies evidence slices, caps chunks by unit count, and finalizes empty documents.

@@ -91,11 +91,12 @@ fn job_clean_all_flag() {
 #[test]
 fn kb_extract_parses_source_and_flags() {
     match parse_job_request(
-        "/kb extract rfc.txt --chunk-bytes 1000 --max-retries 2 --redo --handover auto",
+        "/kb extract rfc.txt --chunk-bytes 1000 --chunk-units 25 --max-retries 2 --redo --handover auto",
     ) {
         Some(Ok(JobRequest::KbExtract {
             source,
             chunk_bytes,
+            chunk_units,
             dry_run,
             status,
             max_retries,
@@ -104,6 +105,7 @@ fn kb_extract_parses_source_and_flags() {
         })) => {
             assert_eq!(source, Some("rfc.txt".to_string()));
             assert_eq!(chunk_bytes, Some(1000));
+            assert_eq!(chunk_units, Some(25));
             assert!(!dry_run);
             assert!(!status);
             assert_eq!(max_retries, 2);
@@ -130,19 +132,27 @@ fn kb_extract_parses_source_and_flags() {
 
 #[test]
 fn kb_analyze_takes_quoted_goal_and_sources() {
-    match parse_job_request("/kb analyze \"compare rfc a and b\" --sources a.txt b.txt --note n") {
+    match parse_job_request(
+        "/kb analyze \"compare rfc a and b\" --sources a.txt b.txt --note n --reset",
+    ) {
         Some(Ok(JobRequest::KbAnalyze {
             goal,
             sources,
             max_retries,
             note,
+            reset,
         })) => {
             assert_eq!(goal, "compare rfc a and b");
             assert_eq!(sources, vec!["a.txt".to_string(), "b.txt".to_string()]);
             assert_eq!(max_retries, 1);
             assert_eq!(note, "n");
+            assert!(reset);
         }
         other => panic!("unexpected {:?}", other),
     }
     assert!(matches!(parse_job_request("/kb analyze"), Some(Err(_))));
+    assert!(matches!(
+        parse_job_request("/kb analyze g --bogus"),
+        Some(Err(_))
+    ));
 }

@@ -225,7 +225,7 @@ async fn empty_plan_completes_without_sessions() {
         &Done,
         &NoopStore,
         &options,
-        |_: &Task| unimplemented!("no tasks enumerated"),
+        |_: &Task, _: Option<&str>| unimplemented!("no tasks enumerated"),
     )
     .await
     .unwrap();

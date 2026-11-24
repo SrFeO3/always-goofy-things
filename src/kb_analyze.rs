@@ -19,6 +19,10 @@ use crate::startup;
 /// Provisional per-chunk byte budget (D2: confirm by `--dry-run` metering).
 pub(crate) const DEFAULT_CHUNK_BYTES: usize = 65536;
 
+/// Provisional per-chunk unit cap (independent of bytes): dense paragraphs can
+/// otherwise push one chunk toward `max_reasoning_turns`. `0` = no unit cap.
+pub(crate) const DEFAULT_CHUNK_UNITS: usize = 40;
+
 /// Rough chars-per-token divisor for the dry-run cost hint. Labeled rough.
 const BYTES_PER_TOKEN: usize = 4;
 
@@ -52,12 +56,24 @@ pub(crate) fn require_write_approval(config: &startup::Config) -> Result<()> {
     )
 }
 
-/// Enumerate chunks for all (or one) pending documents, deterministic order.
-/// `chunk_bytes == 0` is rejected: a budget is required to bound sessions.
+/// Enumerate chunks for all (or one) pending documents with the default unit
+/// cap (tests and legacy callers). Deterministic order; `chunk_bytes == 0` is
+/// rejected because a budget is required to bound sessions.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn enumerate_extract_chunks(
     ctx: &KbContext,
     source: Option<&str>,
     chunk_bytes: usize,
+) -> Result<Vec<ExtractChunk>> {
+    enumerate_extract_chunks_with(ctx, source, chunk_bytes, DEFAULT_CHUNK_UNITS)
+}
+
+/// Same, with an explicit unit cap (`min(bytes, units)` packing).
+pub(crate) fn enumerate_extract_chunks_with(
+    ctx: &KbContext,
+    source: Option<&str>,
+    chunk_bytes: usize,
+    chunk_units: usize,
 ) -> Result<Vec<ExtractChunk>> {
     if chunk_bytes == 0 {
         anyhow::bail!("[KB_CONFIG_ERROR] --chunk-bytes must be >= 1");
@@ -80,10 +96,20 @@ pub(crate) fn enumerate_extract_chunks(
         .collect::<Result<Vec<_>, _>>()?;
     drop(docs_stmt);
     if source.is_some() && docs.is_empty() {
-        anyhow::bail!(
-            "[KB_NOT_FOUND] No pending document matches {:?}.",
-            source.unwrap_or_default()
-        );
+        // A source that exists but has nothing pending is fine (nothing to do);
+        // only a name that matches no document at all is a user error.
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE superseded_by IS NULL \
+             AND (id = ?1 OR source = ?1)",
+            [source],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!(
+                "[KB_NOT_FOUND] No document matches {:?}.",
+                source.unwrap_or_default()
+            );
+        }
     }
     let mut chunks = Vec::new();
     for (doc_id, title, doc_source) in &docs {
@@ -97,10 +123,33 @@ pub(crate) fn enumerate_extract_chunks(
             .collect::<Result<Vec<_>, _>>()?;
         drop(types_stmt);
         for unit_type in &types {
-            chunks.extend(pack_units(&conn, doc_id, &label, unit_type, chunk_bytes)?);
+            chunks.extend(pack_units(
+                &conn,
+                doc_id,
+                &label,
+                unit_type,
+                chunk_bytes,
+                chunk_units,
+            )?);
         }
     }
     Ok(chunks)
+}
+
+/// Documents with no non-obsolete units can never produce a chunk. Mark them
+/// analyzed (coverage is vacuously complete) so they do not stay pending
+/// forever. Returns how many were finalized.
+fn finalize_empty_documents(kb: &KbContext, source: Option<&str>) -> Result<usize> {
+    let conn = lock_conn(kb)?;
+    let n = conn.execute(
+        "UPDATE documents AS d SET analysis_status = 'analyzed', analyzed_at = ?1 \
+         WHERE d.superseded_by IS NULL AND d.analysis_status IN ('pending', 'analyzing') \
+           AND (?2 IS NULL OR d.id = ?2 OR d.source = ?2) \
+           AND NOT EXISTS (SELECT 1 FROM document_units u \
+                           WHERE u.document_id = d.id AND u.obsolete = 0)",
+        params![now_iso(), source],
+    )?;
+    Ok(n)
 }
 
 /// Greedy byte-budget packing in position order; a unit never splits and an
@@ -112,6 +161,7 @@ fn pack_units(
     label: &str,
     unit_type: &str,
     chunk_bytes: usize,
+    chunk_units: usize,
 ) -> Result<Vec<ExtractChunk>> {
     let mut units_stmt = conn.prepare(
         "SELECT id, position, text FROM document_units \
@@ -134,7 +184,8 @@ fn pack_units(
     let mut cur_bytes: usize = 0;
     for (id, pos, text) in &units {
         let len = text.len(); // bytes (`String::len`); never SQL `length()`
-        if !cur.is_empty() && cur_bytes + len > chunk_bytes {
+        let unit_cap = chunk_units > 0 && cur.len() >= chunk_units;
+        if !cur.is_empty() && (cur_bytes + len > chunk_bytes || unit_cap) {
             chunks.push(make_chunk(doc_id, label, unit_type, &cur, cur_bytes));
             cur.clear();
             cur_bytes = 0;
@@ -303,6 +354,7 @@ pub(crate) enum HandoverMode {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExtractOptions {
     pub chunk_bytes: usize,
+    pub chunk_units: usize,
     pub max_retries: u32,
     pub redo: RedoMode,
     pub handover: HandoverMode,
@@ -335,7 +387,18 @@ fn decode_key(key: &str) -> Result<(String, String, i64, i64)> {
     }
 }
 
-/// Units in the range that still lack non-obsolete evidence.
+/// SQL predicate: unit `u` has at least one non-obsolete evidence row whose
+/// offsets land inside the unit and whose excerpt is the literal slice there.
+/// Evidence from any run counts, but only when it is genuinely verbatim.
+const VALID_EVIDENCE: &str = "EXISTS (SELECT 1 FROM evidence e \
+     WHERE e.source_unit_id = u.id AND e.document_id = u.document_id AND e.obsolete = 0 \
+       AND e.start_offset IS NOT NULL AND e.end_offset IS NOT NULL \
+       AND e.matched_text IS NOT NULL AND e.matched_text <> '' \
+       AND e.start_offset >= 0 AND e.end_offset > e.start_offset \
+       AND e.end_offset <= length(u.text) \
+       AND substr(u.text, e.start_offset + 1, e.end_offset - e.start_offset) = e.matched_text)";
+
+/// Units in the range that still lack non-obsolete, slice-valid evidence.
 fn uncovered_units(
     kb: &KbContext,
     document_id: &str,
@@ -344,14 +407,15 @@ fn uncovered_units(
     pos_to: i64,
 ) -> Result<Vec<(String, i64, String)>> {
     let conn = lock_conn(kb)?;
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT u.id, u.position, u.text FROM document_units u \
          WHERE u.document_id = ?1 AND u.obsolete = 0 AND u.unit_type = ?2 \
            AND u.position BETWEEN ?3 AND ?4 \
-           AND NOT EXISTS (SELECT 1 FROM evidence e \
-                            WHERE e.source_unit_id = u.id AND e.obsolete = 0) \
+           AND NOT {}\
          ORDER BY u.position ASC",
-    )?;
+        VALID_EVIDENCE
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![document_id, unit_type, pos_from, pos_to], |row| {
             Ok((
@@ -379,6 +443,7 @@ fn run_evidence_problems(
         "SELECT e.id, e.start_offset, e.end_offset, e.matched_text, u.text \
          FROM evidence e JOIN document_units u ON u.id = e.source_unit_id \
          WHERE e.analysis_run_id = ?1 AND e.document_id = ?2 AND e.obsolete = 0 \
+           AND u.document_id = e.document_id \
            AND u.obsolete = 0 AND u.unit_type = ?3 AND u.position BETWEEN ?4 AND ?5",
     )?;
     let rows = stmt
@@ -401,7 +466,17 @@ fn run_evidence_problems(
         let len = text.chars().count() as i64;
         let bad = match (start, end, matched) {
             (Some(s), Some(e), Some(m)) => {
-                !(*s >= 0 && *s < *e && *e <= len && !m.is_empty() && text.contains(m))
+                if !(*s >= 0 && *e > *s && *e <= len && !m.is_empty()) {
+                    true
+                } else {
+                    // Exact character slice, not mere substring presence.
+                    let slice: String = text
+                        .chars()
+                        .skip(*s as usize)
+                        .take((*e - *s) as usize)
+                        .collect();
+                    slice != *m
+                }
             }
             _ => true,
         };
@@ -419,16 +494,18 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Uncovered-unit ids in the range; empty = full coverage.
+/// Uncovered-unit ids in the range; empty = full coverage. Evidence must be
+/// slice-valid (see [`VALID_EVIDENCE`]), so stale or invented rows from older
+/// runs never satisfy coverage.
 fn coverage_sql(document_id: &str, unit_type: &str, pos_from: i64, pos_to: i64) -> String {
     format!(
         "SELECT u.id FROM document_units u WHERE u.document_id = '{}' AND u.obsolete = 0 \
-         AND u.unit_type = '{}' AND u.position BETWEEN {} AND {} AND NOT EXISTS \
-         (SELECT 1 FROM evidence e WHERE e.source_unit_id = u.id AND e.obsolete = 0)",
+         AND u.unit_type = '{}' AND u.position BETWEEN {} AND {} AND NOT {}",
         esc(document_id),
         esc(unit_type),
         pos_from,
-        pos_to
+        pos_to,
+        VALID_EVIDENCE
     )
 }
 
@@ -696,6 +773,7 @@ fn build_extract_spec(
     system: &Message,
     handover: HandoverMode,
     task: &Task,
+    previous_failure: Option<&str>,
 ) -> Result<SessionSpec> {
     let (doc_id, unit_type, from, to) = decode_key(&task.id)?;
     let conn = lock_conn(kb)?;
@@ -721,6 +799,31 @@ fn build_extract_spec(
     drop(units_stmt);
     drop(conn);
     let bytes: usize = units.iter().map(|(_, _, t)| t.len()).sum();
+    // On a retry, name what is still missing so the LLM does not re-guess.
+    let retry_line = match previous_failure {
+        None => String::new(),
+        Some(reason) => {
+            let uncovered = uncovered_units(kb, &doc_id, &unit_type, from, to)?;
+            let mut s = format!("\nPrevious attempt failed: {}\n", reason);
+            if !uncovered.is_empty() {
+                let list = uncovered
+                    .iter()
+                    .map(|(_, pos, text)| {
+                        let snippet: String = text.chars().take(60).collect();
+                        let more = if text.chars().count() > 60 { "…" } else { "" };
+                        format!("#{} {}{}", pos, snippet, more)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                s.push_str(&format!(
+                    "Missing evidence ({} unit(s)): {}\n",
+                    uncovered.len(),
+                    list
+                ));
+            }
+            s
+        }
+    };
     let handover_line = match handover {
         HandoverMode::Off => "Handover: none (independent chunk).".to_string(),
         HandoverMode::Auto { max_chars } => {
@@ -735,14 +838,15 @@ fn build_extract_spec(
          Rules: register knowledge with kb_insert + evidence in the same call (ref/target_ref); \
          matched_text verbatim; offsets are char offsets into unit.text; fix mistakes via kb_update \
          obsolete (never delete); NEVER set analysis_status (the app finalizes it).\n\
-         Deliverable: at least one evidence row per unit; close with an Extraction Report.\n{}\nUnits:\n",
+         Deliverable: at least one evidence row per unit; close with an Extraction Report.\n{}\n{}Units:\n",
         label,
         unit_type,
         from,
         to,
         units.len(),
         bytes,
-        handover_line
+        handover_line,
+        retry_line
     );
     for (id, pos, text) in &units {
         instruction.push_str(&format!(
@@ -777,9 +881,18 @@ pub(crate) async fn run_extract(
     let kb: &KbContext = ctx.kb_ctx.ok_or_else(|| {
         anyhow::anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
     })?;
-    let chunks = enumerate_extract_chunks(kb, source, options.chunk_bytes)?;
+    let empty_docs = finalize_empty_documents(kb, source)?;
+    let chunks =
+        enumerate_extract_chunks_with(kb, source, options.chunk_bytes, options.chunk_units)?;
     if chunks.is_empty() {
-        return Ok("[kb extract] no pending documents".to_string());
+        return Ok(if empty_docs > 0 {
+            format!(
+                "[kb extract] {} empty document(s) marked analyzed; nothing to extract",
+                empty_docs
+            )
+        } else {
+            "[kb extract] no pending documents".to_string()
+        });
     }
     register_chunks(kb, &chunks)?;
     let statuses = chunk_statuses(kb, &chunks)?;
@@ -809,7 +922,16 @@ pub(crate) async fn run_extract(
         &verifier,
         &store,
         &job_options,
-        |task| build_extract_spec(kb, &session_label, &system, handover, task),
+        |task, previous_failure| {
+            build_extract_spec(
+                kb,
+                &session_label,
+                &system,
+                handover,
+                task,
+                previous_failure,
+            )
+        },
     )
     .await?;
     Ok(outcome.summary)
@@ -883,15 +1005,16 @@ const ANALYZE_PLANNER_TOOLS: &[&str] = &[
 pub(crate) struct AnalyzeOptions {
     pub max_retries: u32,
     pub note: String,
+    /// Drop the previous live plan/state and restart the generated plan.
+    pub reset: bool,
 }
 
 /// Stable generated-plan path per goal (reruns resume through it).
 fn analyze_plan_path(workspace: &Path, goal: &str) -> std::path::PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    goal.hash(&mut h);
-    workspace.join(format!(".todo/kb-analyze-{:016x}.json", h.finish()))
+    workspace.join(format!(
+        ".todo/kb-analyze-{:016x}.json",
+        crate::stable_hash::stable_hash(goal)
+    ))
 }
 
 /// Cross-document investigation: plan once from the goal, then run the
@@ -955,19 +1078,28 @@ pub(crate) async fn run_kb_analyze(
         );
     };
     let path = analyze_plan_path(std::path::Path::new("."), goal);
-    let deliverable = format!("artifacts/kb-analyze-{:08x}.md", {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        goal.hash(&mut h);
-        h.finish() as u32
-    });
+    let deliverable = format!(
+        "artifacts/kb-analyze-{:08x}.md",
+        crate::stable_hash::stable_hash(goal) as u32
+    );
     crate::todo_job::write_generated_plan(goal, block, &path, &deliverable)?;
     let mut note = String::new();
     if !sources.is_empty() {
         note.push_str(&format!("Focus documents: {}. ", sources.join(", ")));
     }
     note.push_str(&options.note);
+    if options.reset {
+        let root = crate::tools::workspace_root_or_cwd();
+        let exists = crate::tools::resolve_workspace_path(&root, &deliverable)
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if exists {
+            eprintln!(
+                "[kb analyze] --reset: existing {} will be overwritten",
+                deliverable
+            );
+        }
+    }
     run_todo(
         ctx,
         &path,
@@ -977,7 +1109,7 @@ pub(crate) async fn run_kb_analyze(
             max_stalls: ctx.config.max_replan_attempts,
             note,
             executor_policy: ToolPolicy::AllowList(ANALYZE_EXEC_TOOLS),
-            reset: false,
+            reset: options.reset,
             generated: true,
             // Generated plans may be restructured; coverage/deliverables
             // still gate completion, and cancellations are recorded.

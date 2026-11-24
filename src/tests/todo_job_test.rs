@@ -684,3 +684,103 @@ fn finalize_rejects_deliverables_outside_workspace() {
     assert!(out.summary.contains("must be workspace-relative"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[cfg(unix)]
+#[test]
+fn todo_state_dir_refuses_symlink() {
+    let workspace = scratch("todo-symlink");
+    let outside = scratch("todo-symlink-outside");
+    std::os::unix::fs::symlink(&outside, workspace.join(".todo")).unwrap();
+    assert!(clean_states(&workspace, true).is_err());
+    let path = workspace.join(".todo").join("gen.json");
+    assert!(
+        write_generated_plan(
+            "g",
+            r#"{"tasks": [{"id": "t1", "description": "d", "verify": ["nonempty artifacts/a.md"]}]}"#,
+            &path,
+            "artifacts/a.md"
+        )
+        .is_err()
+    );
+    // Nothing was written through the link.
+    assert!(!outside.join("gen.json").exists());
+    std::fs::remove_dir_all(&workspace).ok();
+    std::fs::remove_dir_all(&outside).ok();
+}
+
+#[test]
+fn executor_tools_fail_fast_without_a_write_path() {
+    use crate::session::ToolPolicy;
+    assert!(check_executor_tools(ToolPolicy::AllowList(&["read_file"]), |_| true).is_err());
+    assert!(
+        check_executor_tools(ToolPolicy::AllowList(&["read_file", "write_file"]), |_| {
+            true
+        })
+        .is_ok()
+    );
+    // --only-tools removes the only write path.
+    assert!(
+        check_executor_tools(ToolPolicy::AllowList(&["write_file"]), |n| n
+            != "write_file")
+        .is_err()
+    );
+    // Inherit is still subject to --only-tools.
+    assert!(check_executor_tools(ToolPolicy::Inherit, |n| n == "read_file").is_err());
+    assert!(check_executor_tools(ToolPolicy::Inherit, |_| true).is_ok());
+}
+
+#[test]
+fn finalize_warns_on_declared_outputs_outside_workspace() {
+    let dir = scratch("declared-ws");
+    let plan = Plan {
+        goal: "g".to_string(),
+        tasks: vec![PlanTask {
+            id: "t1".to_string(),
+            description: "d".to_string(),
+            verify_raw: Vec::new(),
+            checks: Vec::new(),
+        }],
+        deliverables: Vec::new(),
+    };
+    let states = HashMap::from([(
+        "t1".to_string(),
+        done_state("- Status: done\n- Output: artifacts/../../etc/passwd"),
+    )]);
+    let out = finalize_plan(&plan, &states, &dir);
+    assert_eq!(out.status, JobStatus::Completed);
+    assert!(out.summary.contains("Warnings"));
+    assert!(out.summary.contains("artifacts/../../etc/passwd"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn status_header_separates_cancelled_from_active() {
+    let dir = scratch("status-cancel");
+    let plan_path = write_plan(&dir, "todo.json", &plan_json());
+    let plan = load_plan(&plan_path).unwrap();
+    let states = HashMap::from([
+        ("t1".to_string(), done_state("r")),
+        (
+            "t2".to_string(),
+            TaskState {
+                status: TaskStatus::Cancelled,
+                cancelled_reason: Some("removed by replan".to_string()),
+                ..Default::default()
+            },
+        ),
+    ]);
+    save_live(
+        &live_plan_path(&plan_path),
+        &plan_path,
+        &plan,
+        &states,
+        &HashMap::new(),
+        1,
+        plan_hash(&plan),
+    )
+    .unwrap();
+    let out = todo_status_in(&plan_path).unwrap();
+    assert!(out.contains("[job status] 1/1 tasks done (+1 cancelled)"));
+    assert!(out.contains("- [~] t2 (cancelled: removed by replan)"));
+    std::fs::remove_dir_all(&dir).ok();
+}

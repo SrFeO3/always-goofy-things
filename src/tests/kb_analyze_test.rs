@@ -235,15 +235,32 @@ fn judge_fails_invented_offsets() {
     let doc = add_doc(&ctx, "t", "data/t.md", "pending");
     add_unit(&ctx, &doc, "paragraph", 0, "first unit text here");
     let run = ctx.run_id.to_string();
+    let unit = unit_id(&ctx, &doc, 0);
+    // A valid row satisfies coverage, so the per-run offset check is reached.
+    add_evidence(&ctx, &doc, &unit, &run, Some(0), Some(5), Some("first"));
     // end offset past the unit end: hallucinated excerpt range.
+    add_evidence(&ctx, &doc, &unit, &run, Some(0), Some(999), Some("first"));
+    assert!(matches!(
+        judge(&ctx, &task_for(&ctx, &doc)),
+        VerifyResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn judge_rejects_in_range_slice_mismatch() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/t.md", "pending");
+    let text = "long enough body text that is clearly not a heading ".repeat(3);
+    add_unit(&ctx, &doc, "paragraph", 0, &text);
+    // Offsets are inside the unit, but the excerpt is not the literal slice.
     add_evidence(
         &ctx,
         &doc,
         &unit_id(&ctx, &doc, 0),
-        &run,
+        &ctx.run_id.to_string(),
         Some(0),
-        Some(999),
-        Some("first"),
+        Some(4),
+        Some("WRONG"),
     );
     assert!(matches!(
         judge(&ctx, &task_for(&ctx, &doc)),
@@ -252,11 +269,11 @@ fn judge_fails_invented_offsets() {
 }
 
 #[test]
-fn judge_trusts_other_runs_for_coverage_only() {
+fn judge_ignores_invalid_foreign_evidence() {
     let ctx = mem_ctx();
     let doc = add_doc(&ctx, "t", "data/t.md", "pending");
     add_unit(&ctx, &doc, "paragraph", 0, &"covered body text ".repeat(10));
-    // Foreign run: counts for coverage, skips offset validation.
+    // Foreign run: invalid offsets must not satisfy coverage any more.
     {
         let conn = lock_conn(&ctx).unwrap();
         conn.execute(
@@ -272,7 +289,35 @@ fn judge_trusts_other_runs_for_coverage_only() {
         "other-run",
         Some(0),
         Some(999),
-        Some("x"),
+        Some("covered"),
+    );
+    assert!(matches!(
+        judge(&ctx, &task_for(&ctx, &doc)),
+        VerifyResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn judge_accepts_valid_foreign_evidence() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/t.md", "pending");
+    add_unit(&ctx, &doc, "paragraph", 0, &"covered body text ".repeat(10));
+    let conn = lock_conn(&ctx).unwrap();
+    conn.execute(
+        "INSERT INTO analysis_runs (id, label, status) VALUES ('other-run', 'test', 'completed')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // A verbatim slice from an older run still counts for coverage.
+    add_evidence(
+        &ctx,
+        &doc,
+        &unit_id(&ctx, &doc, 0),
+        "other-run",
+        Some(0),
+        Some(7),
+        Some("covered"),
     );
     assert!(matches!(
         judge(&ctx, &task_for(&ctx, &doc)),
@@ -418,7 +463,7 @@ fn build_embeds_scope_units_and_handover() {
     register_chunks(&ctx, &chunks).unwrap();
     let system = crate::startup::system_message_kb_extract(&test_cli_config());
     let task = ExtractEnumerator::task_for(&chunks[0]);
-    let off = build_extract_spec(&ctx, "s", &system, HandoverMode::Off, &task).unwrap();
+    let off = build_extract_spec(&ctx, "s", &system, HandoverMode::Off, &task, None).unwrap();
     assert!(off.instruction.contains("pos 0..=1"));
     assert!(off.instruction.contains("<unit id=\""));
     assert!(off.instruction.contains("alpha text"));
@@ -431,6 +476,7 @@ fn build_embeds_scope_units_and_handover() {
         &system,
         HandoverMode::Auto { max_chars: 100 },
         &task,
+        None,
     )
     .unwrap();
     assert!(auto.instruction.contains("first chunk"));
@@ -484,4 +530,91 @@ fn write_approval_requires_rw() {
 fn test_cli_config() -> crate::startup::Config {
     use clap::Parser;
     crate::startup::Config::try_parse_from(["agt"]).unwrap()
+}
+
+#[test]
+fn chunk_unit_cap_splits_dense_units() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/t.md", "pending");
+    for pos in 0..5 {
+        add_unit(&ctx, &doc, "paragraph", pos, &ten(10));
+    }
+    // Byte budget is huge; only the unit cap can split here.
+    let chunks = enumerate_extract_chunks_with(&ctx, None, 65536, 2).unwrap();
+    assert_eq!(chunks.len(), 3); // 2 + 2 + 1
+    assert_eq!(chunks[0].pos_from, 0);
+    assert_eq!(chunks[0].pos_to, 1);
+    assert_eq!(chunks[2].pos_from, 4);
+    // 0 = no unit cap.
+    assert_eq!(
+        enumerate_extract_chunks_with(&ctx, None, 65536, 0)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn empty_documents_finalize_as_analyzed() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/empty.md", "pending");
+    assert_eq!(
+        finalize_empty_documents(&ctx, Some("data/empty.md")).unwrap(),
+        1
+    );
+    {
+        let conn = lock_conn(&ctx).unwrap();
+        let (status, at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT analysis_status, analyzed_at FROM documents WHERE id = ?1",
+                params![doc],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "analyzed");
+        assert!(at.is_some());
+    }
+    // Idempotent, and docs with units are untouched.
+    assert_eq!(finalize_empty_documents(&ctx, None).unwrap(), 0);
+    let with_units = add_doc(&ctx, "u", "data/u.md", "pending");
+    add_unit(&ctx, &with_units, "paragraph", 0, "text");
+    assert_eq!(finalize_empty_documents(&ctx, None).unwrap(), 0);
+}
+
+#[test]
+fn extract_retry_names_uncovered_units() {
+    let ctx = mem_ctx();
+    let doc = add_doc(&ctx, "t", "data/t.md", "pending");
+    add_unit(&ctx, &doc, "paragraph", 0, "first unit text here");
+    add_unit(&ctx, &doc, "paragraph", 1, "second unit text here");
+    let task = task_for(&ctx, &doc);
+    // Cover only unit 0 with a valid verbatim slice.
+    add_evidence(
+        &ctx,
+        &doc,
+        &unit_id(&ctx, &doc, 0),
+        &ctx.run_id.to_string(),
+        Some(0),
+        Some(5),
+        Some("first"),
+    );
+    let system = crate::model::Message::default();
+    let first = build_extract_spec(&ctx, "s", &system, HandoverMode::Off, &task, None).unwrap();
+    assert!(!first.instruction.contains("Missing evidence"));
+    let retry = build_extract_spec(
+        &ctx,
+        "s",
+        &system,
+        HandoverMode::Off,
+        &task,
+        Some("1 unit(s) without evidence"),
+    )
+    .unwrap();
+    assert!(
+        retry
+            .instruction
+            .contains("Previous attempt failed: 1 unit(s) without evidence")
+    );
+    assert!(retry.instruction.contains("Missing evidence (1 unit(s))"));
+    assert!(retry.instruction.contains("#1 second unit text here"));
 }

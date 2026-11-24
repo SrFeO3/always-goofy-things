@@ -46,6 +46,7 @@ pub(crate) enum JobRequest {
     KbExtract {
         source: Option<String>,
         chunk_bytes: Option<usize>,
+        chunk_units: Option<usize>,
         dry_run: bool,
         status: bool,
         max_retries: u32,
@@ -57,6 +58,7 @@ pub(crate) enum JobRequest {
         sources: Vec<String>,
         max_retries: u32,
         note: String,
+        reset: bool,
     },
 }
 
@@ -223,6 +225,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
         "extract" => {
             let mut source: Option<String> = None;
             let mut chunk_bytes: Option<usize> = None;
+            let mut chunk_units: Option<usize> = None;
             let (mut dry_run, mut status) = (false, false);
             let mut max_retries = 1u32;
             let (mut redo, mut handover_auto) = (false, false);
@@ -239,6 +242,13 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                                 take_value(args, &mut i, "--chunk-bytes", "N")?
                                     .parse()
                                     .map_err(|_| "--chunk-bytes needs an integer".to_string())?,
+                            );
+                        }
+                        "--chunk-units" => {
+                            chunk_units = Some(
+                                take_value(args, &mut i, "--chunk-units", "N")?
+                                    .parse()
+                                    .map_err(|_| "--chunk-units needs an integer".to_string())?,
                             );
                         }
                         "--max-retries" => {
@@ -264,13 +274,14 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                 } else if source.is_none() {
                     source = Some(args[i].clone());
                 } else {
-                    return Err("Usage: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]".to_string());
+                    return Err("Usage: /kb extract [<source>] [--chunk-bytes N] [--chunk-units N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]".to_string());
                 }
                 i += 1;
             }
             Ok(JobRequest::KbExtract {
                 source,
                 chunk_bytes,
+                chunk_units,
                 dry_run,
                 status,
                 max_retries,
@@ -280,15 +291,15 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
         }
         "analyze" => {
             let goal = args.first().cloned().ok_or(
-                "Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]"
-                    .to_string(),
+                "Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"] [--reset]".to_string(),
             )?;
             if goal.starts_with("--") {
-                return Err("Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]".to_string());
+                return Err("Usage: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"] [--reset]".to_string());
             }
             let mut sources = Vec::new();
             let mut max_retries = 1u32;
             let mut note = String::new();
+            let mut reset = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -306,6 +317,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                             .map_err(|_| "--max-retries needs an integer".to_string())?;
                     }
                     "--note" => note = take_value(args, &mut i, "--note", "\"...\"")?,
+                    "--reset" => reset = true,
                     other => return Err(format!("Unknown /kb analyze flag {:?}", other)),
                 }
                 i += 1;
@@ -315,6 +327,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                 sources,
                 max_retries,
                 note,
+                reset,
             })
         }
         _ => Err("Unknown /kb long-job subcommand (want extract|analyze)".to_string()),
@@ -729,8 +742,8 @@ fn print_help() {
    /restore [label] Restore the previous session (optionally specifying a label to switch to)
    /stats           Show LLM resource usage (per-model and session totals)
    /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
-   /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
-   /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]
+   /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--chunk-units N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
+   /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"] [--reset]
    /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--replan-scope auto|ask|deny] [--note \"...\"] / clean [--all]
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 

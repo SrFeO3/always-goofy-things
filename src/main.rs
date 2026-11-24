@@ -53,6 +53,7 @@ mod reasoning;
 mod reflex;
 mod reflex_literal;
 mod session;
+mod stable_hash;
 mod startup;
 mod todo_guard;
 mod todo_job;
@@ -454,6 +455,7 @@ async fn execute_job_request(
         R::KbExtract {
             source,
             chunk_bytes,
+            chunk_units,
             dry_run,
             status,
             max_retries,
@@ -463,11 +465,13 @@ async fn execute_job_request(
             let kb = kb_ctx.ok_or_else(|| {
                 anyhow!("[KB_CONFIG_ERROR] The knowledge base is not initialized.")
             })?;
+            let chunk_units = chunk_units.unwrap_or(kb_analyze::DEFAULT_CHUNK_UNITS);
             if dry_run {
-                let chunks = kb_analyze::enumerate_extract_chunks(
+                let chunks = kb_analyze::enumerate_extract_chunks_with(
                     kb,
                     source.as_deref(),
                     chunk_bytes.unwrap_or(kb_analyze::DEFAULT_CHUNK_BYTES),
+                    chunk_units,
                 )?;
                 return Ok(kb_analyze::dry_run_report(&chunks));
             }
@@ -488,6 +492,7 @@ async fn execute_job_request(
                 source.as_deref(),
                 &kb_analyze::ExtractOptions {
                     chunk_bytes: chunk_bytes.unwrap_or(kb_analyze::DEFAULT_CHUNK_BYTES),
+                    chunk_units,
                     max_retries,
                     redo: if redo {
                         kb_analyze::RedoMode::IncludeDone
@@ -515,6 +520,7 @@ async fn execute_job_request(
             sources,
             max_retries,
             note,
+            reset,
         } => {
             if kb_ctx.is_none() {
                 anyhow::bail!("[KB_CONFIG_ERROR] The knowledge base is not initialized.");
@@ -532,7 +538,11 @@ async fn execute_job_request(
                 &mut ctx,
                 &goal,
                 &sources,
-                &kb_analyze::AnalyzeOptions { max_retries, note },
+                &kb_analyze::AnalyzeOptions {
+                    max_retries,
+                    note,
+                    reset,
+                },
             )
             .await
         }
