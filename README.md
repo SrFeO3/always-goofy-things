@@ -54,6 +54,7 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
 | `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
 | `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
+| `--max-reasoning-llm-errors <NUM>` | `MAX_REASONING_LLM_ERRORS` | Retry transient LLM connection/API errors with exponential backoff (1s→30s); stop after N consecutive failures (`0` = unlimited). | `5` |
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
 | `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured for `execute_bash` / `grep_search` (per output stream: stdout and stderr each); excess output keeps the tail (`0` = unlimited). `mini_python_interpreter` applies the same value to its stdout and stderr **combined**. | `1048576` |

@@ -171,13 +171,22 @@ fn empty_response_diag(ri: &LlmRequestInfo, provider: LlmProvider) -> String {
     }
 }
 
+/// Exponential backoff for transient LLM errors: 1, 2, 4, 8, 16, 30s (cap).
+/// `attempt` is the 1-based retry count after the failure.
+fn llm_error_backoff(attempt: u32) -> std::time::Duration {
+    let secs = 1u64 << attempt.saturating_sub(1).min(5);
+    std::time::Duration::from_secs(secs.min(30))
+}
+
 /// Why `run_reasoning_loop` ended; its output is in `Session`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndReason {
     /// Final answer produced; it is the last `session.messages` entry
     /// (the loop only ends here when the message has no tool calls).
     Completed,
-    /// LLM connection / API error (retryable at the caller's discretion).
+    /// LLM connection / API error that exhausted `max_reasoning_llm_errors`
+    /// retries (0 = unlimited, so this is only returned when a positive limit
+    /// was configured).
     LlmError,
     /// User pressed Ctrl+C.
     Interrupted,
@@ -262,6 +271,7 @@ pub(crate) async fn run_reasoning_loop<'a>(
     // Inner loop to handle tool execution and sequential LLM reasoning.
     // `Completed` by default; every non-completing break overrides it.
     let mut empty_response_count: usize = 0;
+    let mut llm_error_count: u32 = 0;
     let mut reasoning_turn: u32 = 0;
     let mut end_reason = EndReason::Completed;
     // Number ledger for calc results (spec: number ledger): todo jobs append
@@ -294,43 +304,78 @@ pub(crate) async fn run_reasoning_loop<'a>(
         settings.last_llm_call = Some(std::time::Instant::now());
         let llm_start = std::time::Instant::now();
 
-        let llm_future = call_llm(config, settings, provider, tool_policy, &session.messages);
-        let ctrl_c_future = tokio::signal::ctrl_c();
-
-        let (assistant_msg, usage_opt, request_info) = tokio::select! {
-           msg_result = llm_future => {
-               match msg_result {
-                   Ok(msg) => msg,
-                   Err(e) => {
-                       // Count the failed call (HTTP / connection error).
-                       let rec = LlmCallRecord {
-                           timestamp: chrono::Utc::now(),
-                           model: settings.llm_model.clone(),
-                           provider,
-                           call_label: call_label.to_string(),
-                           usage: Usage::default(),
-                           latency_ms: llm_start.elapsed().as_millis(),
-                           ttft_ms: 0,
-                           request_bytes: 0,
-                           response_bytes: 0,
-                           retry_count: empty_response_count as u32,
-                           status: CallStatus::HttpError,
-                       };
-                       record_and_save(config, metrics, rec, 0);
-                       println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
-                       println!("Conversation history preserved. You can try again or rephrase.");
-                       end_reason = EndReason::LlmError;
-                       break 'reasoning_loop;
-                    }
+        // Retry transient LLM errors (HTTP / connection) with exponential
+        // backoff. Ctrl-C aborts immediately. Once `max_reasoning_llm_errors`
+        // (0 = unlimited) consecutive failures are reached, stop the turn.
+        // Only `LlmError` is retried here; empty responses have their own path.
+        let (assistant_msg, usage_opt, request_info) = 'llm_call: loop {
+            let attempt_start = std::time::Instant::now();
+            let llm_future = call_llm(config, settings, provider, tool_policy, &session.messages);
+            let ctrl_c_future = tokio::signal::ctrl_c();
+            let result = tokio::select! {
+                r = llm_future => r,
+                _ = ctrl_c_future => {
+                    println!("\x1b[0m");
+                    println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
+                    end_reason = EndReason::Interrupted;
+                    break 'reasoning_loop;
                 }
-            },
-            _ = ctrl_c_future => {
-               println!("\x1b[0m");
-               println!("\n\x1b[93m--- [LLM Thinking Interrupted by Ctrl+C] ---\x1b[0m");
-               end_reason = EndReason::Interrupted;
-               break 'reasoning_loop;
+            };
+            let e = match result {
+                Ok(tuple) => break 'llm_call tuple,
+                Err(e) => e,
+            };
+            // Count the failed call (HTTP / connection error).
+            let rec = LlmCallRecord {
+                timestamp: chrono::Utc::now(),
+                model: settings.llm_model.clone(),
+                provider,
+                call_label: call_label.to_string(),
+                usage: Usage::default(),
+                latency_ms: attempt_start.elapsed().as_millis(),
+                ttft_ms: 0,
+                request_bytes: 0,
+                response_bytes: 0,
+                retry_count: llm_error_count,
+                status: CallStatus::HttpError,
+            };
+            record_and_save(config, metrics, rec, 0);
+            llm_error_count += 1;
+            let limit = settings.max_reasoning_llm_errors;
+            if limit > 0 && llm_error_count >= limit {
+                println!("\x1b[91m⚠️ LLM Connection Error: {}\x1b[0m", e);
+                println!("Conversation history preserved. You can try again or rephrase.");
+                end_reason = EndReason::LlmError;
+                break 'reasoning_loop;
+            }
+            let delay = llm_error_backoff(llm_error_count);
+            if limit > 0 {
+                println!(
+                    "\x1b[93m[retry {}/{}] LLM error: {}; retrying in {}s\x1b[0m",
+                    llm_error_count,
+                    limit,
+                    e,
+                    delay.as_secs()
+                );
+            } else {
+                println!(
+                    "\x1b[93m[retry {}] LLM error: {}; retrying in {}s\x1b[0m",
+                    llm_error_count,
+                    e,
+                    delay.as_secs()
+                );
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = tokio::signal::ctrl_c() => {
+                    println!("\x1b[0m");
+                    println!("\n\x1b[93m--- [LLM Retry Interrupted by Ctrl+C] ---\x1b[0m");
+                    end_reason = EndReason::Interrupted;
+                    break 'reasoning_loop;
+                }
             }
         };
+        llm_error_count = 0;
 
         // Guard: retry if the assistant returned no content and no tool calls.
         // `max_reasoning_empty_responses` stops the loop after N consecutive

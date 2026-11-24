@@ -342,3 +342,21 @@ fn test_provider_stream_end_detection() {
         &text_delta
     ));
 }
+
+// --------------------------------------------------------------------------
+// LLM error retry backoff (P1-5).
+// --------------------------------------------------------------------------
+
+#[test]
+fn llm_error_backoff_is_exponential_and_capped() {
+    use std::time::Duration;
+    let secs: Vec<u64> = (1..=8)
+        .map(|n| crate::reasoning::llm_error_backoff(n).as_secs())
+        .collect();
+    // 1, 2, 4, 8, 16, 30 (cap), 30, 30
+    assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    assert_eq!(
+        crate::reasoning::llm_error_backoff(0),
+        Duration::from_secs(1)
+    );
+}

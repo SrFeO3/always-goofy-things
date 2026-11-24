@@ -976,6 +976,8 @@ pub(crate) async fn run_kb_analyze(
             max_stalls: ctx.config.max_replan_attempts,
             note,
             executor_policy: ToolPolicy::AllowList(ANALYZE_EXEC_TOOLS),
+            reset: false,
+            generated: true,
         },
     )
     .await

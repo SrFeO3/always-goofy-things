@@ -178,6 +178,7 @@ fn test_config() -> Config {
         llm_rpm: 0,
         max_output_tokens: 16,
         max_reasoning_empty_responses: 0,
+        max_reasoning_llm_errors: 2,
         session_label: "job-test".to_string(),
         provider: None,
         provider_extras: Vec::<ProviderExtra>::new(),

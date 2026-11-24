@@ -68,7 +68,23 @@ fn load_plan_accepts_valid_and_rejects_bad() {
     let mut empty = plan_json();
     empty["tasks"] = serde_json::json!([]);
     assert!(load_plan(&write_plan(&dir, "empty.json", &empty)).is_err());
+
+    let mut no_verify = plan_json();
+    no_verify["tasks"][0]["verify"] = serde_json::json!([]);
+    assert!(load_plan(&write_plan(&dir, "noverify.json", &no_verify)).is_err());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn todo_exec_tools_exclude_kb_and_db() {
+    let list = crate::startup::TODO_EXEC_TOOLS;
+    assert!(list.contains(&"read_file"));
+    assert!(list.contains(&"write_file"));
+    assert!(
+        !list
+            .iter()
+            .any(|t| t.starts_with("kb_") || t.starts_with("data_"))
+    );
 }
 
 #[test]
@@ -101,7 +117,11 @@ fn live_plan_roundtrips_atomically() {
     // The live file is a visible sibling of the input.
     assert_eq!(live_path.parent(), plan_path.parent());
     // Missing live reads as None.
-    assert!(load_live_only(&dir.join("nope.live.json")).unwrap().is_none());
+    assert!(
+        load_live_only(&dir.join("nope.live.json"))
+            .unwrap()
+            .is_none()
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -144,6 +164,46 @@ fn resume_reads_live_plan_with_replan_added_task() {
 }
 
 #[test]
+fn resolve_initial_resumes_and_resets() {
+    let dir = scratch("reset");
+    let seed = write_plan(&dir, "todo.json", &plan_json());
+    let live_path = live_plan_path(&seed);
+    // First run seeds from the plan.
+    let (plan1, _states, _b, rev1, h1) = resolve_initial(&live_path, &seed, false, false).unwrap();
+    assert_eq!(plan1.tasks.len(), 2);
+    assert_eq!(rev1, 0);
+    assert_eq!(h1, plan_hash(&plan1));
+    // Resume (seed unchanged) keeps the live revision/state.
+    save_live(
+        &live_path,
+        &seed,
+        &plan1,
+        &HashMap::from([("t1".to_string(), done_state("r"))]),
+        &HashMap::new(),
+        4,
+        h1,
+    )
+    .unwrap();
+    let (_p, states, _b, rev, _h) = resolve_initial(&live_path, &seed, false, false).unwrap();
+    assert_eq!(rev, 4);
+    assert!(matches!(states["t1"].status, TaskStatus::Done));
+    // Editing the seed does not take effect without --reset (live wins).
+    let mut edited = plan_json();
+    edited["tasks"][1]["description"] = serde_json::json!("changed");
+    std::fs::write(&seed, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+    let (plan_live, _, _b, rev, _h) = resolve_initial(&live_path, &seed, false, false).unwrap();
+    assert_eq!(rev, 4);
+    assert_eq!(plan_live.tasks[1].description, "draft report");
+    // --reset regenerates from the edited seed (fresh, all pending).
+    let (plan_reset, states, _b, rev, _h) =
+        resolve_initial(&live_path, &seed, true, false).unwrap();
+    assert_eq!(rev, 0);
+    assert_eq!(plan_reset.tasks[1].description, "changed");
+    assert!(states.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn next_undone_skips_done_in_order() {
     let dir = scratch("undone");
     let plan = load_plan(&write_plan(&dir, "todo.json", &plan_json())).unwrap();
@@ -174,27 +234,47 @@ fn replan_validates_and_applies() {
         r#"{"tasks": [
             {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
             {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]},
-            {"id": "t2b", "description": "draft part two"}
+            {"id": "t2b", "description": "draft part two", "verify": ["nonempty artifacts/p2.md"]}
         ]}"#,
     )
     .unwrap();
     let note = apply_replan(&mut plan, &states, ok).unwrap();
     assert!(note.contains("3 tasks"));
     assert_eq!(plan.tasks[1].id, "t2a");
-    assert!(plan.tasks[2].checks.is_empty());
+    assert_eq!(plan.tasks[2].verify_raw, vec!["nonempty artifacts/p2.md"]);
+    // Reject: empty task list.
+    let empty: ProposedPlan = serde_json::from_str(r#"{"tasks": []}"#).unwrap();
+    assert!(apply_replan(&mut plan, &states, empty).is_err());
+    // Reject: a task with no verify (vacuous pass).
+    let no_verify: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
+            {"id": "t2a", "description": "draft part one", "verify": []}]}"#,
+    )
+    .unwrap();
+    assert!(apply_replan(&mut plan, &states, no_verify).is_err());
     // Reject: drop a done task.
-    let drop_done: ProposedPlan =
-        serde_json::from_str(r#"{"tasks": [{"id": "t2a", "description": "draft part one"}]}"#)
-            .unwrap();
+    let drop_done: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [{"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
+    )
+    .unwrap();
     assert!(apply_replan(&mut plan, &states, drop_done).is_err());
     // Reject: rename a done task.
     let rename_done: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
-            {"id": "t1", "description": "CHANGED", "verify": []},
-            {"id": "t2a", "description": "draft part one"}]}"#,
+            {"id": "t1", "description": "CHANGED", "verify": ["nonempty artifacts/notes.md"]},
+            {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
     )
     .unwrap();
     assert!(apply_replan(&mut plan, &states, rename_done).is_err());
+    // Reject: change a done task's verify.
+    let verify_done: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/other.md"]},
+            {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
+    )
+    .unwrap();
+    assert!(apply_replan(&mut plan, &states, verify_done).is_err());
     // Reject: bad check string.
     let bad_check: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [

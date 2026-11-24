@@ -25,13 +25,14 @@ fn job_init_needs_path() {
 #[test]
 fn job_run_parses_all_flags() {
     match parse_job_request(
-        "/job run work.json --mode replan --dry-run --max-retries 3 --note \"be quick\"",
+        "/job run work.json --mode replan --dry-run --reset --max-retries 3 --note \"be quick\"",
     ) {
         Some(Ok(JobRequest::TodoRun {
             plan,
             mode,
             dry_run,
             status,
+            reset,
             max_retries,
             note,
         })) => {
@@ -39,6 +40,7 @@ fn job_run_parses_all_flags() {
             assert_eq!(mode, TodoMode::Replan);
             assert!(dry_run);
             assert!(!status);
+            assert!(reset);
             assert_eq!(max_retries, 3);
             assert_eq!(note, "be quick");
         }

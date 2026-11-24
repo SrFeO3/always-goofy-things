@@ -14,6 +14,7 @@ fn cfg(only_tools: Vec<ToolName>) -> Config {
         llm_rpm: 0,
         max_output_tokens: 16384,
         max_reasoning_empty_responses: 2,
+        max_reasoning_llm_errors: 5,
         session_label: "default".to_string(),
         provider: None,
         provider_extras: Vec::new(),

@@ -193,6 +193,11 @@ pub struct Config {
     )]
     pub max_reasoning_empty_responses: u32,
 
+    /// Stop after N consecutive LLM connection/API errors in the reasoning loop
+    /// before giving up (0 = unlimited). Retried with exponential backoff.
+    #[arg(long, env = "MAX_REASONING_LLM_ERRORS", default_value_t = 5)]
+    pub max_reasoning_llm_errors: u32,
+
     /// Session label for persistence (suffix for session files)
     #[arg(short = 's', long, env = "SESSION_LABEL", default_value = "default")]
     pub session_label: String,
@@ -514,6 +519,22 @@ pub(crate) const TODO_PLANNER_TOOLS: &[&str] = &[
     "calc",
 ];
 
+/// Tools for todo executors: workspace reads/writes, shell, calc, python.
+/// KB (`kb_*`) and database (`data_*`) tools are excluded (they belong to
+/// `/kb ...` and data sessions). Still subject to the normal y/N confirmation
+/// (or `--unsafe-reflex` for the safe subset).
+pub(crate) const TODO_EXEC_TOOLS: &[&str] = &[
+    "list_directory",
+    "read_file",
+    "write_file",
+    "str_replace_editor",
+    "grep_search",
+    "fetch_web",
+    "execute_bash",
+    "calc",
+    "mini_python_interpreter",
+];
+
 /// Build a system message for todo task sessions (new `todo.json` jobs).
 /// `allowed` narrows the tool sections the same way execution does;
 /// `None` keeps every `--only-tools`-enabled tool.
@@ -592,6 +613,10 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     println!(
         "  max-reasoning-empty-responses: {}",
         config.max_reasoning_empty_responses
+    );
+    println!(
+        "  max-reasoning-llm-errors: {}",
+        config.max_reasoning_llm_errors
     );
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  max-replan-attempts: {}", config.max_replan_attempts);

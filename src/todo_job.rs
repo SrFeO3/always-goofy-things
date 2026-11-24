@@ -124,6 +124,13 @@ pub(crate) fn load_plan(path: &Path) -> Result<Plan> {
                 })
                 .collect::<Result<_>>()?,
         };
+        if verify_raw.is_empty() {
+            anyhow::bail!(
+                "bad plan {}: task {:?} needs at least one `verify` check",
+                path.display(),
+                id
+            );
+        }
         let mut checks = Vec::new();
         for s in &verify_raw {
             checks.push(
@@ -275,6 +282,9 @@ fn apply_replan(
     states: &HashMap<String, TaskState>,
     proposed: ProposedPlan,
 ) -> Result<String> {
+    if proposed.tasks.is_empty() {
+        anyhow::bail!("replan rejected: empty task list");
+    }
     let done_ids: HashSet<&str> = states
         .iter()
         .filter(|(_, s)| s.status == TaskStatus::Done)
@@ -288,6 +298,12 @@ fn apply_replan(
         }
         if !seen.insert(p.id.clone()) {
             anyhow::bail!("replan rejected: duplicate task id {:?}", p.id);
+        }
+        if p.verify.is_empty() {
+            anyhow::bail!(
+                "replan rejected: task {:?} needs at least one verify check",
+                p.id
+            );
         }
         let mut checks = Vec::new();
         for s in &p.verify {
@@ -307,8 +323,15 @@ fn apply_replan(
         match tasks.iter().find(|t| &t.id == done) {
             Some(t) => {
                 let old = plan.tasks.iter().find(|t| &t.id == done);
-                if old.is_none_or(|o| o.description != t.description) {
-                    anyhow::bail!("replan rejected: done task {:?} altered or renamed", done);
+                match old {
+                    None => anyhow::bail!("replan rejected: done task {:?} not found", done),
+                    Some(o) if o.description != t.description => {
+                        anyhow::bail!("replan rejected: done task {:?} altered or renamed", done)
+                    }
+                    Some(o) if o.verify_raw != t.verify_raw => {
+                        anyhow::bail!("replan rejected: done task {:?} verify changed", done)
+                    }
+                    Some(_) => {}
                 }
             }
             None => anyhow::bail!("replan rejected: done task {:?} removed", done),
@@ -382,9 +405,8 @@ fn planner_instruction(
 
 /// Evaluate a task's checks mechanically (sql has no database in a todo job).
 fn eval_task(task: &Task) -> VerifyResult {
-    let no_sql = |_: &str| -> Result<bool> {
-        anyhow::bail!("sql checks need a database (todo has none)")
-    };
+    let no_sql =
+        |_: &str| -> Result<bool> { anyhow::bail!("sql checks need a database (todo has none)") };
     for check in &task.verify {
         match check.eval(&no_sql) {
             VerifyResult::Pass => {}
@@ -500,17 +522,7 @@ pub(crate) async fn run_todo(
     // option stays only for CLI compatibility.
     let _ = options.max_retries;
     let (mut plan, mut states, mut briefs, mut revision, seed_hash) =
-        match load_live_only(&live_path)? {
-            Some(v) => v,
-            None => {
-                let plan = load_plan(plan_path)?;
-                let seed_hash = plan_hash(&plan);
-                let states = HashMap::new();
-                let briefs = HashMap::new();
-                save_live(&live_path, plan_path, &plan, &states, &briefs, 0, seed_hash)?;
-                (plan, states, briefs, 0, seed_hash)
-            }
-        };
+        resolve_initial(&live_path, plan_path, options.reset, options.generated)?;
     let session_label = ctx.config.session_label.clone();
     let system_exec = startup::system_message_todo_task(
         ctx.config,
@@ -519,8 +531,8 @@ pub(crate) async fn run_todo(
             ToolPolicy::AllowList(list) => Some(list),
         },
     );
-    let system_planner =
-        matches!(options.mode, TodoMode::Replan).then(|| startup::system_message_todo_planner(ctx.config));
+    let system_planner = matches!(options.mode, TodoMode::Replan)
+        .then(|| startup::system_message_todo_planner(ctx.config));
     let mut feedback: Vec<String> = Vec::new();
     let mut stalls: u32 = 0;
     let mut round: u32 = 0;
@@ -544,7 +556,9 @@ pub(crate) async fn run_todo(
             };
             let outcome = run_session(ctx, spec).await?;
             if !outcome.end_reason.is_completed() {
-                save_live(&live_path, plan_path, &plan, &states, &briefs, revision, seed_hash)?;
+                save_live(
+                    &live_path, plan_path, &plan, &states, &briefs, revision, seed_hash,
+                )?;
                 return Ok(format!(
                     "interrupted during replan ({:?}); rerun to resume",
                     outcome.end_reason
@@ -611,7 +625,9 @@ pub(crate) async fn run_todo(
                     reason: format!("interrupted: {:?}", outcome.end_reason),
                 },
             );
-            save_live(&live_path, plan_path, &plan, &states, &briefs, revision, seed_hash)?;
+            save_live(
+                &live_path, plan_path, &plan, &states, &briefs, revision, seed_hash,
+            )?;
             return Ok(format!(
                 "interrupted at {} ({:?}); rerun to resume",
                 task.id, outcome.end_reason
@@ -621,7 +637,9 @@ pub(crate) async fn run_todo(
         let verdict = eval_task(&task);
         record_task(&mut states, &task.id, &outcome, &verdict);
         let _ = persistence::archive_todo_session(&outcome.label, 0);
-        save_live(&live_path, plan_path, &plan, &states, &briefs, revision, seed_hash)?;
+        save_live(
+            &live_path, plan_path, &plan, &states, &briefs, revision, seed_hash,
+        )?;
 
         // Progress = a task became done; otherwise count a bounded stall.
         if count_done(&plan, &states) > done_before {
@@ -805,12 +823,7 @@ fn task_session_label(session_label: &str, pos: usize, task_id: &str) -> String 
 }
 
 /// Executor instruction: own task plus goal and the planner's brief (if any).
-fn build_task_instruction(
-    goal: &str,
-    note: &str,
-    brief: Option<&str>,
-    task: &PlanTask,
-) -> String {
+fn build_task_instruction(goal: &str, note: &str, brief: Option<&str>, task: &PlanTask) -> String {
     let mut s = format!("Task ({}): {}", task.id, task.description);
     s.push_str(&format!("\nGoal: {}", goal));
     if !task.verify_raw.is_empty() {
@@ -825,7 +838,6 @@ fn build_task_instruction(
     s.push_str("\nDeliverable: satisfy the checks; close with a Handover Report.");
     s
 }
-
 
 /// Run modes (one implementation; the enumerator differs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -842,6 +854,8 @@ pub(crate) struct TodoOptions {
     pub max_stalls: u32,
     pub note: String,
     pub executor_policy: ToolPolicy,
+    pub reset: bool,
+    pub generated: bool,
 }
 
 impl Default for TodoOptions {
@@ -852,6 +866,8 @@ impl Default for TodoOptions {
             max_stalls: 3,
             note: String::new(),
             executor_policy: ToolPolicy::Inherit,
+            reset: false,
+            generated: false,
         }
     }
 }
@@ -898,7 +914,13 @@ struct LiveTask {
 }
 
 /// In-memory live plan: plan, per-task state, briefs, revision, seed hash.
-type LiveState = (Plan, HashMap<String, TaskState>, HashMap<String, String>, u64, u64);
+type LiveState = (
+    Plan,
+    HashMap<String, TaskState>,
+    HashMap<String, String>,
+    u64,
+    u64,
+);
 
 /// Load the live plan if present. Rebuilds the in-memory plan + states + briefs.
 fn load_live_only(live_path: &Path) -> Result<Option<LiveState>> {
@@ -953,6 +975,41 @@ fn load_live_only(live_path: &Path) -> Result<Option<LiveState>> {
         deliverables: doc.deliverables,
     };
     Ok(Some((plan, states, briefs, doc.revision, doc.seed_hash)))
+}
+
+/// Starting state: resume the live plan (unless `reset`), or seed from the
+/// input plan. A changed seed with an existing live plan warns (user-authored
+/// plans only; generated plans change every run, so the check is skipped).
+fn resolve_initial(
+    live_path: &Path,
+    plan_path: &Path,
+    reset: bool,
+    generated: bool,
+) -> Result<LiveState> {
+    let live = if reset {
+        None
+    } else {
+        load_live_only(live_path)?
+    };
+    if let Some(live) = live {
+        let seed_changed = !generated
+            && load_plan(plan_path)
+                .map(|seed| plan_hash(&seed) != live.4)
+                .unwrap_or(false);
+        if seed_changed {
+            eprintln!(
+                "[job] the plan seed changed since the live plan was created; \
+                 continuing with the live plan. Use --reset to regenerate it."
+            );
+        }
+        return Ok(live);
+    }
+    let plan = load_plan(plan_path)?;
+    let seed_hash = plan_hash(&plan);
+    let states = HashMap::new();
+    let briefs = HashMap::new();
+    save_live(live_path, plan_path, &plan, &states, &briefs, 0, seed_hash)?;
+    Ok((plan, states, briefs, 0, seed_hash))
 }
 
 /// Persist the live plan atomically (tmp + rename).

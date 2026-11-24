@@ -407,6 +407,7 @@ async fn execute_job_request(
             mode,
             dry_run,
             status,
+            reset,
             max_retries,
             note,
         } => {
@@ -434,7 +435,11 @@ async fn execute_job_request(
                     max_retries,
                     max_stalls: config.max_replan_attempts,
                     note,
-                    executor_policy: crate::session::ToolPolicy::Inherit,
+                    reset,
+                    generated: false,
+                    executor_policy: crate::session::ToolPolicy::AllowList(
+                        crate::startup::TODO_EXEC_TOOLS,
+                    ),
                 },
             )
             .await

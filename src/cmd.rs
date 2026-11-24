@@ -35,6 +35,7 @@ pub(crate) enum JobRequest {
         mode: crate::todo_job::TodoMode,
         dry_run: bool,
         status: bool,
+        reset: bool,
         max_retries: u32,
         note: String,
     },
@@ -134,15 +135,17 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
             }
             "run" => {
                 let plan = args.first().cloned().ok_or(
-                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--note \"...\"]".to_string(),
+                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--note \"...\"]".to_string(),
                 )?;
                 let mut mode = crate::todo_job::TodoMode::Static;
                 let (mut dry_run, mut status) = (false, false);
+                let mut reset = false;
                 let mut max_retries = 1u32;
                 let mut note = String::new();
                 let mut i = 1;
                 while i < args.len() {
                     match args[i].as_str() {
+                        "--reset" => reset = true,
                         "--mode" => {
                             match take_value(args, &mut i, "--mode", "static|replan")?.as_str() {
                                 "static" => mode = crate::todo_job::TodoMode::Static,
@@ -173,6 +176,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                     mode,
                     dry_run,
                     status,
+                    reset,
                     max_retries,
                     note,
                 })
@@ -562,6 +566,10 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
             "    max-reasoning-empty-responses: {}",
             settings.max_reasoning_empty_responses
         );
+        println!(
+            "    max-reasoning-llm-errors: {}",
+            settings.max_reasoning_llm_errors
+        );
         return Ok(());
     }
 
@@ -575,6 +583,7 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
         println!(
             "    \x1b[36me\x1b[0m   - max-reasoning-empty-responses (default: 2, 0 = unlimited)"
         );
+        println!("    \x1b[36mle\x1b[0m  - max-reasoning-llm-errors (default: 5, 0 = unlimited)");
         return Ok(());
     }
 
@@ -636,6 +645,15 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
                 )
             })?;
             settings.max_reasoning_empty_responses = val;
+        }
+        "le" | "max-reasoning-llm-errors" | "max_reasoning_llm_errors" => {
+            let val: u32 = kv.1.parse().map_err(|_| {
+                anyhow!(
+                    "Invalid value for max-reasoning-llm-errors: '{}'. Must be a non-negative integer.",
+                    kv.1
+                )
+            })?;
+            settings.max_reasoning_llm_errors = val;
         }
         _ => {
             return Err(anyhow!(
@@ -701,7 +719,7 @@ fn print_help() {
    /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
    /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
    /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]
-   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--note \"...\"] / clean [--all]
+   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--note \"...\"] / clean [--all]
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m
