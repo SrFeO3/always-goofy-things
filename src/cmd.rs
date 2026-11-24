@@ -134,7 +134,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
             }
             "run" => {
                 let plan = args.first().cloned().ok_or(
-                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--max-retries N] [--note \"...\"]".to_string(),
+                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--note \"...\"]".to_string(),
                 )?;
                 let mut mode = crate::todo_job::TodoMode::Static;
                 let (mut dry_run, mut status) = (false, false);
@@ -701,7 +701,7 @@ fn print_help() {
    /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
    /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
    /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]
-   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--max-retries N] [--note \"...\"] / clean [--all]
+   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--note \"...\"] / clean [--all]
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m

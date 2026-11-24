@@ -1,7 +1,7 @@
-//! KB extract enumeration (todo-refine Phase 2).
+//! KB extract and analyze jobs.
 //!
-//! Splits pending documents into byte-budget chunks and tracks them in
-//! `analysis_chunks`. Execution (fresh sessions) lands in Phase 3.
+//! Extract splits pending documents into byte-budget chunks and tracks them in
+//! `analysis_chunks`; analyze runs a cross-document investigation over the KB.
 
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
@@ -299,7 +299,7 @@ pub(crate) enum HandoverMode {
     Auto { max_chars: usize },
 }
 
-/// Extract run knobs (CLI flags land here in Phase 5).
+/// Extract run knobs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExtractOptions {
     pub chunk_bytes: usize,
@@ -657,8 +657,8 @@ fn record_chunk(
     Ok(())
 }
 
-/// Previous done chunk's report in the same document/type (handover auto).
-fn previous_report(
+/// Previous done chunk's handover in the same document/type (`--handover auto`).
+fn previous_handover(
     kb: &KbContext,
     document_id: &str,
     unit_type: &str,
@@ -723,7 +723,7 @@ fn build_extract_spec(
     let handover_line = match handover {
         HandoverMode::Off => "Handover: none (independent chunk).".to_string(),
         HandoverMode::Auto { max_chars } => {
-            match previous_report(kb, &doc_id, &unit_type, from, max_chars)? {
+            match previous_handover(kb, &doc_id, &unit_type, from, max_chars)? {
                 Some(r) => format!("Handover (previous chunk report): {}", r),
                 None => "Handover: none (first chunk).".to_string(),
             }

@@ -1,4 +1,4 @@
-//! Job runner (todo-refine Phase 1, Outer owner).
+//! Job runner — the outer loop.
 //!
 //! Runs one task at a time: enumerate, fresh session, verify, record.
 //! Retries failed tasks fresh; warnings proceed; interruptions stop resumable.
@@ -11,7 +11,9 @@ use crate::session::{SessionOutcome, SessionSpec, run_session};
 /// One unit of work: what to do and how completion is mechanically judged.
 #[derive(Debug, Clone)]
 pub(crate) struct Task {
-    pub id: String,          // Reopen key. Unique within the plan
+    pub id: String, // Reopen key. Unique within the plan
+    // Read by the kb feature and the job tests only.
+    #[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
     pub description: String, // Work text for the LLM
     pub verify: Vec<Check>,  // Completion conditions. All true = done
 }
@@ -26,6 +28,7 @@ pub(crate) enum Check {
 
 impl Check {
     /// Render back to the plan string form (`parse` roundtrips it).
+    #[cfg(test)]
     pub(crate) fn to_dsl(&self) -> String {
         match self {
             Check::FileNonEmpty(p) => format!("nonempty {}", p),
@@ -124,28 +127,34 @@ pub(crate) enum VerifyResult {
 pub(crate) enum JobStatus {
     Completed,
     Failed,
+    #[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
     Interrupted, // State kept; rerun resumes
 }
 
 /// Whole-job result.
 #[derive(Debug, Clone)]
 pub(crate) struct JobOutcome {
+    // Written everywhere, asserted only by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub status: JobStatus,
     pub summary: String, // Completion report text
 }
 
 /// Next one task (`None` = done). Dynamic replans inside before answering.
+#[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) trait Enumerator {
     async fn next_task(&mut self, ctx: &mut LoopCtx<'_>) -> Result<Option<Task>>;
 }
 
 /// Mechanical judge: one task, then the whole job (deliverables).
+#[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) trait Verifier {
     fn check(&self, ctx: &LoopCtx<'_>, task: &Task) -> Result<VerifyResult>;
     fn finalize(&self, ctx: &LoopCtx<'_>) -> Result<JobOutcome>;
 }
 
 /// Persisted state (reopen key = `Task.id`).
+#[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) trait Store {
     fn record(
         &self,
@@ -158,12 +167,14 @@ pub(crate) trait Store {
 
 /// Runner limits (from CLI in adapters).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) struct JobOptions {
     pub max_retries: u32, // Fresh retries per task after the first attempt
 }
 
 /// Run the job loop. `Err` only on machinery failure; task outcomes
 /// (pass / fail / interrupt) come back as `JobOutcome`.
+#[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
 pub(crate) async fn run_job<E, V, S>(
     ctx: &mut LoopCtx<'_>,
     enumerator: &mut E,

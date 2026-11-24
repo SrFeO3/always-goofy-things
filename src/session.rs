@@ -1,7 +1,8 @@
-//! Fresh-session starter (todo-refine Phase 0, Inner owner).
+//! Session contract and runner — the inner unit.
 //!
-//! Wraps `run_reasoning_loop` for one fresh session: new `Session`,
-//! per-session tool narrowing, and report condense. Adds no runtime entity.
+//! `run_session` runs one fresh `Session`: a new message history, per-session
+//! tool narrowing, and final-message condense. `SessionSpec`/`SessionOutcome`
+//! are the input/result types; `ReportRule` describes the final-message format.
 
 use anyhow::Result;
 

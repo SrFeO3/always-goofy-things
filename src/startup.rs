@@ -483,7 +483,7 @@ fn build_system_message(sections: Vec<String>) -> crate::model::Message {
     }
 }
 
-/// Build a system message for KB extract sessions (todo-refine Phase 3).
+/// Build a system message for KB extract sessions.
 /// Narrows the tool sections to the five `kb_*` tools and overrides the
 /// dialogue playbook's self-declared `analyzed` (step 5): the application
 /// finalizes status after mechanical coverage.

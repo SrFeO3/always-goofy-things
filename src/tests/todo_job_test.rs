@@ -35,11 +35,11 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-fn done_state(report: &str) -> TaskState {
+fn done_state(handover: &str) -> TaskState {
     TaskState {
         status: TaskStatus::Done,
         attempts: 1,
-        report: Some(report.to_string()),
+        handover: Some(handover.to_string()),
         error: None,
     }
 }
@@ -72,33 +72,74 @@ fn load_plan_accepts_valid_and_rejects_bad() {
 }
 
 #[test]
-fn job_id_stable_and_distinct() {
-    let dir = scratch("jobid");
-    let a = write_plan(&dir, "a.json", &plan_json());
-    assert_eq!(job_id_for(&a), job_id_for(&a));
-    let b = write_plan(&dir, "b.json", &plan_json());
-    assert_ne!(job_id_for(&a), job_id_for(&b));
-    assert!(
-        state_file_for(&dir, &job_id_for(&a))
-            .to_string_lossy()
-            .contains(".todo/")
-    );
+fn live_plan_path_is_sibling_with_stem() {
+    let dir = scratch("livepath");
+    let a = write_plan(&dir, "todo.json", &plan_json());
+    assert_eq!(live_plan_path(&a), dir.join("todo.live.json"));
+    let b = dir.join("sub").join("build.json");
+    assert_eq!(live_plan_path(&b), dir.join("sub").join("build.live.json"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn state_roundtrips_atomically() {
-    let dir = scratch("state");
+fn live_plan_roundtrips_atomically() {
+    let dir = scratch("live");
     let plan_path = write_plan(&dir, "todo.json", &plan_json());
-    let sp = state_file_for(&dir, "job1");
+    let plan = load_plan(&plan_path).unwrap();
+    let live_path = live_plan_path(&plan_path);
     let mut states = HashMap::new();
     states.insert("t1".to_string(), done_state("- Status: done"));
-    save_task_states(&sp, "job1", &plan_path, &states).unwrap();
-    let back = load_task_states(&sp);
-    assert_eq!(back["t1"].attempts, 1);
-    assert!(matches!(back["t1"].status, TaskStatus::Done));
-    // Missing file reads as all-pending.
-    assert!(load_task_states(&dir.join("nope.json")).is_empty());
+    let briefs = HashMap::from([("t2".to_string(), "read t1 output".to_string())]);
+    save_live(&live_path, &plan_path, &plan, &states, &briefs, 3, 42).unwrap();
+    let (plan2, states2, briefs2, rev, seed_hash) = load_live_only(&live_path).unwrap().unwrap();
+    assert_eq!(rev, 3);
+    assert_eq!(seed_hash, 42);
+    assert_eq!(states2["t1"].attempts, 1);
+    assert!(matches!(states2["t1"].status, TaskStatus::Done));
+    assert_eq!(briefs2["t2"], "read t1 output");
+    assert_eq!(plan2.tasks.len(), 2);
+    // The live file is a visible sibling of the input.
+    assert_eq!(live_path.parent(), plan_path.parent());
+    // Missing live reads as None.
+    assert!(load_live_only(&dir.join("nope.live.json")).unwrap().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resume_reads_live_plan_with_replan_added_task() {
+    // P0 regression: a replan-added task that is already done must survive a
+    // resume (the old mode rejected it as `removed` and stalled).
+    let dir = scratch("resume");
+    let seed = write_plan(&dir, "todo.json", &plan_json()); // t1, t2
+    let seed_plan = load_plan(&seed).unwrap();
+    let live_path = live_plan_path(&seed);
+    let mut plan = seed_plan.clone();
+    plan.tasks.push(PlanTask {
+        id: "t3".to_string(),
+        description: "added by replan".to_string(),
+        verify_raw: Vec::new(),
+        checks: Vec::new(),
+    });
+    let mut states = HashMap::new();
+    states.insert("t1".to_string(), done_state("r"));
+    states.insert("t3".to_string(), done_state("r"));
+    save_live(
+        &live_path,
+        &seed,
+        &plan,
+        &states,
+        &HashMap::new(),
+        5,
+        plan_hash(&seed_plan),
+    )
+    .unwrap();
+    // Resume works even if the seed file is gone.
+    std::fs::remove_file(&seed).ok();
+    let (plan2, states2, _b, rev, _h) = load_live_only(&live_path).unwrap().unwrap();
+    assert_eq!(rev, 5);
+    assert_eq!(count_done(&plan2, &states2), 2);
+    assert!(plan2.tasks.iter().any(|t| t.id == "t3"));
+    assert_eq!(next_undone(&plan2, &states2).unwrap().id, "t2");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -218,7 +259,7 @@ fn finalize_separates_fatal_and_warn() {
 }
 
 #[test]
-fn instruction_carries_checks_note_and_handover() {
+fn instruction_carries_checks_note_and_brief() {
     let task = PlanTask {
         id: "t2".to_string(),
         description: "draft it".to_string(),
@@ -230,9 +271,9 @@ fn instruction_carries_checks_note_and_handover() {
     assert!(s.contains("make report"));
     assert!(s.contains("nonempty artifacts/d.md"));
     assert!(s.contains("be quick"));
-    assert!(s.contains("prev done"));
+    assert!(s.contains("Brief: prev done"));
     let bare = build_task_instruction("g", "", None, &task);
-    assert!(bare.contains("none"));
+    assert!(!bare.contains("Brief:"));
 }
 
 #[test]
@@ -257,24 +298,31 @@ fn clean_removes_orphans_or_all() {
     let state_dir = dir.join(".todo");
     std::fs::create_dir_all(&state_dir).unwrap();
     let live_plan = write_plan(&dir, "todo.json", &plan_json());
-    let live_states = HashMap::from([("t1".to_string(), done_state("r"))]);
-    save_task_states(
-        &state_dir.join("live.state.json"),
-        "live",
+    let plan = load_plan(&live_plan).unwrap();
+    let empty = HashMap::new();
+    save_live(
+        &state_dir.join("live.live.json"),
         &live_plan,
-        &live_states,
+        &plan,
+        &empty,
+        &HashMap::new(),
+        0,
+        0,
     )
     .unwrap();
-    save_task_states(
-        &state_dir.join("orphan.state.json"),
-        "orphan",
+    save_live(
+        &state_dir.join("orphan.live.json"),
         Path::new("/nonexistent/todo.json"),
+        &plan,
+        &empty,
         &HashMap::new(),
+        0,
+        0,
     )
     .unwrap();
     let deleted = clean_states(&dir, false).unwrap();
     assert_eq!(deleted.len(), 1);
-    assert!(state_dir.join("live.state.json").exists());
+    assert!(state_dir.join("live.live.json").exists());
     let deleted = clean_states(&dir, true).unwrap();
     assert_eq!(deleted.len(), 1);
     assert!(std::fs::read_dir(&state_dir).unwrap().next().is_none());
@@ -284,17 +332,22 @@ fn clean_removes_orphans_or_all() {
 }
 
 #[test]
-fn status_reads_state_counts() {
+fn status_reads_live_counts() {
     let dir = scratch("status");
     let p = write_plan(&dir, "todo.json", &plan_json());
-    let sp = state_file_for(&dir, &job_id_for(&p));
+    let plan = load_plan(&p).unwrap();
+    let live_path = live_plan_path(&p);
     let mut states = HashMap::new();
     states.insert("t1".to_string(), done_state("r"));
-    save_task_states(&sp, "j", &p, &states).unwrap();
-    let out = todo_status_in(&dir, &p).unwrap();
+    save_live(&live_path, &p, &plan, &states, &HashMap::new(), 1, 0).unwrap();
+    let out = todo_status_in(&p).unwrap();
     assert!(out.contains("[job status] 1/2 tasks done"));
     assert!(out.contains("- [x] t1"));
     assert!(out.contains("- [ ] t2 (not started)"));
+    // No live file: fall back to the seed, all pending.
+    std::fs::remove_file(&live_path).ok();
+    let out = todo_status_in(&p).unwrap();
+    assert!(out.contains("[job status] 0/2 tasks done"));
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -437,7 +437,7 @@ fn build_embeds_scope_units_and_handover() {
 }
 
 #[test]
-fn previous_report_truncates_over_budget() {
+fn previous_handover_truncates_over_budget() {
     let ctx = mem_ctx();
     let doc = add_doc(&ctx, "t", "data/t.md", "pending");
     add_unit(&ctx, &doc, "paragraph", 0, "a");
@@ -453,9 +453,9 @@ fn previous_report_truncates_over_budget() {
     )
     .unwrap();
     drop(conn);
-    let full = previous_report(&ctx, &doc, "paragraph", 1, 100).unwrap();
+    let full = previous_handover(&ctx, &doc, "paragraph", 1, 100).unwrap();
     assert_eq!(full, Some("0123456789".to_string()));
-    let cut = previous_report(&ctx, &doc, "paragraph", 1, 4)
+    let cut = previous_handover(&ctx, &doc, "paragraph", 1, 4)
         .unwrap()
         .unwrap();
     assert!(cut.ends_with("[truncated]"));

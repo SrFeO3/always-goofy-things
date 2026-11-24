@@ -1,17 +1,13 @@
-//! LLM deviation guards for todo jobs.
+//! LLM output guards.
 //!
-//! Verifies LLM work and fixes deviations the application can handle
-//! mechanically: replan feedback, condensing retries, or safer fallbacks.
+//! Condenses an over-long final message, and detects declared `Output:` paths
+//! that are missing.
 
 use crate::model::Session;
 use crate::reasoning::{LoopCtx, run_reasoning_loop};
 
-/// Advertised handover-report char limit shown in the system prompt.
+/// Advertised handover-report char limit shown to the executor prompt.
 pub(crate) const HANDOVER_REPORT_MAX_CHARS: usize = 300;
-
-/// Enforcement limit (chars): 20% above the advertised limit to tolerate the
-/// LLM's unreliable character counting.
-pub(crate) const HANDOVER_REPORT_FUZZY_MAX_CHARS: usize = HANDOVER_REPORT_MAX_CHARS * 6 / 5; // 300 * 1.2 = 360
 
 /// Session-context budget (in chars) for the condensing retry.
 const LLM_GUARD_CONTEXT_CHARS: usize = 120_000;
@@ -144,9 +140,8 @@ pub(crate) async fn llm_guard_condense_final_message<'a>(
     let Some(last) = last_assistant_report(session) else {
         return;
     };
-    if last.chars().count() <= HANDOVER_REPORT_FUZZY_MAX_CHARS
-        || ctx_chars >= LLM_GUARD_CONTEXT_CHARS
-    {
+    // 20% above the advertised limit to tolerate the LLM's character-counting drift.
+    if last.chars().count() <= limit * 6 / 5 || ctx_chars >= LLM_GUARD_CONTEXT_CHARS {
         return;
     }
     let feedback = format!(
