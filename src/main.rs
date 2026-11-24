@@ -410,6 +410,7 @@ async fn execute_job_request(
             reset,
             max_retries,
             note,
+            replan_scope,
         } => {
             let path = std::path::Path::new(&plan);
             if dry_run {
@@ -437,6 +438,7 @@ async fn execute_job_request(
                     note,
                     reset,
                     generated: false,
+                    replan_scope,
                     executor_policy: crate::session::ToolPolicy::AllowList(
                         crate::startup::TODO_EXEC_TOOLS,
                     ),

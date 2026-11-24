@@ -978,6 +978,9 @@ pub(crate) async fn run_kb_analyze(
             executor_policy: ToolPolicy::AllowList(ANALYZE_EXEC_TOOLS),
             reset: false,
             generated: true,
+            // Generated plans may be restructured; coverage/deliverables
+            // still gate completion, and cancellations are recorded.
+            replan_scope: crate::todo_job::ReplanScope::Auto,
         },
     )
     .await

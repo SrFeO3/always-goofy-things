@@ -208,6 +208,8 @@ enum TaskStatus {
     #[default]
     Pending,
     Done,
+    /// Dropped by a replan (scope reduction); terminal, never re-executed.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,6 +218,7 @@ struct TaskState {
     attempts: u32,
     handover: Option<String>,
     error: Option<String>,
+    cancelled_reason: Option<String>,
 }
 
 fn to_task(t: &PlanTask) -> Task {
@@ -230,7 +233,12 @@ fn to_task(t: &PlanTask) -> Task {
 fn next_undone(plan: &Plan, states: &HashMap<String, TaskState>) -> Option<Task> {
     plan.tasks
         .iter()
-        .find(|t| !matches!(states.get(&t.id).map(|s| s.status), Some(TaskStatus::Done)))
+        .find(|t| {
+            !matches!(
+                states.get(&t.id).map(|s| s.status),
+                Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+            )
+        })
         .map(to_task)
 }
 
@@ -276,11 +284,15 @@ pub(crate) fn extract_plan_block(report: &str) -> Option<&str> {
     last
 }
 
-/// Validate a proposal against done-state immutability and check syntax.
+/// Validate a proposal against terminal-state immutability and check syntax.
+/// `scope` decides what happens when the proposal drops unfinished tasks;
+/// `confirm` is only called for `Ask` (stdin y/N in production, a stub in tests).
 fn apply_replan(
     plan: &mut Plan,
-    states: &HashMap<String, TaskState>,
+    states: &mut HashMap<String, TaskState>,
     proposed: ProposedPlan,
+    scope: ReplanScope,
+    confirm: &mut dyn FnMut(&str) -> bool,
 ) -> Result<String> {
     if proposed.tasks.is_empty() {
         anyhow::bail!("replan rejected: empty task list");
@@ -337,6 +349,87 @@ fn apply_replan(
             None => anyhow::bail!("replan rejected: done task {:?} removed", done),
         }
     }
+    // Cancelled tasks are terminal too: if the proposal keeps one, it must not
+    // alter it. Omitting it is fine (it is carried over below).
+    for t in &tasks {
+        let Some(st) = states.get(&t.id) else {
+            continue;
+        };
+        if st.status != TaskStatus::Cancelled {
+            continue;
+        }
+        let Some(old) = plan.tasks.iter().find(|o| o.id == t.id) else {
+            continue;
+        };
+        if old.description != t.description {
+            anyhow::bail!(
+                "replan rejected: cancelled task {:?} altered or renamed",
+                t.id
+            );
+        }
+        if old.verify_raw != t.verify_raw {
+            anyhow::bail!("replan rejected: cancelled task {:?} verify changed", t.id);
+        }
+    }
+
+    // Unfinished tasks dropped by the revision are scope reductions: they need
+    // approval and are recorded as `cancelled` (never silently disappear).
+    let removed: Vec<PlanTask> = {
+        let proposed_ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        plan.tasks
+            .iter()
+            .filter(|t| !proposed_ids.contains(t.id.as_str()))
+            .filter(|t| {
+                !matches!(
+                    states.get(&t.id).map(|s| s.status),
+                    Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                )
+            })
+            .cloned()
+            .collect()
+    };
+    if !removed.is_empty() {
+        let list = removed
+            .iter()
+            .map(|t| format!("{} ({})", t.id, t.description))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match scope {
+            ReplanScope::Deny => {
+                anyhow::bail!("replan rejected: would remove unfinished task(s): {}", list)
+            }
+            ReplanScope::Ask => {
+                if !confirm(&format!(
+                    "Replan removes unfinished task(s): {}. Cancel them?",
+                    list
+                )) {
+                    anyhow::bail!(
+                        "replan rejected: cancellation of unfinished task(s) not approved: {}",
+                        list
+                    );
+                }
+            }
+            ReplanScope::Auto => {}
+        }
+        for t in &removed {
+            let st = states.entry(t.id.clone()).or_default();
+            st.status = TaskStatus::Cancelled;
+            st.cancelled_reason = Some("removed by replan".to_string());
+        }
+    }
+
+    // Keep cancelled tasks in the live plan (full history), appended after the
+    // active tasks; the planner may omit them from later revisions.
+    for old in &plan.tasks {
+        let cancelled = matches!(
+            states.get(&old.id).map(|s| s.status),
+            Some(TaskStatus::Cancelled)
+        );
+        if cancelled && !tasks.iter().any(|t| t.id == old.id) {
+            tasks.push(old.clone());
+        }
+    }
+
     if let Some(deliverables) = proposed.deliverables {
         if deliverables.iter().any(|d| d.trim().is_empty()) {
             anyhow::bail!("replan rejected: empty deliverable path");
@@ -348,10 +441,21 @@ fn apply_replan(
         .filter(|t| !plan.tasks.iter().any(|o| o.id == t.id))
         .count();
     plan.tasks = tasks;
+    let active = plan
+        .tasks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                states.get(&t.id).map(|s| s.status),
+                Some(TaskStatus::Cancelled)
+            )
+        })
+        .count();
     Ok(format!(
-        "plan applied ({} tasks, {} added)",
-        plan.tasks.len(),
-        added
+        "plan applied ({} tasks, {} added, {} cancelled)",
+        active,
+        added,
+        removed.len()
     ))
 }
 
@@ -367,6 +471,7 @@ fn planner_instruction(
     for t in &plan.tasks {
         let mark = match states.get(&t.id).map(|s| s.status) {
             Some(TaskStatus::Done) => "[x]",
+            Some(TaskStatus::Cancelled) => "[~]",
             _ => "[ ]",
         };
         lines.push(format!("{} {}: {}", mark, t.id, t.description));
@@ -385,10 +490,11 @@ fn planner_instruction(
     );
     base.push_str(
         "{\"tasks\": [{\"id\", \"description\", \"verify\": [check strings], \"brief\"}], \
-         \"deliverables\"?} with the FULL revised list, then notes. Done ([x]) tasks are \
-         immutable; new ids unique; checks parse as nonempty/contains/sql. Give the NEXT \
-         task a short `brief` (scope, files to read, warnings): the executor sees only that \
-         brief plus its own task. Always include the block.",
+         \"deliverables\"?} with the FULL revised list, then notes. Done ([x]) and cancelled \
+         ([~]) tasks are immutable; removing an unfinished task cancels it (reason recorded). \
+         New ids unique; checks parse as nonempty/contains/sql. Give the NEXT task a short \
+         `brief` (scope, files to read, warnings): the executor sees only that brief plus its \
+         own task. Always include the block.",
     );
     if !feedback.is_empty() {
         base.push_str(&format!("\nApp feedback: {}", feedback.join(" / ")));
@@ -416,8 +522,30 @@ fn eval_task(task: &Task) -> VerifyResult {
     VerifyResult::Pass
 }
 
-/// Two-tier finalize: deliverables fatal, declared task outputs warn.
+/// Two-tier finalize: every task terminal (done/cancelled), deliverables fatal,
+/// declared task outputs warn.
 fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>) -> JobOutcome {
+    let incomplete: Vec<&str> = plan
+        .tasks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                states.get(&t.id).map(|s| s.status),
+                Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+            )
+        })
+        .map(|t| t.id.as_str())
+        .collect();
+    if !incomplete.is_empty() {
+        return JobOutcome {
+            status: JobStatus::Failed,
+            summary: format!(
+                "incomplete tasks({}): {}",
+                incomplete.len(),
+                incomplete.join(", ")
+            ),
+        };
+    }
     let mut missing: Vec<String> = Vec::new();
     for d in &plan.deliverables {
         if !matches!(std::fs::metadata(d), Ok(m) if m.len() > 0) {
@@ -452,6 +580,30 @@ fn finalize_plan(plan: &Plan, states: &HashMap<String, TaskState>) -> JobOutcome
             "\nWarnings: task outputs missing({}): {}",
             declared_missing.len(),
             declared_missing.join(", ")
+        ));
+    }
+    let cancelled: Vec<String> = plan
+        .tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                states.get(&t.id).map(|s| s.status),
+                Some(TaskStatus::Cancelled)
+            )
+        })
+        .map(|t| {
+            let reason = states
+                .get(&t.id)
+                .and_then(|s| s.cancelled_reason.as_deref())
+                .unwrap_or("cancelled");
+            format!("{} ({})", t.id, reason)
+        })
+        .collect();
+    if !cancelled.is_empty() {
+        summary.push_str(&format!(
+            "\nCancelled({}): {}",
+            cancelled.len(),
+            cancelled.join(", ")
         ));
     }
     JobOutcome {
@@ -509,6 +661,22 @@ fn executor_spec(
     }
 }
 
+/// y/N confirmation for a replan scope reduction (stdin; EOF = no).
+fn confirm_cancel_removal(prompt: &str) -> bool {
+    use std::io::Write as _;
+    print!("\x1b[93m{}\x1b[0m (y/N) ", prompt);
+    if std::io::stdout().flush().is_err() {
+        return false;
+    }
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    #[cfg(feature = "gui")]
+    let input = crate::gui::decode_child_input(input);
+    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 /// Run a `todo.json` plan on the status-driven loop. `todo.json` is an
 /// immutable seed; `<stem>.live.json` holds the live plan (plan + status +
 /// handover + brief) and is the single source of truth across reruns.
@@ -536,6 +704,7 @@ pub(crate) async fn run_todo(
     let mut feedback: Vec<String> = Vec::new();
     let mut stalls: u32 = 0;
     let mut round: u32 = 0;
+    let mut confirm_scope = |prompt: &str| confirm_cancel_removal(prompt);
 
     loop {
         // Replan step (replan mode only): revise the plan + next-task brief.
@@ -574,7 +743,13 @@ pub(crate) async fn run_todo(
             match proposed {
                 Some(p) => {
                     let new_briefs = collect_briefs(&p);
-                    match apply_replan(&mut plan, &states, p) {
+                    match apply_replan(
+                        &mut plan,
+                        &mut states,
+                        p,
+                        options.replan_scope,
+                        &mut confirm_scope,
+                    ) {
                         Ok(note) => {
                             briefs = new_briefs;
                             revision += 1;
@@ -696,6 +871,11 @@ pub(crate) fn todo_status_in(plan_path: &Path) -> Result<String> {
     let mut out = format!("[job status] {}/{} tasks done\n", done, plan.tasks.len());
     for t in &plan.tasks {
         let line = match states.get(&t.id) {
+            Some(s) if s.status == TaskStatus::Cancelled => format!(
+                " - [~] {} (cancelled: {})\n",
+                t.id,
+                s.cancelled_reason.as_deref().unwrap_or("removed")
+            ),
             Some(s) if s.status == TaskStatus::Done => {
                 format!(" - [x] {} (attempts {})\n", t.id, s.attempts)
             }
@@ -732,7 +912,15 @@ pub(crate) fn write_generated_plan(
         tasks: Vec::new(),
         deliverables: Vec::new(),
     };
-    apply_replan(&mut plan, &HashMap::new(), proposed)?;
+    let mut states: HashMap<String, TaskState> = HashMap::new();
+    let mut confirm = |_: &str| false;
+    apply_replan(
+        &mut plan,
+        &mut states,
+        proposed,
+        ReplanScope::Deny,
+        &mut confirm,
+    )?;
     if plan.deliverables.is_empty() {
         plan.deliverables = vec![default_deliverable.to_string()];
     }
@@ -846,6 +1034,29 @@ pub(crate) enum TodoMode {
     Replan,
 }
 
+/// How a replan may shrink scope (drop unfinished tasks).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ReplanScope {
+    /// Apply the removal and record it as `cancelled`.
+    Auto,
+    /// Ask y/N before cancelling unfinished tasks (default).
+    #[default]
+    Ask,
+    /// Reject any revision that drops an unfinished task.
+    Deny,
+}
+
+impl ReplanScope {
+    pub(crate) fn parse(s: &str) -> Result<Self> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "ask" => Ok(Self::Ask),
+            "deny" => Ok(Self::Deny),
+            other => anyhow::bail!("--replan-scope must be auto|ask|deny, got {:?}", other),
+        }
+    }
+}
+
 /// Todo run knobs.
 #[derive(Debug, Clone)]
 pub(crate) struct TodoOptions {
@@ -856,6 +1067,7 @@ pub(crate) struct TodoOptions {
     pub executor_policy: ToolPolicy,
     pub reset: bool,
     pub generated: bool,
+    pub replan_scope: ReplanScope,
 }
 
 impl Default for TodoOptions {
@@ -868,6 +1080,7 @@ impl Default for TodoOptions {
             executor_policy: ToolPolicy::Inherit,
             reset: false,
             generated: false,
+            replan_scope: ReplanScope::Ask,
         }
     }
 }
@@ -911,6 +1124,8 @@ struct LiveTask {
     handover: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cancelled_reason: Option<String>,
 }
 
 /// In-memory live plan: plan, per-task state, briefs, revision, seed hash.
@@ -942,6 +1157,7 @@ fn load_live_only(live_path: &Path) -> Result<Option<LiveState>> {
             attempts,
             handover,
             error,
+            cancelled_reason,
         } = t;
         let mut checks = Vec::new();
         for s in &verify {
@@ -963,6 +1179,7 @@ fn load_live_only(live_path: &Path) -> Result<Option<LiveState>> {
                 attempts,
                 handover,
                 error,
+                cancelled_reason,
             },
         );
         if let Some(b) = brief.filter(|b| !b.trim().is_empty()) {
@@ -1036,6 +1253,7 @@ fn save_live(
                 attempts: st.map(|s| s.attempts).unwrap_or(0),
                 handover: st.and_then(|s| s.handover.clone()),
                 error: st.and_then(|s| s.error.clone()),
+                cancelled_reason: st.and_then(|s| s.cancelled_reason.clone()),
             }
         })
         .collect();

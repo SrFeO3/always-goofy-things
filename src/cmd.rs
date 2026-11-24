@@ -38,6 +38,7 @@ pub(crate) enum JobRequest {
         reset: bool,
         max_retries: u32,
         note: String,
+        replan_scope: crate::todo_job::ReplanScope,
     },
     TodoClean {
         all: bool,
@@ -135,13 +136,14 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
             }
             "run" => {
                 let plan = args.first().cloned().ok_or(
-                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--note \"...\"]".to_string(),
+                    "Usage: /job run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--replan-scope auto|ask|deny] [--note \"...\"]".to_string(),
                 )?;
                 let mut mode = crate::todo_job::TodoMode::Static;
                 let (mut dry_run, mut status) = (false, false);
                 let mut reset = false;
                 let mut max_retries = 1u32;
                 let mut note = String::new();
+                let mut replan_scope = crate::todo_job::ReplanScope::Ask;
                 let mut i = 1;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -167,6 +169,15 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                                     .map_err(|_| "--max-retries needs an integer".to_string())?;
                         }
                         "--note" => note = take_value(args, &mut i, "--note", "\"...\"")?,
+                        "--replan-scope" => {
+                            replan_scope = crate::todo_job::ReplanScope::parse(&take_value(
+                                args,
+                                &mut i,
+                                "--replan-scope",
+                                "auto|ask|deny",
+                            )?)
+                            .map_err(|e| e.to_string())?;
+                        }
                         other => return Err(format!("Unknown /job run flag {:?}", other)),
                     }
                     i += 1;
@@ -179,6 +190,7 @@ fn parse_job_tokens(cmd: &str, rest: &[String]) -> Result<JobRequest, String> {
                     reset,
                     max_retries,
                     note,
+                    replan_scope,
                 })
             }
             "clean" => {
@@ -719,7 +731,7 @@ fn print_help() {
    /kb <sub>        Knowledge Base commands: add <path> / list / delete <path> [--all-versions] / sync / backup [path] / restore <snapshot> (requires --features kb)
    /kb extract ..   Extract knowledge app-driven: /kb extract [<source>] [--chunk-bytes N] [--dry-run] [--status] [--max-retries N] [--redo] [--handover off|auto]
    /kb analyze ..   Cross-document investigation: /kb analyze \"<goal>\" [--sources ...] [--max-retries N] [--note \"...\"]
-   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--note \"...\"] / clean [--all]
+   /job <sub>       Structured jobs: init <path> / run <todo.json> [--mode static|replan] [--dry-run] [--status] [--reset] [--replan-scope auto|ask|deny] [--note \"...\"] / clean [--all]
    /exit, /quit     Exit the application (also accepts 'exit', 'quit', or Ctrl-D)
 
 \x1b[1mExample:\x1b[0m

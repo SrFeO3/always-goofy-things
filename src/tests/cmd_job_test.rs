@@ -25,7 +25,7 @@ fn job_init_needs_path() {
 #[test]
 fn job_run_parses_all_flags() {
     match parse_job_request(
-        "/job run work.json --mode replan --dry-run --reset --max-retries 3 --note \"be quick\"",
+        "/job run work.json --mode replan --dry-run --reset --max-retries 3 --replan-scope deny --note \"be quick\"",
     ) {
         Some(Ok(JobRequest::TodoRun {
             plan,
@@ -35,6 +35,7 @@ fn job_run_parses_all_flags() {
             reset,
             max_retries,
             note,
+            replan_scope,
         })) => {
             assert_eq!(plan, "work.json");
             assert_eq!(mode, TodoMode::Replan);
@@ -43,9 +44,22 @@ fn job_run_parses_all_flags() {
             assert!(reset);
             assert_eq!(max_retries, 3);
             assert_eq!(note, "be quick");
+            assert_eq!(replan_scope, crate::todo_job::ReplanScope::Deny);
         }
         other => panic!("unexpected {:?}", other),
     }
+    // Default is the safe `ask`.
+    assert!(matches!(
+        parse_job_request("/job run w.json"),
+        Some(Ok(JobRequest::TodoRun {
+            replan_scope: crate::todo_job::ReplanScope::Ask,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        parse_job_request("/job run w.json --replan-scope wild"),
+        Some(Err(_))
+    ));
 }
 
 #[test]

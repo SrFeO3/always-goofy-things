@@ -41,7 +41,20 @@ fn done_state(handover: &str) -> TaskState {
         attempts: 1,
         handover: Some(handover.to_string()),
         error: None,
+        cancelled_reason: None,
     }
+}
+
+/// Call `apply_replan` with a stubbed y/N answer for `Ask`.
+fn run_replan(
+    plan: &mut Plan,
+    states: &mut HashMap<String, TaskState>,
+    p: ProposedPlan,
+    scope: ReplanScope,
+    answer: bool,
+) -> Result<String> {
+    let mut confirm = |_: &str| answer;
+    apply_replan(plan, states, p, scope, &mut confirm)
 }
 
 #[test]
@@ -238,13 +251,16 @@ fn replan_validates_and_applies() {
         ]}"#,
     )
     .unwrap();
-    let note = apply_replan(&mut plan, &states, ok).unwrap();
+    let note = run_replan(&mut plan, &mut states, ok, ReplanScope::Auto, true).unwrap();
     assert!(note.contains("3 tasks"));
     assert_eq!(plan.tasks[1].id, "t2a");
     assert_eq!(plan.tasks[2].verify_raw, vec!["nonempty artifacts/p2.md"]);
+    // The dropped pending task is recorded as cancelled (and kept at the end).
+    assert!(matches!(states["t2"].status, TaskStatus::Cancelled));
+    assert!(plan.tasks.iter().any(|t| t.id == "t2"));
     // Reject: empty task list.
     let empty: ProposedPlan = serde_json::from_str(r#"{"tasks": []}"#).unwrap();
-    assert!(apply_replan(&mut plan, &states, empty).is_err());
+    assert!(run_replan(&mut plan, &mut states, empty, ReplanScope::Deny, true).is_err());
     // Reject: a task with no verify (vacuous pass).
     let no_verify: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
@@ -252,13 +268,13 @@ fn replan_validates_and_applies() {
             {"id": "t2a", "description": "draft part one", "verify": []}]}"#,
     )
     .unwrap();
-    assert!(apply_replan(&mut plan, &states, no_verify).is_err());
+    assert!(run_replan(&mut plan, &mut states, no_verify, ReplanScope::Deny, true).is_err());
     // Reject: drop a done task.
     let drop_done: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [{"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
     )
     .unwrap();
-    assert!(apply_replan(&mut plan, &states, drop_done).is_err());
+    assert!(run_replan(&mut plan, &mut states, drop_done, ReplanScope::Deny, true).is_err());
     // Reject: rename a done task.
     let rename_done: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
@@ -266,7 +282,7 @@ fn replan_validates_and_applies() {
             {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
     )
     .unwrap();
-    assert!(apply_replan(&mut plan, &states, rename_done).is_err());
+    assert!(run_replan(&mut plan, &mut states, rename_done, ReplanScope::Deny, true).is_err());
     // Reject: change a done task's verify.
     let verify_done: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
@@ -274,7 +290,7 @@ fn replan_validates_and_applies() {
             {"id": "t2a", "description": "draft part one", "verify": ["nonempty artifacts/p1.md"]}]}"#,
     )
     .unwrap();
-    assert!(apply_replan(&mut plan, &states, verify_done).is_err());
+    assert!(run_replan(&mut plan, &mut states, verify_done, ReplanScope::Deny, true).is_err());
     // Reject: bad check string.
     let bad_check: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
@@ -282,7 +298,7 @@ fn replan_validates_and_applies() {
             {"id": "t9", "description": "new", "verify": ["frobnicate x"]}]}"#,
     )
     .unwrap();
-    assert!(apply_replan(&mut plan, &states, bad_check).is_err());
+    assert!(run_replan(&mut plan, &mut states, bad_check, ReplanScope::Deny, true).is_err());
     // Deliverables replaced when present.
     let with_del: ProposedPlan = serde_json::from_str(
         r#"{"tasks": [
@@ -290,7 +306,7 @@ fn replan_validates_and_applies() {
          "deliverables": ["artifacts/other.md"]}"#,
     )
     .unwrap();
-    apply_replan(&mut plan, &states, with_del).unwrap();
+    run_replan(&mut plan, &mut states, with_del, ReplanScope::Auto, true).unwrap();
     assert_eq!(plan.deliverables, vec!["artifacts/other.md"]);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -464,4 +480,134 @@ fn generated_plan_writes_through_validation() {
         write_generated_plan("g", "not json", &dir.join("bad.json"), "artifacts/d.md").is_err()
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn replan_scope_controls_dropping_unfinished_tasks() {
+    let dir = scratch("scope");
+    let plan_path = write_plan(&dir, "todo.json", &plan_json());
+    let only_t1: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]}]}"#,
+    )
+    .unwrap();
+    let seed = || {
+        let mut states = HashMap::new();
+        states.insert("t1".to_string(), done_state("r"));
+        (load_plan(&plan_path).unwrap(), states)
+    };
+
+    // deny: the revision is rejected and t2 stays pending.
+    let (mut plan, mut states) = seed();
+    assert!(run_replan(&mut plan, &mut states, only_t1, ReplanScope::Deny, true).is_err());
+    assert!(matches!(
+        states.get("t2").map(|s| s.status),
+        None | Some(TaskStatus::Pending)
+    ));
+    assert!(plan.tasks.iter().any(|t| t.id == "t2"));
+
+    // ask + "no" is the same rejection.
+    let only_t1: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]}]}"#,
+    )
+    .unwrap();
+    let (mut plan, mut states) = seed();
+    assert!(run_replan(&mut plan, &mut states, only_t1, ReplanScope::Ask, false).is_err());
+    assert!(matches!(
+        states.get("t2").map(|s| s.status),
+        None | Some(TaskStatus::Pending)
+    ));
+
+    // ask + "yes" and auto: cancel with a reason, kept in the live plan.
+    for scope in [ReplanScope::Ask, ReplanScope::Auto] {
+        let only_t1: ProposedPlan = serde_json::from_str(
+            r#"{"tasks": [
+                {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]}]}"#,
+        )
+        .unwrap();
+        let (mut plan, mut states) = seed();
+        let note = run_replan(&mut plan, &mut states, only_t1, scope, true).unwrap();
+        assert!(note.contains("1 cancelled"));
+        assert!(matches!(states["t2"].status, TaskStatus::Cancelled));
+        assert_eq!(
+            states["t2"].cancelled_reason.as_deref(),
+            Some("removed by replan")
+        );
+        assert!(plan.tasks.iter().any(|t| t.id == "t2"));
+        assert!(next_undone(&plan, &states).is_none());
+    }
+
+    // A cancelled task is terminal: altering it is rejected.
+    let alter_cancelled: ProposedPlan = serde_json::from_str(
+        r#"{"tasks": [
+            {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]},
+            {"id": "t2", "description": "CHANGED", "verify": ["nonempty artifacts/draft.md"]}]}"#,
+    )
+    .unwrap();
+    let (mut plan, mut states) = seed();
+    run_replan(
+        &mut plan,
+        &mut states,
+        serde_json::from_str(
+            r#"{"tasks": [
+                {"id": "t1", "description": "take notes", "verify": ["nonempty artifacts/notes.md"]}]}"#,
+        )
+        .unwrap(),
+        ReplanScope::Auto,
+        true,
+    )
+    .unwrap();
+    assert!(
+        run_replan(
+            &mut plan,
+            &mut states,
+            alter_cancelled,
+            ReplanScope::Deny,
+            true
+        )
+        .is_err()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn finalize_requires_every_task_terminal() {
+    let plan = Plan {
+        goal: "g".to_string(),
+        tasks: vec![
+            PlanTask {
+                id: "t1".to_string(),
+                description: "d".to_string(),
+                verify_raw: Vec::new(),
+                checks: Vec::new(),
+            },
+            PlanTask {
+                id: "t2".to_string(),
+                description: "d".to_string(),
+                verify_raw: Vec::new(),
+                checks: Vec::new(),
+            },
+        ],
+        deliverables: Vec::new(),
+    };
+    let mut states = HashMap::new();
+    states.insert("t1".to_string(), done_state("- Status: done"));
+    // t2 is still pending: not a completed job.
+    let out = finalize_plan(&plan, &states);
+    assert_eq!(out.status, JobStatus::Failed);
+    assert!(out.summary.contains("incomplete tasks(1): t2"));
+
+    // Cancelled is terminal and is reported explicitly.
+    states.insert(
+        "t2".to_string(),
+        TaskState {
+            status: TaskStatus::Cancelled,
+            cancelled_reason: Some("removed by replan".to_string()),
+            ..Default::default()
+        },
+    );
+    let out = finalize_plan(&plan, &states);
+    assert_eq!(out.status, JobStatus::Completed);
+    assert!(out.summary.contains("Cancelled(1): t2 (removed by replan)"));
 }

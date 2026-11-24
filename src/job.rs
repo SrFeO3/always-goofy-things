@@ -15,7 +15,7 @@ pub(crate) struct Task {
     // Read by the kb feature and the job tests only.
     #[cfg_attr(not(any(feature = "kb", test)), allow(dead_code))]
     pub description: String, // Work text for the LLM
-    pub verify: Vec<Check>,  // Completion conditions. All true = done
+    pub verify: Vec<Check>, // Completion conditions. All true = done
 }
 
 /// Completion condition. Mechanical judge (see `Check::parse` for the DSL).
