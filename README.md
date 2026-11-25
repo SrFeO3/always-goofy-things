@@ -138,9 +138,9 @@ cargo run
 
 Alternatively, with OpenCode Go
 ```bash
-export LLM_URL="https://opencode.ai/zen/go/v1/chat/completions"
+export LLM_URL="https://opencode.ai/inference/go/openai/v1/chat/completions"
  export LLM_API_KEY="..."
-cargo run -- --provider-extras opencode -m space-bunny-free
+cargo run -- --provider-extras opencode -m gemini-4-argon
 ```
 
 Then type a query like "Who are you and what tools can you use?" (`Enter` sends it, `Ctrl+O` inserts a newline).
