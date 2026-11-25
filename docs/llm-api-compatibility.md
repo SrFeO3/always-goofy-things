@@ -1,46 +1,48 @@
 Major LLM API Compatibility
 
-Reference for extending an OpenAI Chat / Ollama base implementation with Anthropic's dialect and the next-generation OpenAI Responses API.
+Reference for extending an OpenAI Chat / Ollama base implementation with Anthropic's dialect, the next-generation OpenAI Responses API, and Google's native Gemini API.
 
 # API Overview
 
 ## API Differences
 
-| Item | OpenAI API (Chat Completions) | OpenAI API (Responses) | Ollama API (Chat API) | Anthropic API (Messages API) |
-|---|---|---|---|---|
-| Official API Name | OpenAI Chat Completions API | OpenAI Responses API | Ollama Chat API | Anthropic Messages API |
-| Main Endpoint | /v1/chat/completions | /v1/responses | /api/chat | /v1/messages |
-| Base URL (Official Example) | https://api.openai.com/v1 | https://api.openai.com/v1 | http://localhost:11434 | https://api.anthropic.com/v1 |
-| Root Request Fields | messages, model, stream, etc. | input, instructions, model, max_output_tokens, stream, tools, etc. | messages, model, stream, etc. | messages, model, max_tokens, etc. |
-| Core Input/Context | Array of messages (role/content) | input (string/items) + instructions | Array of messages | Array of messages (root system allowed) |
-| State / Chaining | Stateless (manual history management) | Stateless (resend items) or stateful via previous_response_id / conversation | Stateless (manual history management) | Stateless (manual history management) |
-| Token Limit Parameter | `max_completion_tokens` (legacy: `max_tokens`) | `max_output_tokens` (optional; includes reasoning tokens) | Not required | max_tokens is required |
-| System Prompt | Set as role: "system" inside messages array (newer o1+/GPT-5 models: role: "developer" preferred) | Set as root-level `instructions` (string, or system/developer input items) | Set as role: "system" inside messages array | Set as root-level `system` (string, or array of text blocks with cache_control) |
-| Streaming Response Format | SSE with data: {...} events, terminated by data: [DONE] | Event-based SSE (event:/data: pairs, data.type discriminates events; no [DONE]; ends with response.completed) | Line-delimited JSON (NDJSON) | Event-based SSE with events such as message_start and content_block_delta |
-| Tool Call Request Format | `assistant` message with `tool_calls`; `function.arguments` is a JSON string | `output` item with `type: "function_call"` (`call_id`, `name`, `arguments`) | `assistant` message with `tool_calls`; `function.arguments` is a JSON object | `assistant` message `content` array with a `type: "tool_use"` block; `input` is a JSON object |
-| Tool Call Arguments Type | **JSON String** (escaped string) | **JSON String** (escaped string) | **JSON Object** (raw JSON) | **JSON Object** (raw JSON) |
-| Tool Result Format | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Append `type: "function_call_output"` input item (`call_id`, string `output`) to the next request `input` | Return as a `role: "tool"` message with string `content` | Return as a `role: "user"` message with a `type: "tool_result"` block containing `tool_use_id` and string `content` |
-| Tool Result Content Type | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) |
-| Structured Output Format | `response_format: { type: "json_schema", json_schema: {...} }`<br>Output `content` contains JSON text | `text: { format: { type: "json_schema", name, schema, strict } }`<br>Output `content[].text` (`type: "output_text"`) contains JSON text | `format: "json"` (or JSON Schema)<br>Output `content` contains JSON text | `output_config: { format: { type: "json_schema", schema: ... } }`<br>Output `content[].text` contains JSON text |
-| HTTP Headers | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json | Content-Type: application/json, x-api-key, anthropic-version: 2023-06-01 |
+| Item | OpenAI API (Chat Completions) | OpenAI API (Responses) | Ollama API (Chat API) | Anthropic API (Messages API) | Gemini API (native) |
+|---|---|---|---|---|---|
+| Official API Name | OpenAI Chat Completions API | OpenAI Responses API | Ollama Chat API | Anthropic Messages API | Gemini API (generateContent: legacy / Interactions: current) |
+| Main Endpoint | /v1/chat/completions | /v1/responses | /api/chat | /v1/messages | POST /v1beta/models/{model}:generateContent (:streamGenerateContent for stream) / POST /v1beta/interactions |
+| Base URL (Official Example) | https://api.openai.com/v1 | https://api.openai.com/v1 | http://localhost:11434 | https://api.anthropic.com/v1 | https://generativelanguage.googleapis.com/v1beta |
+| Root Request Fields | messages, model, stream, etc. | input, instructions, model, max_output_tokens, stream, tools, etc. | messages, model, stream, etc. | messages, model, max_tokens, etc. | contents, system_instruction, generationConfig, tools (generateContent) / model, input, generation_config, tools (Interactions) |
+| Core Input/Context | Array of messages (role/content) | input (string/items) + instructions | Array of messages | Array of messages (root system allowed) | contents[] {role: user\|model, parts[]} / input string\|steps[] |
+| State / Chaining | Stateless (manual history management) | Stateless (resend items) or stateful via previous_response_id / conversation | Stateless (manual history management) | Stateless (manual history management) | Stateless resend (Interactions also: previous_interaction_id) |
+| Token Limit Parameter | `max_completion_tokens` (legacy: `max_tokens`) | `max_output_tokens` (optional; includes reasoning tokens) | Not required | max_tokens is required | `maxOutputTokens` / `max_output_tokens` (includes thought tokens) |
+| System Prompt | Set as role: "system" inside messages array (newer o1+/GPT-5 models: role: "developer" preferred) | Set as root-level `instructions` (string, or system/developer input items) | Set as role: "system" inside messages array | Set as root-level `system` (string, or array of text blocks with cache_control) | Top-level `system_instruction` (object in generateContent, string in Interactions) |
+| Streaming Response Format | SSE with data: {...} events, terminated by data: [DONE] | Event-based SSE (event:/data: pairs, data.type discriminates events; no [DONE]; ends with response.completed) | Line-delimited JSON (NDJSON) | Event-based SSE with events such as message_start and content_block_delta | SSE `data:` chunks (generateContent) / event-based SSE steps (Interactions, ends with `done` / `[DONE]`) |
+| Tool Call Request Format | `assistant` message with `tool_calls`; `function.arguments` is a JSON string | `output` item with `type: "function_call"` (`call_id`, `name`, `arguments`) | `assistant` message with `tool_calls`; `function.arguments` is a JSON object | `assistant` message `content` array with a `type: "tool_use"` block; `input` is a JSON object | `functionCall {name, args, id}` part / `function_call {name, arguments, id}` step |
+| Tool Call Arguments Type | **JSON String** (escaped string) | **JSON String** (escaped string) | **JSON Object** (raw JSON) | **JSON Object** (raw JSON) | **JSON Object** (raw JSON; Interactions streams `arguments_delta` chunks) |
+| Tool Result Format | Return as a `role: "tool"` message with `tool_call_id` and string `content` | Append `type: "function_call_output"` input item (`call_id`, string `output`) to the next request `input` | Return as a `role: "tool"` message with string `content` | Return as a `role: "user"` message with a `type: "tool_result"` block containing `tool_use_id` and string `content` | `functionResponse {name, id, response: object}` part / `function_result {name, call_id, result[]}` step |
+| Tool Result Content Type | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) | String containing JSON text (or plain text) | Object (generateContent) / content blocks (Interactions) |
+| Structured Output Format | `response_format: { type: "json_schema", json_schema: {...} }`<br>Output `content` contains JSON text | `text: { format: { type: "json_schema", name, schema, strict } }`<br>Output `content[].text` (`type: "output_text"`) contains JSON text | `format: "json"` (or JSON Schema)<br>Output `content` contains JSON text | `output_config: { format: { type: "json_schema", schema: ... } }`<br>Output `content[].text` contains JSON text | `responseMimeType: "application/json"` + `responseJsonSchema` (generateContent) / `response_format` (Interactions)<br>Output text contains JSON text |
+| HTTP Headers | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json, Authorization: Bearer ... | Content-Type: application/json | Content-Type: application/json, x-api-key, anthropic-version: 2023-06-01 | Content-Type: application/json, `x-goog-api-key` (`Api-Revision` on Interactions) |
 
 ### Key Notes
 
 The following implementation details differ significantly across providers and deserve special attention:
 - Structured Outputs & JSON Parsing (See dedicated section below)
 - Reasoning & Thinking: Handling & Retention (See dedicated section below)
+- Gemini has two envelopes for the same concepts: legacy generateContent (`contents`/`parts`) and current Interactions (`input`/`steps`). Do not mix them in one request.
+- Gateway note: Gemini via `.../v1beta/openai/` or OpenCode Go uses the OpenAI Chat shape (no native mapping); only direct `generativelanguage.googleapis.com` needs the Gemini column.
 
 ## This App's Specific Choices
 
 Actual requests differ from the ideal shapes above as follows:
 
-1. **Stateless full resend on every provider, including Responses**: every request rebuilds the full conversation from session history (never `previous_response_id` / `conversation` / `store`).
+1. **Client-held history on every provider, including Responses**: every request rebuilds the full conversation from client-side session history (never API-held `previous_response_id` / `conversation` / `store`).
 2. **Reasoning is never resent on the official OpenAI APIs**. Streamed reasoning is display-only, and Responses `reasoning` item resends are not implemented (unverified with o-series + tools on the live API).
 3. **Structured Outputs and reasoning-control parameters are never sent** on any provider. JSON is steered via prompting and tools.
 
 ## Provider Adoption History
 
-Wire formats were adopted in this order: a shared OpenAI Chat / Ollama base, then Anthropic's gratuitously dissimilar dialect, and finally the next-generation OpenAI Responses API.
+Wire formats were adopted in this order: a shared OpenAI Chat / Ollama base, then Anthropic's gratuitously dissimilar dialect, then the next-generation OpenAI Responses API. Google's native Gemini API is surveyed below but not yet implemented (Gemini via OpenAI-compatible gateways already works through the OpenAI shape).
 
 1. **Base: OpenAI Chat Completions / Ollama** - one shared shape: a `messages` array (`role: "system" / "user" / "assistant" / "tool"`), `assistant.tool_calls` for tool requests, `role: "tool"` messages for results; SSE `data:` events (Ollama: NDJSON) with `[DONE]` / `done: true`.
 2. **Added: Anthropic (Messages API)** - a gratuitously dissimilar dialect:
@@ -53,10 +55,11 @@ Wire formats were adopted in this order: a shared OpenAI Chat / Ollama base, the
    - `max_output_tokens` replaces `max_completion_tokens`.
    - Event-based SSE with `data.type` (`response.output_text.delta` / `response.output_item.done` / `response.completed` / `response.incomplete`); no `data: [DONE]`.
    - Tools are `function_call` / `function_call_output` input items (no `role: "tool"`).
+4. **Surveyed, not yet implemented: Gemini (native)** - `system_instruction` instead of `role: "system"`; `contents[]` (`user`/`model` + `parts`) in legacy generateContent, `steps[]` (`user_input`/`function_call`/`function_result`/`thought`) in current Interactions; tools are `functionCall`/`functionResponse` objects matched by `id`. (Gemini via OpenAI-compatible gateways needs no new mapping and already works.)
 
 # LLM Request
 
-The headers are basically identical, such as Content-Type: application/json. Only Anthropic requires specific custom headers.
+The headers are basically identical, such as Content-Type: application/json. Anthropic (`x-api-key` + `anthropic-version`) and direct Gemini (`x-goog-api-key`) require specific custom headers.
 
 ## OpenAI (Chat Completions)
 
@@ -130,10 +133,25 @@ anthropic-version: 2023-06-01
 
 Note: `temperature` / `top_p` / `top_k` are deprecated for models released after Claude Opus 4.6; values other than the defaults are rejected with HTTP 400 on those models.
 
+## Gemini API (native)
+
+Direct endpoint: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (stream: `...:streamGenerateContent?alt=sse`); Interactions: `POST .../v1beta/interactions` (`?alt=sse` + `"stream": true`).
+
+```request body
+{
+  "system_instruction": { "parts": [{ "text": "You are a professional programmer." }] },
+  "contents": [{ "role": "user", "parts": [{ "text": "Hello!" }] }],
+  "generationConfig": { "maxOutputTokens": 1024 }
+}
+```
+
+Interactions differs: `model` moves into the body, `input` replaces `contents` (string or `steps[]`), `system_instruction` is a plain string, `generation_config` replaces `generationConfig`. Roles are only `user`/`model` (generateContent) or step types (Interactions); there is no `role: "system"`.
+
 ## Implementation
 
 - Standardized Fields: Consistently place max token right after model (JSON key order is arbitrary outside of the messages array).
 - Anthropic Headers: Add specific headers: x-api-key for authentication and anthropic-version.
+- Gemini Headers: direct calls use `x-goog-api-key` (Interactions adds `Api-Revision`); compat paths and Vertex use `Authorization: Bearer`. Streaming is endpoint-selected (`:streamGenerateContent?alt=sse` vs `/interactions?alt=sse` + `"stream": true`).
 
 # Max Output Token
 
@@ -146,6 +164,8 @@ Recommended for Code Generation: 2048 to 4096 tokens. (Code consumes a high numb
 - OpenAI (Chat Completions): Server-Sent Events (SSE) format where each content line starts with `data: {...}`, terminated by a final `data: [DONE]` line.
 - OpenAI (Responses API): Event-based SSE. Each event is an `event:` line plus a `data:` line whose JSON `type` identifies the event (e.g. `response.output_text.delta` for text chunks); the stream ends with `response.completed` - there is no `data: [DONE]`.
 - Anthropic: Server-Sent Events (SSE) format where event: lines and data: lines alternate.
+- Gemini (generateContent): SSE `data: {GenerateContentResponse}` chunks (same shape as the sync response); no `event:` lines; stream close = end.
+- Gemini (Interactions): event-based SSE `event:` + `data:` pairs (`interaction.created` / `step.start` / `step.delta` / `step.stop` / `interaction.completed`); ends with `event: done` `data: [DONE]`.
 
 ## OpenAI (Chat Completions)
 
@@ -177,9 +197,17 @@ event: content_block_delta
 data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}}
 ```
 
+## Gemini API (native)
+
+```
+data: {"candidates": [{"content": {"parts": [{"text": "hello"}], "role": "model"}}]}
+```
+
+generateContent streams `GenerateContentResponse` objects as bare `data:` chunks (no `event:` lines; close = end). Interactions streams typed steps instead: `interaction.created` / `step.start` / `step.delta` (`text` / `thought_summary`+`thought_signature` / `arguments_delta`) / `step.stop` / `interaction.completed` (`completed` vs `requires_action`), ending with `event: done` / `data: [DONE]`. Usage: `usageMetadata` (generateContent) / `interaction.usage` (Interactions); both count thought tokens.
+
 ## Implementation
 
-Only Anthropic and the OpenAI Responses API require event-based parsing.
+Anthropic, the OpenAI Responses API, and Gemini Interactions require event-based parsing. Gemini generateContent streaming is plain `data:` JSON (no `event:` lines).
 
 Anthropic:
 1. Read the `event:` line to identify the event type (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, `ping`).
@@ -216,6 +244,12 @@ OpenAI (Responses API) - parse the JSON in each `data:` line and branch on `data
 - When `thinking.display == "omitted"` (or thinking is safety-redacted), an opaque `type: "redacted_thinking"` block (`data` only) is returned instead; pass it back unchanged.
 - Enable via `thinking: { "type": "enabled", "budget_tokens": N }` (N >= 1024, counts toward `max_tokens`) or `thinking: { "type": "adaptive" }`. Thinking token usage is also reported in `usage.output_tokens_details.thinking_tokens`.
 
+### Gemini (generateContent) stream
+- Each `data:` line is a full `GenerateContentResponse`; concatenate `parts[].text` (`thought: true` parts are display-only but must be resent). Tool calls arrive as `functionCall` parts; map results by `id`.
+
+### Gemini (Interactions) stream
+- Branch on `data.event_type`; accumulate `arguments_delta` per `index` and `JSON.parse` after `step.stop`; keep `thought_signature` verbatim for stateless resends.
+
 # Tool Calling (Request)
 
 ## Anthropic Tool Definition Format
@@ -246,6 +280,19 @@ Convert tool definitions to the Anthropic format during initialization.
    ]
 }
 ```
+
+## Gemini Tool Definition Format (native; both envelopes)
+
+```json
+{
+  "name": "read_file",
+  "description": "Read the contents of a file...",
+  "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+}
+```
+
+- generateContent wraps it as `tools: [{functionDeclarations: [...]}]`; mode via `toolConfig.functionCallingConfig` (`AUTO` / `ANY` / `NONE` / `VALIDATED`).
+- Interactions wraps it as `tools: [{type: "function", ...}]`; mode via `generation_config.tool_choice`. Built-ins (`google_search`, `url_context`, `code_execution`, ...) can mix in.
 
 # Tool Calling (Response)
 
@@ -294,6 +341,10 @@ Tool results are returned inside the content array of a role: "user" message.
 }
 ```
 
+## Gemini API (native)
+
+Request: `functionCall {name, args: object, id}` (generateContent part) / `function_call {name, arguments: object, id}` (Interactions step). Result: `role: "user", parts: [{functionResponse: {name, id, response: object}}]` / `{type: "function_result", name, call_id, result: [{type: "text", text}]}`. Match by `id`; resend model content/steps verbatim (signatures included) plus the result.
+
 # Automatic Provider Detection
 
 ```rust
@@ -302,7 +353,9 @@ enum LlmProvider {
     Anthropic,
     Ollama,
     OpenAi,
+    OpenAiResponses,
     OpenAiCompatible,
+    Google, // native Gemini (generateContent + Interactions share detection; branch by endpoint path)
 }
 
 fn detect_provider(url: &str) -> LlmProvider {
@@ -316,13 +369,34 @@ fn detect_provider(url: &str) -> LlmProvider {
         return LlmProvider::Ollama;
     }
 
+    if url_lower.contains("/v1/responses") {
+        return LlmProvider::OpenAiResponses;
+    }
+
+    // Native Gemini (AI Studio + Vertex). Keep before the generic OpenAI fallthrough
+    // because Gemini also ships an OpenAI-compat path that must NOT match here.
+    if (url_lower.contains("generativelanguage.googleapis.com")
+        && !url_lower.contains("/v1beta/openai/"))
+        || url_lower.contains(":generatecontent")
+        || url_lower.contains(":streamgeneratecontent")
+        || url_lower.contains("/interactions")
+        || url_lower.contains("-aiplatform.googleapis.com")
+    {
+        return LlmProvider::Google;
+    }
+
     if url_lower.contains("api.openai.com") {
         return LlmProvider::OpenAi;
     }
 
+    // Covers generic gateways AND Gemini/OpenCode-Go via OpenAI shape:
+    // `.../v1beta/openai/...`, `https://opencode.ai/inference/go/...`.
     LlmProvider::OpenAiCompatible
 }
 ```
+
+Notes:
+- `.../v1beta/openai/...` and `opencode.ai/inference/go/...` intentionally fall through to `OpenAi`/`OpenAiCompatible` (OpenAI Chat shape + `Authorization: Bearer` + `x-opencode-session` extra). Only direct `generativelanguage.googleapis.com` (non-`/openai/`) and Vertex `aiplatform.googleapis.com` become `Google`.
 
 # Structured Outputs & JSON Parsing
 
@@ -342,9 +416,15 @@ fn detect_provider(url: &str) -> LlmProvider {
 - Tool Call Arguments: The `input` field within the `tool_use` content block is provided directly as a structured, unescaped **JSON Object** (no manual parsing required).
 - Structured Outputs: Anthropic supports native structured outputs via the `output_config.format` parameter. Similar to OpenAI, when using this mode, the guaranteed-valid JSON is returned as JSON text in the content string inside the message's `content[].text` field.
 
+## Gemini API (native)
+- Tool Call Arguments: **JSON Object** in both envelopes (`args` / `arguments`; Interactions streams them as `arguments_delta` chunks — accumulate, then parse).
+- Structured Outputs: JSON text in `parts[].text` (generateContent: `responseMimeType: "application/json"` + `responseJsonSchema`) / `output_text` (Interactions: `response_format`). Concatenate stream chunks, then `JSON.parse()`.
+
 ## Tool Result Submission (API-Specific Rules)
 - OpenAI & Anthropic: When returning execution results back to the model, the payload submitted within the content field must be formatted as a string containing JSON text (or plain text).
 - Ollama (Native `/api/chat`): `content` accepts a plain string, including JSON text. The model can reliably consume stringified JSON.
+- Gemini (generateContent): `functionResponse.response` is a **JSON object** (`{"output": ..., "error": ...}`, any keys you choose; multimodal via sibling `parts`). Do not stringify it into a string field.
+- Gemini (Interactions): `function_result.result` is an **array of content blocks**, normally `[{type: "text", text: json_string}]`. Stringify your JSON into that inner `text` field (multimodal blocks allowed on Gemini 3+).
 
 ## Implementation
 
@@ -353,6 +433,7 @@ fn detect_provider(url: &str) -> LlmProvider {
 | **OpenAI (Chat / Responses)** | JSON string -> `JSON.parse()` required | JSON text in `content` / `output_text` -> `JSON.parse()` required | Return JSON text as a string |
 | **Ollama (`/api/chat`)** | JSON object -> no parsing required     | JSON text in `message.content` -> `JSON.parse()` required | Return JSON text as a string |
 | **Anthropic**            | JSON object -> no parsing required     | JSON text in `content[].text` -> `JSON.parse()` required  | Return JSON text as a string |
+| **Gemini (native)** | JSON object -> no parsing required (Interactions stream: accumulate `arguments_delta`) | JSON text in `parts[].text` / `output_text` -> `JSON.parse()` required | Object (`functionResponse.response`) / text in `function_result.result[].text` |
 
 # Reasoning & Thinking: Handling & Retention
 
@@ -379,6 +460,10 @@ fn detect_provider(url: &str) -> LlmProvider {
 - receive: `type: "thinking"` and `type: "text"` blocks in the `content[]` array (`type: "redacted_thinking"` when thinking is redacted/omitted)
 - send back: the entire `content[]` array (thinking and text objects, with `signature` intact) in `role: "assistant"` - required when tools are used with extended thinking
 - enable: `thinking: { "type": "enabled", "budget_tokens": N }` (N >= 1024, counted toward `max_tokens`) or `thinking: { "type": "adaptive" }`; in streams, thinking arrives via `thinking_delta` / `signature_delta` events (see the streaming section above)
+
+## Gemini (native; both envelopes)
+- Thinking arrives with its signature: generateContent `parts[]` with `thought: true` + `thoughtSignature`; Interactions dedicated `thought` steps `{signature, summary[]}`. Resend everything verbatim (a missing/altered signature with tools is HTTP 400); never merge signed parts.
+- Control: `thinkingLevel` (`minimal` / `low` / `medium` / `high` / `xhigh`, model-dependent) or `thinkingBudget` (2.5 only); display via `includeThoughts` / `thinking_summaries`. Token limits cover thoughts + output.
 
 ## reference
 
@@ -447,3 +532,7 @@ fn extract_reasoning(message: &AssistantMessage) -> String {
     String::new()
 }
 ```
+
+### Client-held vs API-held state
+
+LLMs are stateless; only the history location differs. This app keeps history on the client (full `Session` resend every turn) and avoids API-held state (`previous_response_id` / `store` / `previous_interaction_id`), which gateways don't reliably support. A future native Gemini implementation does the same, including display-only `thought` signatures.
