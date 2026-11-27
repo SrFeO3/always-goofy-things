@@ -21,6 +21,9 @@ pub struct ToolLimits {
     /// Hard cap (bytes) per output stream; `0` = unlimited.
     /// Excess output keeps the tail.
     pub max_output_bytes: usize,
+    /// Maximum visible bytes per stream returned by `execute_bash`; `0` = unlimited.
+    /// Excess output keeps the tail and is marked truncated.
+    pub bash_visible_bytes: usize,
     /// Wall-clock timeout in seconds (0 = unlimited).
     pub tool_timeout_secs: u64,
 }
@@ -28,7 +31,8 @@ pub struct ToolLimits {
 impl Default for ToolLimits {
     fn default() -> Self {
         Self {
-            max_output_bytes: 1_048_576,
+            max_output_bytes: 131_072,
+            bash_visible_bytes: 4096,
             tool_timeout_secs: 30,
         }
     }
@@ -42,7 +46,7 @@ pub fn set_tool_limits(limits: ToolLimits) {
 }
 
 /// Tool limits registered at startup; shared by the mini python interpreter's
-/// output cap (spec: reuse `--max-tool-output-bytes`).
+/// output cap (spec: reuse `--max-tool-result-bytes`).
 pub(crate) fn tool_limits() -> ToolLimits {
     TOOL_LIMITS.get().copied().unwrap_or_default()
 }
@@ -65,6 +69,8 @@ pub struct CapturedOutput {
     /// already buffered when the drain was aborted; a lower bound in the
     /// abort case because the pipe remainder is unreadable).
     pub stdout_omitted: u64,
+    /// Bytes of real stderr not included in `stderr` (same semantics).
+    pub stderr_omitted: u64,
 }
 
 /// Shared capture state: bounded tail buffer plus truncation stats, so a
@@ -151,19 +157,36 @@ pub async fn run_captured(program: &str, args: &[&str], tool: &str) -> Result<Ca
     );
     let (stdout, stdout_truncated, stdout_omitted) =
         out_res.context(format!("[{}_EXECUTION_FAILED] stdout read failed", tool))?;
-    let (stderr, stderr_truncated, _stderr_omitted) =
+    let (stderr, stderr_truncated, stderr_omitted) =
         err_res.context(format!("[{}_EXECUTION_FAILED] stderr read failed", tool))?;
 
     let (exit_code, signal) = report_status(&status);
     Ok(CapturedOutput {
-        stdout: String::from_utf8_lossy(&stdout).to_string(),
-        stderr: String::from_utf8_lossy(&stderr).to_string(),
+        stdout: decode_tail(&stdout, stdout_truncated),
+        stderr: decode_tail(&stderr, stderr_truncated),
         exit_code,
         signal,
         stdout_truncated,
         stderr_truncated,
         stdout_omitted,
+        stderr_omitted,
     })
+}
+
+/// Decode a captured stream to UTF-8. When the cap kept a tail, the first
+/// kept byte may be a continuation byte whose lead byte was dropped; skip up
+/// to three of them so a split char does not become a replacement character.
+fn decode_tail(bytes: &[u8], truncated: bool) -> String {
+    let start = if truncated {
+        bytes
+            .iter()
+            .take(3)
+            .take_while(|b| (**b & 0xC0) == 0x80)
+            .count()
+    } else {
+        0
+    };
+    String::from_utf8_lossy(&bytes[start..]).to_string()
 }
 
 /// Scrub the child environment: only an explicit allowlist is passed, so

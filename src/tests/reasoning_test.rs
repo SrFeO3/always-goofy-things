@@ -96,6 +96,28 @@ fn test_api_error_msg_multibyte_payload() {
 }
 
 #[test]
+fn test_api_error_retry_classification() {
+    for (status, retryable) in [
+        (reqwest::StatusCode::BAD_REQUEST, false),
+        (reqwest::StatusCode::UNAUTHORIZED, false),
+        (reqwest::StatusCode::FORBIDDEN, false),
+        (reqwest::StatusCode::NOT_FOUND, false),
+        (reqwest::StatusCode::UNPROCESSABLE_ENTITY, false),
+        (reqwest::StatusCode::REQUEST_TIMEOUT, true),
+        (reqwest::StatusCode::TOO_MANY_REQUESTS, true),
+        (reqwest::StatusCode::INTERNAL_SERVER_ERROR, true),
+        (reqwest::StatusCode::BAD_GATEWAY, true),
+        (reqwest::StatusCode::SERVICE_UNAVAILABLE, true),
+    ] {
+        let err = crate::reasoning::api_error_msg(status, "x", "{}", true);
+        let api = err
+            .downcast_ref::<crate::reasoning::LlmHttpError>()
+            .expect("API errors must be tagged");
+        assert_eq!(api.is_retryable(), retryable, "status {status}");
+    }
+}
+
+#[test]
 fn test_extract_backend_error_shapes() {
     use serde_json::json;
     let e = |v: serde_json::Value| crate::reasoning::extract_backend_error(&v);

@@ -511,3 +511,44 @@ fn test_legacy_lines_without_session_id_still_load() {
     );
     assert_eq!(loaded[1].content, "q1");
 }
+
+#[test]
+fn test_content_blocks_round_trip() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "cb_rt";
+
+    let msg = Message {
+        role: "assistant".to_string(),
+        content: String::new(),
+        content_blocks: vec![
+            json!({"type": "thinking", "thinking": "", "signature": "sig-1"}),
+            json!({"type": "redacted_thinking", "data": "blob"}),
+        ],
+        ..Default::default()
+    };
+
+    append_message_to_session(label, &msg).unwrap();
+    let restored = load_current_session(label).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].content_blocks, msg.content_blocks,
+        "signed thinking blocks must survive persistence"
+    );
+}
+
+#[test]
+fn test_legacy_lines_without_content_blocks_still_load() {
+    let _g = PERSIST_LOCK.lock().unwrap();
+    let _d = TestDir::new();
+    let label = "cb_legacy";
+
+    let legacy = "{\"role\":\"assistant\",\"content\":\"old answer\"}\n";
+    let path = last_session_path(label).unwrap();
+    std::fs::write(&path, legacy).unwrap();
+
+    let loaded = load_current_session(label).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].content_blocks.is_empty());
+    assert_eq!(loaded[0].content, "old answer");
+}

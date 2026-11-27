@@ -38,7 +38,7 @@ pub(crate) struct MiniPolicy {
     pub mount_memory_limit: u64,
     /// Cap on bytes written through the mount per run (default 32 MiB).
     pub write_bytes_limit: u64,
-    /// Combined stdout+stderr cap, tail kept (default: `--max-tool-output-bytes`).
+    /// Combined stdout+stderr cap, tail kept (default: `--max-tool-result-bytes`).
     pub output_cap: usize,
 }
 

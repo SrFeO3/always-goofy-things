@@ -530,11 +530,15 @@ async fn test_grep_search() {
         res.get("output_bytes_omitted").is_none(),
         "normal results must not carry the omitted field"
     );
+    assert!(
+        res.get("hint").is_none(),
+        "normal results must not carry a truncation hint"
+    );
 }
 
 #[tokio::test]
 async fn test_grep_search_large_output_reports_truncated() {
-    // Backed by more than the default output cap (1 MiB; the test binary
+    // Backed by more than the default output cap (128 KiB; the test binary
     // never overrides ToolLimits) so the tail is kept and the result must
     // say truncated = true instead of silently dropping the head.
     let path = get_temp_path("grep_trunc");
@@ -555,6 +559,14 @@ async fn test_grep_search_large_output_reports_truncated() {
     assert_eq!(res["truncated"], true);
     let omitted = res["output_bytes_omitted"].as_u64().unwrap();
     assert!(omitted > 0, "omitted byte count must be reported");
+    assert!(
+        res["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--max-tool-result-bytes"),
+        "truncation must tell the model how to narrow or raise the cap: {}",
+        res["hint"]
+    );
     let matches = res["matches"].as_array().unwrap();
     assert!(
         !matches.is_empty(),
@@ -665,7 +677,19 @@ async fn test_execute_bash_output_capped() {
         stdout.len()
     );
     assert!(stdout.ends_with("xxx"), "tail must be kept");
-    assert!(stdout.len() <= 4096, "visible output must stay bounded");
+    assert!(
+        stdout.len() <= 4096,
+        "visible output must stay within the bash display cap ({} bytes)",
+        stdout.len()
+    );
+    assert_eq!(res["truncated"], true);
+    assert!(
+        res["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--max-bash-output-bytes"),
+        "truncation must mention the bash display cap"
+    );
 
     fs::remove_file(path).ok();
 }
@@ -675,9 +699,9 @@ async fn test_execute_bash_output_capped_multibyte_tail() {
     // Regression: truncating tagged output used to slice stdout at a raw
     // byte offset, which panicked when that offset split a multi-byte UTF-8
     // char (box-drawing '─', 3 bytes). The tail must keep whole chars only.
+    // 100_000 ASCII bytes followed by 100_000 '─' (300_000 bytes); the cap
+    // boundary lands inside the '─' run, i.e. mid-char.
     let path = get_temp_path("big_output_multibyte");
-    // 100_000 ASCII bytes followed by 100_000 '─' (300_000 bytes). The byte
-    // at len - 4000 lands 296_000 bytes into the '─' run, i.e. mid-char.
     let mut content = String::new();
     content.push_str(&"x".repeat(100_000));
     content.push_str(&"─".repeat(100_000));
@@ -692,7 +716,11 @@ async fn test_execute_bash_output_capped_multibyte_tail() {
         "expected truncation marker, got {} bytes",
         stdout.len()
     );
-    assert!(stdout.len() <= 4096, "visible output must stay bounded");
+    assert!(
+        stdout.len() <= 4096,
+        "visible output must stay within the bash display cap ({} bytes)",
+        stdout.len()
+    );
     assert!(stdout.ends_with('─'), "tail must end at a char boundary");
     assert!(
         !stdout.contains('\u{FFFD}'),
@@ -700,6 +728,29 @@ async fn test_execute_bash_output_capped_multibyte_tail() {
     );
 
     fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_cap_bash_stream_keeps_tail_within_budget() {
+    let marker = "[... Output truncated ...]";
+    let (text, omitted, marked) = super::cap_bash_stream("x".repeat(5000), 100, marker, false);
+    assert!(marked);
+    assert!(text.starts_with(marker));
+    assert!(text.ends_with("xxxx"));
+    assert!(text.len() <= 100, "got {} bytes", text.len());
+    assert_eq!(omitted, 5000 - (text.len() - marker.len() - 1));
+
+    // A capture-side truncation still gets a marker when the display fits.
+    let (text, omitted, marked) = super::cap_bash_stream("abc".to_string(), 100, "M", true);
+    assert!(marked);
+    assert_eq!(text, "M\nabc");
+    assert_eq!(omitted, 0);
+
+    // 0 = unlimited.
+    let (text, omitted, marked) = super::cap_bash_stream("abc".to_string(), 0, "M", false);
+    assert!(!marked);
+    assert_eq!(text, "abc");
+    assert_eq!(omitted, 0);
 }
 
 #[cfg(unix)]
@@ -1147,4 +1198,68 @@ fn test_skip_blank_empty_old_string() {
         "Should report NO_MATCH"
     );
     fs::remove_file(path).ok();
+}
+
+// ------------------------------------------------------------------
+// read_file --max-tool-result-bytes cap
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_read_file_caps_output_at_max_result_bytes() {
+    let dir = get_temp_path("read_cap");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("big.txt");
+    let body = (0..20)
+        .map(|i| format!("line_{:02}_abcdefghij\n", i))
+        .collect::<String>();
+    fs::write(&file, &body).unwrap();
+    let rel = file.to_string_lossy().to_string();
+
+    let context = ToolExecutionContext::new(None, None, None, |_| true).with_max_result_bytes(40);
+    let res = execute_tool(
+        "read_file",
+        &serde_json::json!({ "path": rel }),
+        &context,
+        None,
+    )
+    .await
+    .unwrap();
+    let content = res["content"].as_str().unwrap();
+    assert!(content.len() <= 40, "content len {} > cap", content.len());
+    assert_eq!(res["truncated"], true);
+    assert!(res["end"].as_u64().unwrap() < res["total"].as_u64().unwrap());
+    assert!(
+        res["hint"].is_string(),
+        "capped reads must explain how to continue"
+    );
+
+    // 0 = unlimited: unchanged legacy behaviour.
+    let context = ToolExecutionContext::new(None, None, None, |_| true).with_max_result_bytes(0);
+    let res = execute_tool(
+        "read_file",
+        &serde_json::json!({ "path": rel }),
+        &context,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res["truncated"], false);
+    assert_eq!(res["content"], body.trim_end_matches('\n'));
+}
+
+#[test]
+fn test_slice_lines_capped_keeps_whole_lines_and_utf8_boundaries() {
+    let lines = ["ああああ", "bbbb"];
+
+    // 5 bytes cuts inside the multi-byte first line -> a 3-byte prefix.
+    let (content, end, capped, partial) = super::slice_lines_capped(&lines, 1, 2, 5);
+    assert!(capped && partial);
+    assert_eq!(end, 1);
+    assert_eq!(content, "あ");
+
+    // 13 bytes fit the first line but not the second -> whole first line only.
+    let (content, end, capped, partial) = super::slice_lines_capped(&lines, 1, 2, 13);
+    assert!(capped && !partial);
+    assert_eq!(end, 1);
+    assert_eq!(content, "ああああ");
 }

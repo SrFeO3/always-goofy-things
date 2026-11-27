@@ -36,6 +36,12 @@ pub(crate) struct Message {
     /// `Session` (kept across `/rewind`/`/restore`); todo sub-sessions get their own.
     #[serde(skip)]
     pub(crate) session_id: String,
+    /// Anthropic assistant content blocks in response order (captured when the
+    /// message carries replayable thinking/redacted_thinking). Those blocks
+    /// carry the opaque signature/data required for verbatim replay. Never
+    /// included in non-Anthropic payloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) content_blocks: Vec<serde_json::Value>,
 }
 
 impl Default for Message {
@@ -52,6 +58,7 @@ impl Default for Message {
             tool_call_decision: None,
             attached_files: Vec::new(),
             session_id: String::new(),
+            content_blocks: Vec::new(),
         }
     }
 }
@@ -156,6 +163,11 @@ pub struct ChatRequest {
     /// (legacy models 400 on it); set by the `call_llm` retry.
     #[serde(default)]
     pub(crate) max_tokens_fallback: bool,
+    /// Anthropic only: send adaptive `thinking.block_binding` with
+    /// `prefix_mismatch_behavior: "drop_block"` plus the beta header. Set when
+    /// signed thinking blocks are replayed to the official API; see `call_llm`.
+    #[serde(default)]
+    pub(crate) anthropic_block_binding: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

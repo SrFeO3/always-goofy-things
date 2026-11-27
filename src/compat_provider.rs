@@ -103,6 +103,8 @@ struct AnthropicRequestDto {
     messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     stream: bool,
 }
 
@@ -134,11 +136,21 @@ pub fn detect_provider(url: &str) -> LlmProvider {
 
 impl ChatRequest {
     pub fn to_provider_json(&self) -> Result<serde_json::Value, serde_json::Error> {
-        let raw_messages = self
+        let mut raw_messages = self
             .messages
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
+
+        // `content_blocks` is an Anthropic-only replay record; strip it from
+        // non-Anthropic payloads so their wire format stays unchanged.
+        if self.provider != LlmProvider::Anthropic {
+            for msg in &mut raw_messages {
+                if let Some(obj) = msg.as_object_mut() {
+                    obj.remove("content_blocks");
+                }
+            }
+        }
 
         let messages =
             reformat_tool_results(&raw_messages, &self.messages, self.tool_result_format);
@@ -227,6 +239,13 @@ impl ChatRequest {
                     system: system_content,
                     messages: filtered_messages,
                     tools: anthropic_tools,
+                    // Signed thinking replay requires adaptive block_binding.
+                    thinking: self.anthropic_block_binding.then(|| {
+                        json!({
+                            "type": "adaptive",
+                            "block_binding": { "prefix_mismatch_behavior": "drop_block" }
+                        })
+                    }),
                     stream: self.stream,
                 };
                 serde_json::to_value(dto)
@@ -913,34 +932,33 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
             ]
         })
     }
-    // 2. role: "assistant" messages that contain tool_calls or reasoning_content (Assistant response: LLM -> Application -> LLM)
+    // 2. role: "assistant" messages (Assistant response: LLM -> Application -> LLM)
     //    OpenAI/Ollama: { role: "assistant", content: "...", tool_calls: [...], reasoning_content: "..." }
     //    Anthropic:     { role: "assistant", content: [
-    //        { type: "thinking", thinking: "..." },
+    //        { type: "thinking", thinking: "...", signature: "..." },
     //        { type: "text", text: "..." },
     //        { type: "tool_use", id: "...", name: "...", input: {...} }
     //      ] }
     else if role == "assistant" {
-        let has_tool_calls = msg.get("tool_calls").and_then(|v| v.as_array()).is_some();
-        let has_reasoning = msg
-            .get("reasoning_content")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty());
+        // Replay provider-native blocks when they contain signed thinking: the
+        // signature is bound to the conversation prefix and must not be
+        // rewritten. Messages without replayable thinking keep the legacy shaping.
+        if let Some(native) = msg.get("content_blocks").and_then(|v| v.as_array())
+            && blocks_have_replayable_thinking(native)
+        {
+            let blocks = replay_anthropic_blocks(native, msg.get("tool_calls"));
+            return json!({
+                "role": "assistant",
+                "content": blocks
+            });
+        }
 
-        if has_tool_calls || has_reasoning {
+        let has_tool_calls = msg.get("tool_calls").and_then(|v| v.as_array()).is_some();
+
+        if has_tool_calls {
             let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
-            // 2a. Add thinking block first if reasoning_content exists
-            if let Some(reasoning) = msg.get("reasoning_content").and_then(|v| v.as_str())
-                && !reasoning.is_empty()
-            {
-                content_blocks.push(json!({
-                    "type": "thinking",
-                    "thinking": reasoning
-                }));
-            }
-
-            // 2b. Add text content block if present
+            // Add text content block if present
             if let Some(content_str) = msg.get("content").and_then(|v| v.as_str())
                 && !content_str.is_empty()
             {
@@ -950,28 +968,11 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
                 }));
             }
 
-            // 2c. Add tool_use blocks from tool_calls array
+            // Add tool_use blocks from tool_calls array
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
-                    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Some(func) = tc.get("function") {
-                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let args = func.get("arguments");
-                        // Normalize arguments: parse JSON string to object, or use object directly
-                        let input = match args {
-                            Some(serde_json::Value::String(s)) => {
-                                serde_json::from_str(s).unwrap_or_else(|_| json!({}))
-                            }
-                            Some(v) => v.clone(),
-                            None => json!({}),
-                        };
-
-                        content_blocks.push(json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": input
-                        }));
+                    if let Some(block) = tool_use_block_from_call(tc) {
+                        content_blocks.push(block);
                     }
                 }
             }
@@ -981,7 +982,13 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
                 "content": content_blocks
             })
         } else {
-            msg.clone()
+            let mut out = msg.clone();
+            if let Some(obj) = out.as_object_mut() {
+                // Unsigned `reasoning_content` has no valid Anthropic form.
+                obj.remove("reasoning_content");
+                obj.remove("content_blocks");
+            }
+            out
         }
     } else if role == "user" {
         // User messages may have content as an array (when attachments are present).
@@ -1018,6 +1025,193 @@ fn convert_message_for_anthropic(msg: &serde_json::Value) -> serde_json::Value {
         }
     } else {
         msg.clone()
+    }
+}
+
+/// Build a `tool_use` content block from an internal (OpenAI-shaped) tool call.
+fn tool_use_block_from_call(tc: &serde_json::Value) -> Option<serde_json::Value> {
+    let func = tc.get("function")?;
+    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let input = match func.get("arguments") {
+        Some(serde_json::Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+        Some(v) => v.clone(),
+        None => json!({}),
+    };
+    Some(json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input
+    }))
+}
+
+/// Replay provider-native assistant blocks for Anthropic.
+///
+/// `thinking` and `redacted_thinking` blocks are sent back exactly as received,
+/// because their opaque `signature` / `data` is bound to the conversation prefix.
+/// If a thinking block lacks a signature (or a redacted block lacks `data`), it
+/// and every later thinking block are dropped: sending a partial sequence makes
+/// the API reject the request ("The `thinking` block that preceded this one ...
+/// is missing").
+///
+/// `tool_use` blocks are rebuilt from the finalized internal `tool_calls` so that
+/// their ids always match the `tool_result` blocks that follow. Text blocks are
+/// replayed verbatim.
+fn replay_anthropic_blocks(
+    native: &[serde_json::Value],
+    tool_calls: Option<&serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let calls = tool_calls.and_then(|v| v.as_array());
+    let mut call_idx = 0usize;
+    let mut thinking_ok = true;
+    let mut out = Vec::with_capacity(native.len());
+
+    for block in native {
+        match block.get("type").and_then(|v| v.as_str()) {
+            Some("thinking") => {
+                let signed = block
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                if thinking_ok && signed {
+                    out.push(block.clone());
+                } else {
+                    thinking_ok = false;
+                }
+            }
+            Some("redacted_thinking") => {
+                let has_data = block
+                    .get("data")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                if thinking_ok && has_data {
+                    out.push(block.clone());
+                } else {
+                    thinking_ok = false;
+                }
+            }
+            Some("tool_use") => {
+                if let Some(tc) = calls.and_then(|c| c.get(call_idx)) {
+                    call_idx += 1;
+                    if let Some(rebuilt) = tool_use_block_from_call(tc) {
+                        out.push(rebuilt);
+                    }
+                }
+                // No matching finalized call: drop the block so the request
+                // never carries a `tool_use` without its `tool_result`.
+            }
+            _ => out.push(block.clone()),
+        }
+    }
+
+    out
+}
+
+/// True when an assistant content block is a thinking block that can be
+/// replayed: a `thinking` block with a non-empty `signature`, or a
+/// `redacted_thinking` block with non-empty `data`.
+fn is_replayable_thinking_block(block: &serde_json::Value) -> bool {
+    match block.get("type").and_then(|v| v.as_str()) {
+        Some("thinking") => block
+            .get("signature")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty()),
+        Some("redacted_thinking") => block
+            .get("data")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty()),
+        _ => false,
+    }
+}
+
+/// True when any of `blocks` is a replayable thinking / redacted_thinking block.
+pub(crate) fn blocks_have_replayable_thinking(blocks: &[serde_json::Value]) -> bool {
+    blocks.iter().any(is_replayable_thinking_block)
+}
+
+/// True when any assistant message carries a replayable signed thinking (or
+/// redacted-thinking) block. Used to decide whether to send Anthropic's
+/// `block_binding` option and its beta header.
+pub(crate) fn has_signed_thinking(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|m| m.role == "assistant" && blocks_have_replayable_thinking(&m.content_blocks))
+}
+
+/// Accumulates Anthropic assistant content blocks from SSE events in response
+/// order, appending thinking/text deltas and recording `signature_delta`.
+/// Tool input is not stored: replay rebuilds `tool_use` from `tool_calls`.
+#[derive(Default)]
+pub(crate) struct AnthropicBlockAccumulator {
+    blocks: std::collections::BTreeMap<usize, serde_json::Value>,
+}
+
+impl AnthropicBlockAccumulator {
+    /// Apply one raw Anthropic SSE event.
+    pub(crate) fn handle(&mut self, event: &serde_json::Value) {
+        match event.get("type").and_then(|v| v.as_str()) {
+            Some("content_block_start") => {
+                let Some(index) = event.get("index").and_then(|v| v.as_u64()) else {
+                    return;
+                };
+                let Some(block) = event.get("content_block") else {
+                    return;
+                };
+                self.blocks.insert(index as usize, block.clone());
+            }
+            Some("content_block_delta") => {
+                let Some(index) = event.get("index").and_then(|v| v.as_u64()) else {
+                    return;
+                };
+                let Some(delta) = event.get("delta") else {
+                    return;
+                };
+                let idx = index as usize;
+                match delta.get("type").and_then(|v| v.as_str()) {
+                    Some("thinking_delta") => {
+                        self.append_string(idx, "thinking", delta.get("thinking"))
+                    }
+                    Some("text_delta") => self.append_string(idx, "text", delta.get("text")),
+                    Some("signature_delta") => {
+                        if let Some(sig) = delta.get("signature").and_then(|v| v.as_str())
+                            && let Some(block) = self.blocks.get_mut(&idx)
+                            && let Some(obj) = block.as_object_mut()
+                        {
+                            obj.insert("signature".to_string(), json!(sig));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn append_string(&mut self, idx: usize, field: &str, value: Option<&serde_json::Value>) {
+        let Some(value) = value.and_then(|v| v.as_str()) else {
+            return;
+        };
+        if value.is_empty() {
+            return;
+        }
+        let Some(block) = self.blocks.get_mut(&idx) else {
+            return;
+        };
+        let Some(obj) = block.as_object_mut() else {
+            return;
+        };
+        match obj.get_mut(field) {
+            Some(serde_json::Value::String(s)) => s.push_str(value),
+            _ => {
+                obj.insert(field.to_string(), json!(value));
+            }
+        }
+    }
+
+    /// Consume the accumulator, returning blocks in response order.
+    pub(crate) fn into_blocks(self) -> Vec<serde_json::Value> {
+        self.blocks.into_values().collect()
     }
 }
 

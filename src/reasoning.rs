@@ -6,7 +6,7 @@
 use std::io;
 use std::io::Write;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use futures_util::StreamExt;
 use serde_json::json;
 
@@ -281,7 +281,8 @@ pub(crate) async fn run_reasoning_loop<'a>(
     let tool_context =
         tools::ToolExecutionContext::new(db_ctx.as_ref(), kb_ctx, Some(&calc_ledger), |name| {
             crate::session::tool_enabled(config, tool_policy, name)
-        });
+        })
+        .with_max_result_bytes(config.max_tool_result_bytes);
     'reasoning_loop: loop {
         reasoning_turn += 1;
         if config.max_reasoning_turns > 0 && reasoning_turn > config.max_reasoning_turns {
@@ -340,6 +341,18 @@ pub(crate) async fn run_reasoning_loop<'a>(
                 status: CallStatus::HttpError,
             };
             record_and_save(config, metrics, rec, 0);
+            // Retrying a deterministic 4xx just burns time and rate limit.
+            if let Some(api_err) = e.downcast_ref::<LlmHttpError>()
+                && !api_err.is_retryable()
+            {
+                println!(
+                    "\x1b[91m⚠️ LLM API Error (HTTP {}; not retried): {}\x1b[0m",
+                    api_err.status, e
+                );
+                println!("Conversation history preserved. Fix the request or start a new session.");
+                end_reason = EndReason::LlmError;
+                break 'reasoning_loop;
+            }
             llm_error_count += 1;
             let limit = settings.max_reasoning_llm_errors;
             if limit > 0 && llm_error_count >= limit {
@@ -644,6 +657,31 @@ pub(crate) async fn run_reasoning_loop<'a>(
     Ok(end_reason)
 }
 
+/// LLM provider HTTP error, tagged so the retry loop can skip deterministic
+/// 4xx responses (retrying them only wastes time and rate limit).
+#[derive(Debug)]
+pub(crate) struct LlmHttpError {
+    pub(crate) status: reqwest::StatusCode,
+    message: String,
+}
+
+impl LlmHttpError {
+    /// Timeouts, rate limits, and 5xx are worth retrying; other 4xx are not.
+    pub(crate) fn is_retryable(&self) -> bool {
+        self.status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || self.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || self.status.is_server_error()
+    }
+}
+
+impl std::fmt::Display for LlmHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LlmHttpError {}
+
 /// Format a failed-call error: status, raw response body, and the request
 /// payload (truncated when long and verbose < 2).
 fn api_error_msg(
@@ -670,12 +708,13 @@ fn api_error_msg(
     } else {
         req_json.to_string()
     };
-    anyhow!(
-        "API Error ({})\nResponse: {}\nRequest Payload: {}",
+    anyhow::Error::new(LlmHttpError {
         status,
-        body,
-        payload_display
-    )
+        message: format!(
+            "API Error ({})\nResponse: {}\nRequest Payload: {}",
+            status, body, payload_display
+        ),
+    })
 }
 
 pub(crate) async fn call_llm(
@@ -694,6 +733,16 @@ pub(crate) async fn call_llm(
     );
     let messages_vec = messages.to_vec();
 
+    // Replaying signed thinking to the official API opts into `block_binding`:
+    // a changed prefix drops the invalidated blocks instead of failing the
+    // request. Gateways are excluded because they may not implement the option.
+    let anthropic_block_binding = provider == LlmProvider::Anthropic
+        && config
+            .llm_url
+            .to_ascii_lowercase()
+            .contains("api.anthropic.com")
+        && compat_provider::has_signed_thinking(&messages_vec);
+
     let mut req = ChatRequest {
         provider,
         model: settings.llm_model.clone(),
@@ -703,6 +752,7 @@ pub(crate) async fn call_llm(
         tools,
         tool_result_format: config.tool_result_format,
         max_tokens_fallback: false,
+        anthropic_block_binding,
     };
     let mut req_value = req.to_provider_json()?;
     let mut req_json = serde_json::to_string(&req_value)?;
@@ -784,6 +834,14 @@ pub(crate) async fn call_llm(
                 }
                 builder.header("Authorization", format!("Bearer {}", api_key))
             }
+        } else {
+            builder
+        };
+
+        // `thinking.block_binding` is beta-gated; send the header on every
+        // request that carries the option (including retries).
+        let builder = if anthropic_block_binding {
+            builder.header("anthropic-beta", "thinking-binding-controls-2026-08-01")
         } else {
             builder
         };
@@ -881,6 +939,9 @@ pub(crate) async fn call_llm(
     // Raw bytes received across chunks (SSE overhead included).
     let mut response_bytes: usize = 0;
     let mut anth_tool_index = 0;
+    // Anthropic only: preserve the raw assistant content blocks (incl. the
+    // opaque thinking signatures) so they can be replayed verbatim.
+    let mut anth_blocks = compat_provider::AnthropicBlockAccumulator::default();
     let mut used_nonstandard_format = false;
     // Per-call stream health, reported on empty responses (verbose >= 1).
     let mut done_seen = false;
@@ -950,6 +1011,7 @@ pub(crate) async fn call_llm(
                 // Convert provider events to the internal OpenAI delta format
                 match provider {
                     LlmProvider::Anthropic => {
+                        anth_blocks.handle(&json);
                         json = convert_anth_to_openai_format(json, &mut anth_tool_index);
                     }
                     LlmProvider::OpenAiResponses => {
@@ -994,7 +1056,9 @@ pub(crate) async fn call_llm(
                     .get("reasoning_content")
                     .or_else(|| msg_base.get("reasoning"));
 
-                if let Some(reasoning) = reasoning_val.and_then(|v| v.as_str()) {
+                if let Some(reasoning) = reasoning_val.and_then(|v| v.as_str())
+                    && !reasoning.is_empty()
+                {
                     if !is_thinking {
                         print!("\n{}[Thinking]\n", C_DIM_GREEN);
                         is_thinking = true;
@@ -1061,6 +1125,7 @@ pub(crate) async fn call_llm(
                 }
                 match provider {
                     LlmProvider::Anthropic => {
+                        anth_blocks.handle(&json);
                         json = convert_anth_to_openai_format(json, &mut anth_tool_index);
                     }
                     LlmProvider::OpenAiResponses => {
@@ -1085,6 +1150,7 @@ pub(crate) async fn call_llm(
                     .get("reasoning_content")
                     .or_else(|| msg_base.get("reasoning"))
                     .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
                 {
                     full_message
                         .reasoning_content
@@ -1106,6 +1172,14 @@ pub(crate) async fn call_llm(
     // Post-process tool_calls assembled from SSE streaming:
     // - Fill in missing id/function.name (infer from args for index 0)
     // - Filter out unrecoverable calls (empty name or unparseable arguments)
+    if provider == LlmProvider::Anthropic {
+        let blocks = anth_blocks.into_blocks();
+        // Keep the raw record only when it carries replayable thinking;
+        // otherwise it would duplicate text/tool arguments in the session JSONL.
+        if compat_provider::blocks_have_replayable_thinking(&blocks) {
+            full_message.content_blocks = blocks;
+        }
+    }
     if let Some(tool_calls) = &mut full_message.tool_calls {
         post_process_tool_calls(
             tool_calls,

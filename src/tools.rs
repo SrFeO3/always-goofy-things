@@ -71,6 +71,8 @@ where
     db_ctx: Option<&'a tools_data::DbContext>,
     kb_ctx: KbCtxOpt<'a>,
     calc_ledger: Option<&'a tools_calc::CalcLedger>,
+    /// Byte cap for `read_file` output; `0` = unlimited.
+    max_result_bytes: usize,
     is_enabled: F,
 }
 
@@ -88,8 +90,16 @@ where
             db_ctx,
             kb_ctx,
             calc_ledger,
+            max_result_bytes: 0,
             is_enabled,
         }
+    }
+
+    /// Cap `read_file` output (`0` = unlimited). Defaults to unlimited so
+    /// tests and non-CLI callers keep the previous behaviour.
+    pub(crate) fn with_max_result_bytes(mut self, max_result_bytes: usize) -> Self {
+        self.max_result_bytes = max_result_bytes;
+        self
     }
 }
 
@@ -260,7 +270,7 @@ pub fn get_tool_definitions(
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file, including text, images, audio, and PDFs. start/end form a 1-based inclusive range: line numbers for text files, page numbers for PDF files. Omit start/end to read the whole file. Use this tool before editing files or investigating code.",
+                "description": "Read the contents of a file, including text, images, audio, and PDFs. start/end form a 1-based inclusive range: line numbers for text files, page numbers for PDF files. Omit start/end to read the whole file; large reads are capped, so prefer start/end for large files. Use this tool before editing files or investigating code.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -307,7 +317,7 @@ pub fn get_tool_definitions(
             "type": "function",
             "function": {
                 "name": "grep_search",
-                "description": "Search for text patterns across files in the workspace. Use this tool to locate functions, classes, symbols, or error messages before reading or editing files. This does NOT search for filenames.",
+                "description": "Search for text patterns across files in the workspace. Use this tool to locate functions, classes, symbols, or error messages before reading or editing files. This does NOT search for filenames. Results are capped; narrow the path or query for large searches.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -322,7 +332,7 @@ pub fn get_tool_definitions(
             "type": "function",
             "function": {
                 "name": "execute_bash",
-                "description": "Execute a shell command in a non-interactive bash environment. Use this tool to run tests, build projects, and execute development commands.",
+                "description": "Execute a shell command in a non-interactive bash environment. Use this tool to run tests, build projects, and execute development commands. Output is capped; use targeted commands or redirect large output to a file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -446,7 +456,7 @@ where
     }
 
     match name {
-        "read_file" => execute_read_file(args),
+        "read_file" => execute_read_file_with_limit(args, context.max_result_bytes),
         "write_file" => execute_write_file(args),
         "str_replace_editor" => execute_str_replace(args),
         "grep_search" => execute_grep_search(args).await,
@@ -729,7 +739,77 @@ pub async fn confirm_execute_tool(
     }
 }
 
-fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
+/// Slice `lines[start-1..end]` (1-based inclusive) and cap the joined text to
+/// `max_bytes` (`0` = unlimited), ending on a line boundary.
+///
+/// Returns `(content, last_included_line, capped, partial_line)`. `partial_line`
+/// is true only when the first line alone exceeds the cap, in which case
+/// `content` is a UTF-8-safe prefix of that line.
+fn slice_lines_capped(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    max_bytes: usize,
+) -> (String, usize, bool, bool) {
+    if max_bytes == 0 {
+        return (lines[(start - 1)..end].join("\n"), end, false, false);
+    }
+    let mut out = String::new();
+    let mut last = start - 1;
+    let mut first = true;
+    for (idx, line) in lines.iter().enumerate().take(end).skip(start - 1) {
+        let sep = if first { 0 } else { 1 };
+        if out.len() + sep + line.len() > max_bytes {
+            if first {
+                let mut cut = max_bytes.min(line.len());
+                while cut > 0 && !line.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                out.push_str(&line[..cut]);
+                last = idx;
+                return (out, last + 1, true, true);
+            }
+            return (out, last + 1, true, false);
+        }
+        if !first {
+            out.push('\n');
+        }
+        out.push_str(line);
+        first = false;
+        last = idx;
+    }
+    (out, last + 1, false, false)
+}
+
+/// Cap `text` to `max_bytes` (`0` = unlimited) on a UTF-8 boundary.
+fn cap_text_bytes(text: String, max_bytes: usize) -> (String, bool) {
+    if max_bytes == 0 || text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    (text[..cut].to_string(), true)
+}
+
+fn ensure_read_size(len: usize, max_bytes: usize, path: &str) -> Result<()> {
+    if max_bytes > 0 && len > max_bytes {
+        return Err(anyhow!(
+            "[FILE_TOO_LARGE] read_file output for '{}' is {} bytes (limit: {}). \
+             Use a smaller file or raise --max-tool-result-bytes.",
+            path,
+            len,
+            max_bytes
+        ));
+    }
+    Ok(())
+}
+
+fn execute_read_file_with_limit(
+    args: &serde_json::Value,
+    max_result_bytes: usize,
+) -> Result<serde_json::Value> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow!("[MISSING_PARAMETER] path is required"))?;
@@ -747,34 +827,54 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             // (never clamped) so the LLM can correct them instead of getting
             // a silently widened or empty slice.
             let start = args["start"].as_u64().map(|v| v as usize).unwrap_or(1);
-            let end = args["end"]
+            let requested_end = args["end"]
                 .as_u64()
                 .map(|v| v as usize)
                 .unwrap_or(total_lines);
-            if start < 1 || start > end || start > total_lines || end > total_lines {
+            if start < 1
+                || start > requested_end
+                || start > total_lines
+                || requested_end > total_lines
+            {
                 return Err(anyhow!(
                     "[INVALID_ARGUMENTS] Invalid line range: start/end must satisfy 1 <= start <= end <= total (total lines: {})",
                     total_lines
                 ));
             }
 
-            let sliced_content = lines[(start - 1)..end].join("\n");
-            let truncated = start > 1 || end < total_lines;
-
-            Ok(json!({
+            let range_truncated = start > 1 || requested_end < total_lines;
+            let (sliced_content, end, capped, partial_line) =
+                slice_lines_capped(&lines, start, requested_end, max_result_bytes);
+            let mut result = json!({
                 "path": path,
                 "start": start,
                 "end": end,
                 "total": total_lines,
                 "unit": "lines",
                 "content": sliced_content,
-                "truncated": truncated
-            }))
+                "truncated": range_truncated || capped
+            });
+            if capped {
+                result["hint"] = json!(if partial_line {
+                    format!(
+                        "Line {} exceeds --max-tool-result-bytes ({}); use grep_search for large single-line files.",
+                        start, max_result_bytes
+                    )
+                } else {
+                    format!(
+                        "Output capped at {} bytes; continue with start={}.",
+                        max_result_bytes,
+                        end + 1
+                    )
+                });
+            }
+            Ok(result)
         }
         FileType::Image { mime } => {
             reject_range(args)?;
             let data_url = file::convert_image_to_data_url(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
+            ensure_read_size(data_url.len(), max_result_bytes, path)?;
             Ok(json!({
                 "path": path,
                 "content_type": "image",
@@ -787,6 +887,7 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             let (_format, b64) = file::convert_audio_to_base64(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
             let mime = audio_format_to_mime(&format);
+            ensure_read_size(b64.len(), max_result_bytes, path)?;
             Ok(json!({
                 "path": path,
                 "content_type": "audio",
@@ -807,21 +908,30 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             }
             let result = crate::file_pdf::extract_text_from_pdf(path, Some((start, end)))
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] {}", e))?;
-            Ok(json!({
+            let (text, capped) = cap_text_bytes(result.text, max_result_bytes);
+            let mut out = json!({
                 "path": path,
                 "start": result.start,
                 "end": result.end,
                 "total": result.page_count,
                 "unit": "pages",
-                "content": result.text,
-                "truncated": result.start > 1 || result.end < result.page_count
-            }))
+                "content": text,
+                "truncated": result.start > 1 || result.end < result.page_count || capped
+            });
+            if capped {
+                out["hint"] = json!(format!(
+                    "Output capped at {} bytes; narrow the page range.",
+                    max_result_bytes
+                ));
+            }
+            Ok(out)
         }
         FileType::Document { mime } => {
             reject_range(args)?;
             let bytes = fs::read(path)
                 .map_err(|e| anyhow!("[FILE_READ_FAILED] Could not read '{}': {}", path, e))?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            ensure_read_size(b64.len(), max_result_bytes, path)?;
             Ok(json!({
                 "path": path,
                 "content_type": "pdf",
@@ -830,6 +940,12 @@ fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
             }))
         }
     }
+}
+
+/// Test helper: unlimited read (the tool path always supplies a limit).
+#[cfg(test)]
+fn execute_read_file(args: &serde_json::Value) -> Result<serde_json::Value> {
+    execute_read_file_with_limit(args, 0)
 }
 
 /// Reject start/end for file types without a range concept: images, audio,
@@ -1300,9 +1416,16 @@ async fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Val
         crate::tools_process::run_captured("grep", &["-rnE", query, search_path], "GREP").await?;
     // Exit code 1 means "no matches" (not an error); output is parsed below.
 
+    // The cap keeps the tail; drop the first (possibly partial) match line.
+    let stdout = if output.stdout_truncated {
+        output.stdout.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        output.stdout.as_str()
+    };
+
     let mut matches = Vec::new();
 
-    for line in output.stdout.lines() {
+    for line in stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
         if parts.len() == 3
             && let Ok(line_num) = parts[1].parse::<usize>()
@@ -1326,8 +1449,45 @@ async fn execute_grep_search(args: &serde_json::Value) -> Result<serde_json::Val
             "output_bytes_omitted".to_string(),
             json!(output.stdout_omitted),
         );
+        let cap = crate::tools_process::tool_limits().max_output_bytes;
+        result.insert(
+            "hint".to_string(),
+            json!(if cap == 0 {
+                "Results were cut short; narrow the path or query.".to_string()
+            } else {
+                format!(
+                    "Results capped at {cap} bytes; narrow the path or query, or raise --max-tool-result-bytes."
+                )
+            }),
+        );
     }
     Ok(json!(result))
+}
+
+/// Cap one `execute_bash` stream for display, keeping the tail. `cap` = 0
+/// means unlimited; the marker is still added when the capture layer already
+/// truncated the stream. Returns `(text, bytes dropped from raw, marker_added)`.
+fn cap_bash_stream(
+    raw: String,
+    cap: usize,
+    marker: &str,
+    force_marker: bool,
+) -> (String, usize, bool) {
+    let over = cap > 0 && raw.len() > cap;
+    if !over && !force_marker {
+        return (raw, 0, false);
+    }
+    if cap == 0 {
+        return (format!("{marker}\n{raw}"), 0, true);
+    }
+    let marker_len = marker.len() + 1; // marker + newline
+    let keep = cap.saturating_sub(marker_len).min(raw.len());
+    let mut start = raw.len() - keep;
+    while start < raw.len() && !raw.is_char_boundary(start) {
+        start += 1;
+    }
+    let omitted = start;
+    (format!("{marker}\n{}", &raw[start..]), omitted, true)
 }
 
 async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
@@ -1364,44 +1524,69 @@ async fn execute_bash(args: &serde_json::Value) -> Result<serde_json::Value> {
     }
 
     let output = crate::tools_process::run_captured("bash", &["-c", cmd_trim], "BASH").await?;
-    let stdout_raw = output.stdout;
-    let stderr_raw = output.stderr;
-    let exit_code = output.exit_code;
-    let signal = output.signal;
+    let crate::tools_process::CapturedOutput {
+        stdout: stdout_raw,
+        stderr: stderr_raw,
+        exit_code,
+        signal,
+        stdout_truncated,
+        stderr_truncated,
+        stdout_omitted,
+        stderr_omitted,
+    } = output;
 
-    // Optimized Truncation: Keep the end of output as per spec. When the
-    // capture layer cut the stream (cap overflow, or a background grandchild
-    // held the pipe open) but the visible tail is short, say so instead of
-    // looking like a clean EOF.
-    let stdout = if stdout_raw.len() > 4096 {
-        let mut start = stdout_raw.len() - 4000;
-        while !stdout_raw.is_char_boundary(start) {
-            start += 1;
-        }
-        format!("[... Output truncated ...]\n{}", &stdout_raw[start..])
-    } else if output.stdout_truncated {
-        format!("[... Output truncated ...]\n{}", stdout_raw)
-    } else {
-        stdout_raw
-    };
-    let stderr = if stderr_raw.len() > 4096 {
-        let mut start = stderr_raw.len() - 4000;
-        while !stderr_raw.is_char_boundary(start) {
-            start += 1;
-        }
-        format!("[... stderr truncated ...]\n{}", &stderr_raw[start..])
-    } else if output.stderr_truncated {
-        format!("[... stderr truncated ...]\n{}", stderr_raw)
-    } else {
-        stderr_raw
-    };
+    // The capture layer keeps the tail; apply the smaller bash display cap so
+    // a short visible tail is not mistaken for a clean EOF.
+    let limits = crate::tools_process::tool_limits();
+    let (stdout, stdout_display_omitted, stdout_marked) = cap_bash_stream(
+        stdout_raw,
+        limits.bash_visible_bytes,
+        "[... Output truncated ...]",
+        stdout_truncated,
+    );
+    let (stderr, stderr_display_omitted, stderr_marked) = cap_bash_stream(
+        stderr_raw,
+        limits.bash_visible_bytes,
+        "[... stderr truncated ...]",
+        stderr_truncated,
+    );
 
-    Ok(json!({
+    let capture_truncated = stdout_truncated || stderr_truncated;
+    let display_truncated = stdout_display_omitted > 0 || stderr_display_omitted > 0;
+    let truncated = stdout_marked || stderr_marked;
+    let mut result = json!({
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": exit_code,
         "signal": signal,
-    }))
+        "truncated": truncated,
+    });
+    if stdout_truncated || stdout_display_omitted > 0 {
+        result["stdout_bytes_omitted"] = json!(stdout_omitted + stdout_display_omitted as u64);
+    }
+    if stderr_truncated || stderr_display_omitted > 0 {
+        result["stderr_bytes_omitted"] = json!(stderr_omitted + stderr_display_omitted as u64);
+    }
+    if truncated {
+        let mut parts: Vec<String> = Vec::new();
+        if capture_truncated {
+            parts.push(format!(
+                "capture limit {} bytes (--max-tool-result-bytes)",
+                limits.max_output_bytes
+            ));
+        }
+        if display_truncated {
+            parts.push(format!(
+                "display limit {} bytes (--max-bash-output-bytes)",
+                limits.bash_visible_bytes
+            ));
+        }
+        result["hint"] = json!(format!(
+            "Output was truncated by the {}. Narrow the command or raise the relevant --max option.",
+            parts.join(" and ")
+        ));
+    }
+    Ok(result)
 }
 
 async fn execute_fetch_web(args: &serde_json::Value) -> Result<serde_json::Value> {

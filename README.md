@@ -52,12 +52,13 @@ Options can be set via environment variables or command-line flags (flags take p
 | `-m, --llm-model <MODEL>` | `LLM_MODEL` | LLM model name to use. | `gemma4:12b` |
 | `-k, --llm-api-key <KEY>` | `LLM_API_KEY` | API key for authentication. | (none) |
 | `-r, --llm-rpm <NUM>` | `LLM_RPM` | Maximum requests per minute for the LLM API. | `0` (unlimited) |
-| `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `16384` |
+| `-T, --max-output-tokens <NUM>` | `MAX_OUTPUT_TOKENS` | Maximum output tokens per LLM request. | `32768` |
 | `-E, --max-reasoning-empty-responses <NUM>` | `MAX_REASONING_EMPTY_RESPONSES` | Stop after N consecutive empty LLM responses in the reasoning loop (`0` = unlimited). | `2` |
 | `--max-reasoning-llm-errors <NUM>` | `MAX_REASONING_LLM_ERRORS` | Retry transient LLM connection/API errors with exponential backoff (1s→30s); stop after N consecutive failures (`0` = unlimited). | `5` |
 | `--max-reasoning-turns <NUM>` | `MAX_REASONING_TURNS` | Max LLM calls per user message (`0` = unlimited). | `30` |
 | `--max-replan-attempts <NUM>` | `MAX_REPLAN_ATTEMPTS` | Todo mode 2: stop after N consecutive replan rounds without reducing unchecked tasks (`0` = unlimited). | `3` |
-| `--max-tool-output-bytes <NUM>` | `MAX_TOOL_OUTPUT_BYTES` | Maximum bytes captured for `execute_bash` / `grep_search` (per output stream: stdout and stderr each); excess output keeps the tail (`0` = unlimited). `mini_python_interpreter` applies the same value to its stdout and stderr **combined**. | `1048576` |
+| `--max-tool-result-bytes <NUM>` | `MAX_TOOL_RESULT_BYTES` | Maximum bytes per tool result (`read_file` content and `grep_search` output; `execute_bash` per stream: stdout/stderr each; `0` = unlimited). Excess output keeps the tail; `read_file` text is capped at a line boundary and larger non-text reads are rejected. `mini_python_interpreter` applies it to stdout+stderr combined. | `131072` |
+| `--max-bash-output-bytes <NUM>` | `MAX_BASH_OUTPUT_BYTES` | Maximum visible bytes per stream (stdout/stderr each) returned by `execute_bash` (`0` = unlimited). Excess keeps the tail and is marked truncated. Capture is still bounded by `--max-tool-result-bytes`. | `4096` |
 | `--tool-timeout-secs <NUM>` | `TOOL_TIMEOUT_SECS` | Wall-clock timeout in seconds for `execute_bash` / `grep_search` (`0` = unlimited). | `30` |
 | `-R, --tool-result-format <FORMAT>` | `TOOL_RESULT_FORMAT` | How tool results are structured when sent to the LLM. | `json_string` |
 | `--only-tools <NAMES>` | `ONLY_TOOLS` | Only these AI tools are enabled (comma-separated or repeated). Unset = all tools. Disabled tools are hidden from the LLM and refuse to execute. | (all) |
@@ -76,7 +77,7 @@ Controls which provider-specific API format is used. If not set, the provider is
 - `openai` - OpenAI API format (Chat Completions). Endpoint: `/v1/chat/completions`
 - `openai-responses` - OpenAI API format (Responses). Endpoint: `/v1/responses`
 - `ollama` - Ollama API format. Endpoint: `/api/chat`
-- `anthropic` - Anthropic-compatible API format. Endpoint: `/v1/messages` (gratuitously dissimilar).
+- `anthropic` - Anthropic-compatible API format. Endpoint: `/v1/messages` (gratuitously dissimilar). Signed `thinking` / `redacted_thinking` blocks are stored and replayed verbatim so multi-turn tool use keeps its reasoning (required by Claude Sonnet 5.5 and later). When calling the official API, the request also enables `thinking.block_binding.prefix_mismatch_behavior = "drop_block"` with the `thinking-binding-controls-2026-08-01` beta header, so a changed prefix (`system`, `tools`, or an earlier message) drops the affected reasoning instead of failing with `Invalid signature`.
 
 ### Provider Extras (`PROVIDER_EXTRAS`)
 

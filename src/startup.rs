@@ -181,7 +181,7 @@ pub struct Config {
     pub llm_rpm: u32,
 
     /// Maximum output tokens per LLM request
-    #[arg(short = 'T', long, env = "MAX_OUTPUT_TOKENS", default_value_t = 16384)]
+    #[arg(short = 'T', long, env = "MAX_OUTPUT_TOKENS", default_value_t = 32768)]
     pub max_output_tokens: u32,
 
     /// Stop after N consecutive empty LLM responses in the reasoning loop (0 = unlimited)
@@ -242,10 +242,23 @@ pub struct Config {
     #[arg(long, env = "MAX_REPLAN_ATTEMPTS", default_value_t = 3)]
     pub max_replan_attempts: u32,
 
-    /// Maximum bytes captured per output stream (stdout / stderr) for
-    /// execute_bash / grep_search; excess output keeps the tail (0 = unlimited).
-    #[arg(long, env = "MAX_TOOL_OUTPUT_BYTES", default_value_t = 1048576)]
-    pub max_tool_output_bytes: usize,
+    /// Maximum bytes per tool result (read_file content, execute_bash /
+    /// grep_search output, mini_python stdout+stderr). Excess keeps the tail;
+    /// read_file text is capped at a line boundary and larger non-text reads
+    /// are rejected (0 = unlimited).
+    #[arg(
+        long,
+        env = "MAX_TOOL_RESULT_BYTES",
+        default_value_t = 131072,
+        aliases = ["max-tool-output-bytes", "max-read-bytes"]
+    )]
+    pub max_tool_result_bytes: usize,
+
+    /// Maximum visible bytes per stream (stdout / stderr each) returned by
+    /// execute_bash; excess keeps the tail and is marked truncated
+    /// (0 = unlimited). Capture is still bounded by --max-tool-result-bytes.
+    #[arg(long, env = "MAX_BASH_OUTPUT_BYTES", default_value_t = 4096)]
+    pub max_bash_output_bytes: usize,
 
     /// Wall-clock timeout in seconds for execute_bash / grep_search (0 = unlimited).
     #[arg(long, env = "TOOL_TIMEOUT_SECS", default_value_t = 30)]
@@ -586,7 +599,8 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     // validation and child-process hardening.
     crate::tools::set_workspace_root(current_dir.clone());
     crate::tools_process::set_tool_limits(crate::tools_process::ToolLimits {
-        max_output_bytes: config.max_tool_output_bytes,
+        max_output_bytes: config.max_tool_result_bytes,
+        bash_visible_bytes: config.max_bash_output_bytes,
         tool_timeout_secs: config.tool_timeout_secs,
     });
 
@@ -620,7 +634,8 @@ pub fn print_startup_info(config: &Config, provider: &LlmProvider) -> Result<std
     );
     println!("  max-reasoning-turns: {}", config.max_reasoning_turns);
     println!("  max-replan-attempts: {}", config.max_replan_attempts);
-    println!("  max-tool-output-bytes: {}", config.max_tool_output_bytes);
+    println!("  max-tool-result-bytes: {}", config.max_tool_result_bytes);
+    println!("  max-bash-output-bytes: {}", config.max_bash_output_bytes);
     println!("  tool-timeout-secs   : {}", config.tool_timeout_secs);
     println!(
         "  mini-python-auto-confirm: {}",

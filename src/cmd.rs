@@ -604,7 +604,7 @@ fn handle_config(arg: Option<&str>, settings: &mut Settings) -> Result<()> {
         println!("    \x1b[36mv\x1b[0m   - verbose-level     (0-4)");
         println!("    \x1b[36mp\x1b[0m   - pretty-level       (0-2)");
         println!("    \x1b[36mr\x1b[0m   - llm-rpm            (0 = unlimited)");
-        println!("    \x1b[36mt\x1b[0m   - max-output-tokens  (default: 16384)");
+        println!("    \x1b[36mt\x1b[0m   - max-output-tokens  (default: 32768)");
         println!(
             "    \x1b[36me\x1b[0m   - max-reasoning-empty-responses (default: 2, 0 = unlimited)"
         );

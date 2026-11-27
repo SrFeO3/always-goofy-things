@@ -210,6 +210,7 @@ fn sample_request(provider: LlmProvider) -> ChatRequest {
         messages,
         tool_result_format: ToolResultFormat::JsonString,
         max_tokens_fallback: false,
+        anthropic_block_binding: false,
     }
 }
 
@@ -462,6 +463,7 @@ fn parallel_tool_request() -> ChatRequest {
         messages,
         tool_result_format: ToolResultFormat::JsonString,
         max_tokens_fallback: false,
+        anthropic_block_binding: false,
     }
 }
 
@@ -563,6 +565,7 @@ fn tool_round_trip_request(provider: LlmProvider) -> ChatRequest {
         ],
         tool_result_format: ToolResultFormat::JsonString,
         max_tokens_fallback: false,
+        anthropic_block_binding: false,
     }
 }
 
@@ -953,4 +956,333 @@ fn test_detect_provider_routes_deepseek_anthropic_endpoint() {
         detect_provider("https://api.deepseek.com"),
         LlmProvider::OpenAi
     );
+}
+
+// ------------------------------------------------------------------
+// Anthropic thinking-block preservation (signatures / redacted_thinking)
+// ------------------------------------------------------------------
+
+/// Anthropic request replaying a signed thinking block followed by a tool call
+/// and its result, shaped exactly like `run_reasoning_loop` produces.
+fn signed_thinking_request() -> ChatRequest {
+    ChatRequest {
+        provider: LlmProvider::Anthropic,
+        model: "claude-sonnet-5-5".to_string(),
+        max_output_tokens: 4096,
+        tools: vec![],
+        stream: true,
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: "sys".to_string(),
+                ..Default::default()
+            },
+            Message {
+                role: "user".to_string(),
+                content: "read a.txt".to_string(),
+                ..Default::default()
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "a.txt" }),
+                    },
+                    thought_signature: None,
+                }]),
+                content_blocks: vec![
+                    json!({"type": "thinking", "thinking": "", "signature": "sig-1"}),
+                    json!({
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "read_file",
+                        "input": {"path": "a.txt"}
+                    }),
+                ],
+                ..Default::default()
+            },
+            Message {
+                role: "tool".to_string(),
+                content: r#"{"status":"ok"}"#.to_string(),
+                tool_call_id: Some("call_1".to_string()),
+                tool_name: Some("read_file".to_string()),
+                ..Default::default()
+            },
+        ],
+        tool_result_format: ToolResultFormat::JsonString,
+        max_tokens_fallback: false,
+        anthropic_block_binding: true,
+    }
+}
+
+#[test]
+fn test_anthropic_replays_signed_thinking_and_rebuilds_tool_use() {
+    let val = signed_thinking_request().to_provider_json().unwrap();
+    let msgs = val["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3);
+
+    let blocks = msgs[1]["content"].as_array().expect("assistant blocks");
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(
+        blocks[0],
+        json!({"type": "thinking", "thinking": "", "signature": "sig-1"})
+    );
+    assert_eq!(blocks[1]["type"], "tool_use");
+    assert_eq!(blocks[1]["id"], "call_1");
+    assert_eq!(blocks[1]["name"], "read_file");
+    assert_eq!(blocks[1]["input"]["path"], "a.txt");
+
+    // The replay record itself must never reach the wire payload.
+    assert!(msgs[1].get("content_blocks").is_none());
+    assert!(msgs[1].get("reasoning_content").is_none());
+}
+
+#[test]
+fn test_anthropic_block_binding_option_is_gated() {
+    let val = signed_thinking_request().to_provider_json().unwrap();
+    assert_eq!(val["thinking"]["type"], "adaptive");
+    assert_eq!(
+        val["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "drop_block"
+    );
+
+    let mut req = signed_thinking_request();
+    req.anthropic_block_binding = false;
+    let val = req.to_provider_json().unwrap();
+    assert!(val.get("thinking").is_none());
+}
+
+#[test]
+fn test_anthropic_drops_unsigned_thinking_and_every_later_thinking_block() {
+    let msg = json!({
+        "role": "assistant",
+        "content": "done",
+        "content_blocks": [
+            {"type": "thinking", "thinking": "", "signature": ""},
+            {"type": "text", "text": "done"},
+            {"type": "thinking", "thinking": "", "signature": "late-sig"}
+        ]
+    });
+    let out = convert_message_for_anthropic(&msg);
+    let blocks = out["content"].as_array().unwrap();
+    // The unsigned block invalidates itself and every later thinking block;
+    // non-thinking blocks are kept in place.
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "done");
+}
+
+#[test]
+fn test_anthropic_replays_redacted_thinking() {
+    let msg = json!({
+        "role": "assistant",
+        "content": "hi",
+        "content_blocks": [
+            {"type": "redacted_thinking", "data": "opaque-data"},
+            {"type": "text", "text": "hi"}
+        ]
+    });
+    let out = convert_message_for_anthropic(&msg);
+    let blocks = out["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(
+        blocks[0],
+        json!({"type": "redacted_thinking", "data": "opaque-data"})
+    );
+}
+
+#[test]
+fn test_anthropic_legacy_reasoning_is_not_sent_as_unsigned_thinking() {
+    // Messages persisted before content_blocks existed have only
+    // reasoning_content; sending it as a thinking block would be unsigned and
+    // rejected by the API, so it is dropped.
+    let msg = json!({
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "some old reasoning"
+    });
+    let out = convert_message_for_anthropic(&msg);
+    assert!(out.get("reasoning_content").is_none());
+    assert_eq!(out["content"], "answer");
+}
+
+#[test]
+fn test_anthropic_plain_assistant_text_keeps_legacy_shape() {
+    // No content_blocks: plain assistant text must stay a string, as before.
+    let msg = json!({"role": "assistant", "content": "plain answer"});
+    let out = convert_message_for_anthropic(&msg);
+    assert_eq!(out, msg);
+}
+
+#[test]
+fn test_anthropic_non_thinking_content_blocks_keep_legacy_shape() {
+    // content_blocks without a signed thinking block must not switch shaping.
+    let msg = json!({
+        "role": "assistant",
+        "content": "done",
+        "content_blocks": [
+            {"type": "text", "text": "done"},
+            {"type": "thinking", "thinking": "", "signature": ""}
+        ]
+    });
+    let out = convert_message_for_anthropic(&msg);
+    assert_eq!(out["content"], "done");
+    assert!(out.get("content_blocks").is_none());
+}
+
+#[test]
+fn test_anthropic_tool_calls_without_content_blocks_rebuild_text_and_tool_use() {
+    let msg = json!({
+        "role": "assistant",
+        "content": "working",
+        "reasoning_content": "ignored",
+        "tool_calls": [{
+            "id": "call_9",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{\"path\":\"a.txt\"}"}
+        }]
+    });
+    let out = convert_message_for_anthropic(&msg);
+    let blocks = out["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "tool_use");
+    assert_eq!(blocks[1]["input"]["path"], "a.txt");
+}
+
+#[test]
+fn test_has_signed_thinking_requires_non_empty_signature() {
+    let mut signed = Message {
+        role: "assistant".to_string(),
+        ..Default::default()
+    };
+    signed.content_blocks = vec![json!({"type": "thinking", "signature": "sig"})];
+    assert!(has_signed_thinking(std::slice::from_ref(&signed)));
+
+    let mut unsigned = Message {
+        role: "assistant".to_string(),
+        ..Default::default()
+    };
+    unsigned.content_blocks = vec![json!({"type": "thinking", "signature": ""})];
+    assert!(!has_signed_thinking(std::slice::from_ref(&unsigned)));
+
+    let mut redacted = Message {
+        role: "assistant".to_string(),
+        ..Default::default()
+    };
+    redacted.content_blocks = vec![json!({"type": "redacted_thinking", "data": "blob"})];
+    assert!(has_signed_thinking(std::slice::from_ref(&redacted)));
+}
+
+#[test]
+fn test_content_blocks_never_leak_to_non_anthropic() {
+    for provider in [
+        LlmProvider::OpenAi,
+        LlmProvider::OpenAiResponses,
+        LlmProvider::Ollama,
+    ] {
+        let mut req = signed_thinking_request();
+        req.provider = provider;
+        let json = serde_json::to_string(&req.to_provider_json().unwrap()).unwrap();
+        assert!(
+            !json.contains("content_blocks"),
+            "content_blocks leaked into {provider}: {json}"
+        );
+        assert!(
+            !json.contains("sig-1"),
+            "signature leaked into {provider}: {json}"
+        );
+        assert!(
+            !json.contains("anthropic_block_binding"),
+            "internal flag leaked into {provider}: {json}"
+        );
+    }
+}
+
+#[test]
+fn test_anthropic_block_accumulator_reconstructs_blocks_in_order() {
+    let mut acc = AnthropicBlockAccumulator::default();
+
+    // Thinking block: empty text (display "omitted") + signature.
+    acc.handle(&json!({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "thinking", "thinking": "", "signature": ""}
+    }));
+    acc.handle(&json!({
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": ""}
+    }));
+    acc.handle(&json!({
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "signature_delta", "signature": "sig-0"}
+    }));
+    acc.handle(&json!({"type": "content_block_stop", "index": 0}));
+
+    // Text block.
+    acc.handle(&json!({
+        "type": "content_block_start", "index": 1,
+        "content_block": {"type": "text", "text": ""}
+    }));
+    acc.handle(&json!({
+        "type": "content_block_delta", "index": 1,
+        "delta": {"type": "text_delta", "text": "Hello"}
+    }));
+    acc.handle(&json!(
+        {"type": "content_block_stop", "index": 1}
+    ));
+
+    // Redacted thinking block (no deltas).
+    acc.handle(&json!({
+        "type": "content_block_start", "index": 2,
+        "content_block": {"type": "redacted_thinking", "data": "opaque"}
+    }));
+    acc.handle(&json!({"type": "content_block_stop", "index": 2}));
+
+    // Tool use: its streamed input is intentionally not stored; replay rebuilds
+    // it from the finalized `tool_calls`.
+    acc.handle(&json!({
+        "type": "content_block_start", "index": 3,
+        "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}}
+    }));
+    acc.handle(&json!({
+        "type": "content_block_delta", "index": 3,
+        "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"a.txt\"}"}
+    }));
+    acc.handle(&json!({"type": "content_block_stop", "index": 3}));
+
+    let blocks = acc.into_blocks();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(
+        blocks[0],
+        json!({"type": "thinking", "thinking": "", "signature": "sig-0"})
+    );
+    assert_eq!(blocks[1], json!({"type": "text", "text": "Hello"}));
+    assert_eq!(
+        blocks[2],
+        json!({"type": "redacted_thinking", "data": "opaque"})
+    );
+    assert_eq!(blocks[3]["type"], "tool_use");
+    assert_eq!(blocks[3]["id"], "toolu_1");
+    assert_eq!(blocks[3]["input"], json!({}));
+}
+
+#[test]
+fn test_anthropic_block_accumulator_returns_partial_blocks_when_truncated() {
+    let mut acc = AnthropicBlockAccumulator::default();
+    acc.handle(&json!({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "thinking", "thinking": "", "signature": ""}
+    }));
+    acc.handle(&json!({
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "signature_delta", "signature": "sig"}
+    }));
+    // Stream truncated before content_block_stop.
+    let blocks = acc.into_blocks();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["signature"], "sig");
 }
